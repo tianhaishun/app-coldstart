@@ -1,0 +1,16 @@
+# Python 运行产物
+__pycache__/
+*.pyc
+
+# 虚拟环境
+.venv/
+
+# Claude Code 本地配置
+.claude/
+
+# 临时文件（防御性，正常不会在项目目录）
+_cst_*.png
+_cst_*.apk
+
+# Stitch 生成的 UI 设计稿（仅作设计参考，非项目运行所需，不入版本控制）
+stitch_adaptive_responsive_shortcut_layout/

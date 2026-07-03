@@ -1,0 +1,1497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冷启动计时器 · Cold Start Timer</title>
+<!-- 开发期 Tailwind CDN；定稿后编译成 static.css 离线分发（AGENTS.md §3.3） -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          surface: '#0b1326',
+          'surface-dim': '#0b1326',
+          'surface-bright': '#31394e',
+          'surface-container-lowest': '#060d20',
+          'surface-container-low': '#131b2e',
+          'surface-container': '#171f33',
+          'surface-container-high': '#222a3e',
+          'surface-container-highest': '#2d3449',
+          'on-surface': '#dbe2fd',
+          'on-surface-variant': '#c2c6d6',
+          outline: '#8c909f',
+          'outline-variant': 'rgba(255,255,255,0.1)',
+          primary: '#adc6ff',
+          'on-primary': '#002e6a',
+          'primary-container': '#4d8eff',
+          'on-primary-container': '#00285d',
+          secondary: '#bcc7de',
+          'on-secondary': '#263143',
+          'secondary-container': '#3e495d',
+          'on-secondary-container': '#aeb9d0',
+          tertiary: '#4edea3',
+          'on-tertiary': '#003824',
+          'tertiary-container': '#00a572',
+          'on-tertiary-container': '#00311f',
+          error: '#ffb4ab',
+          'error-red': '#ffb4ab',
+          'connected-green': '#00a572',
+          warning: '#fbbf24',
+          danger: '#f87171',
+        },
+        fontFamily: {
+          sans: ['Microsoft YaHei', '微软雅黑', 'PingFang SC', 'sans-serif'],
+          mono: ['JetBrains Mono', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
+        },
+        borderRadius: { DEFAULT: '0.125rem', lg: '0.25rem', xl: '0.5rem', '2xl': '0.75rem' },
+        animation: { 'pulse-slow': 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' },
+      }
+    }
+  }
+</script>
+<style>
+  /* ═══ 设计令牌（Stitch: Nebula Tech Console）═══
+     JS 会动态注入下面这些语义类名（.hist-item / .unit / .status / .timer-state 等），
+     所以每一个都必须在这里定义好——上一版就是漏了这层导致渲染裸奔。 */
+  :root {
+    --bg: #0b1326;
+    --sc-lowest: #060d20; --sc-low: #131b2e; --sc: #171f33; --sc-high: #222a3e; --sc-highest: #2d3449;
+    --on: #dbe2fd; --on-var: #c2c6d6; --outline-var: rgba(255,255,255,.1);
+    --primary: #adc6ff; --primary-c: #4d8eff; --on-primary-c: #00285d;
+    --mint: #4edea3; --green: #00a572; --amber: #fbbf24; --danger: #f87171;
+  }
+  body { background-color: var(--bg); color: var(--on); font-family: 'Microsoft YaHei','微软雅黑','PingFang SC',sans-serif; }
+  .font-mono, .mono { font-family: 'JetBrains Mono','ui-monospace','Consolas',monospace; }
+
+  .glass-panel { background: rgba(23,31,51,.7); backdrop-filter: blur(12px); border: 1px solid var(--outline-var); }
+  .glass-dim { background: rgba(13,17,38,.6); backdrop-filter: blur(8px); }
+
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,.1); }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 4px; }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.2); }
+
+  /* ── 画面舞台 ── */
+  /* 画面放在 #stageScroll 滚动层里：放得下时 margin:auto 居中，放大后可上下/左右滚动（滚动条在最右）。
+     margin:auto 在 flex 容器里是"能放下就居中、放不下就靠左上且可滚到两端"的标准解法。
+     renderStage() 会用 className 覆盖 .stage 的类，所以定位写死在 .stage / #stageScroll 上才稳。 */
+  #stageScroll { position: absolute; inset: 0; overflow: auto; display: flex; }
+  .stage { position: relative; margin: auto; overflow: hidden; }
+  .stage.clickable { cursor: crosshair; }
+  .stage.empty { border: 1px dashed var(--outline-var); border-radius: .5rem; background: rgba(6,13,32,.5); }
+  .stage .col, .stage.empty .col { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; width: 100%; height: 100%; color: var(--on-var); font-size: 12px; text-align: center; }
+  #shot { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+  #overlay > * { pointer-events: auto; }
+  #zoomFit.on, #zoom100.on { background: var(--primary-c); border-color: var(--primary-c); color: #fff; }
+
+  /* ── 顶栏连接状态徽章（JS 用 className 整体替换成 'status ok/err'，故必须在此完整定义）── */
+  .status { display: inline-flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono',monospace; font-size: 12px;
+    padding: 4px 10px; border-radius: 9999px; border: 1px solid var(--outline-var); color: var(--on-var); background: var(--sc-high); }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--on-var); flex-shrink: 0; }
+  .status.ok { color: var(--mint); border-color: rgba(78,222,163,.35); background: rgba(0,165,114,.12); }
+  .status.ok .dot { background: var(--mint); animation: dot-pulse 1.8s ease-in-out infinite; }
+  .status.err { color: var(--danger); border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.12); }
+  .status.err .dot { background: var(--danger); }
+  @keyframes dot-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* ── 截图诊断监视器（className 整体替换成 'shot-monitor wait/ok/err'）── */
+  .shot-monitor { display: inline-flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono',monospace; font-size: 11px;
+    padding: 4px 8px; border-radius: .25rem; border: 1px solid var(--outline-var); background: var(--sc-high);
+    color: var(--on-var); min-width: 110px; justify-content: center; }
+  .shot-monitor .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--on-var); flex-shrink: 0; }
+  .shot-monitor.wait .pip { background: var(--amber); animation: dot-pulse 1s infinite; }
+  .shot-monitor.ok { border-color: rgba(78,222,163,.3); } .shot-monitor.ok .pip { background: var(--mint); }
+  .shot-monitor.err { border-color: rgba(248,113,113,.4); color: var(--danger); } .shot-monitor.err .pip { background: var(--danger); }
+
+  /* ── 计时器 ── */
+  .timer-glow { text-shadow: 0 0 24px rgba(77,142,255,.5); }
+  .unit { font-size: .32em; font-weight: 400; color: var(--on-var); margin-left: .12em; letter-spacing: 0; }
+  #display.running { color: #fff; }
+  #timerCard.running { border-top-color: var(--mint); box-shadow: inset 0 0 40px rgba(78,222,163,.08); }
+  .timer-state { font-family: 'JetBrains Mono',monospace; font-size: 12px; color: var(--on-var); margin-top: 8px; position: relative; z-index: 10; }
+  .timer-state.ok { color: var(--mint); } .timer-state.err { color: var(--danger); } .timer-state.running { color: var(--primary); }
+  #mainBtn.stop { background: #e5484d !important; color: #fff !important; }
+
+  /* ── 下一条提示（className 整体替换成 'next-hint first/second'）── */
+  .next-hint { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 12px;
+    padding: 6px 10px; border-radius: .25rem; border: 1px dashed var(--outline-var); color: var(--on-var); }
+  .next-hint.first { border-color: rgba(77,142,255,.4); background: rgba(77,142,255,.08); }
+  .next-hint.second { border-color: rgba(251,191,36,.4); background: rgba(251,191,36,.08); }
+
+  /* ── 历史记录（表格式，对齐 Stitch 测试日志）── */
+  .hist-item { display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono',monospace; font-size: 13px;
+    padding: 5px 8px; border-radius: .25rem; background: var(--sc-high); border: 1px solid transparent; }
+  .hist-item:hover { border-color: var(--outline-var); }
+  .hist-item .idx { width: 34px; color: var(--on-var); flex-shrink: 0; }
+  .hist-item .time { flex: 1; color: var(--on); }
+  .hist-item .del { margin-left: auto; width: 20px; height: 20px; line-height: 1; border: none; background: transparent;
+    color: var(--on-var); cursor: pointer; border-radius: .25rem; flex-shrink: 0; font-size: 12px; opacity: .5; transition: .15s; }
+  .hist-item .del:hover { color: var(--danger); background: rgba(248,113,113,.12); opacity: 1; }
+  .tag-type { font-size: 11px; padding: 1px 6px; border-radius: .25rem; flex-shrink: 0; font-weight: 700; }
+  .tag-first { color: var(--primary-c); background: rgba(77,142,255,.15); }
+  .tag-second { color: var(--amber); background: rgba(251,191,36,.15); }
+  .tag { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: .25rem; flex-shrink: 0; }
+  .tag.max { color: var(--danger); border: 1px solid rgba(248,113,113,.5); }
+  .tag.min { color: var(--mint); border: 1px solid rgba(78,222,163,.5); }
+  .empty-msg { text-align: center; color: var(--on-var); padding: 20px 8px; font-size: 12px; }
+  .kbd, kbd { font-family: 'JetBrains Mono',monospace; font-size: 11px; padding: 1px 6px; border-radius: .25rem;
+    background: var(--sc-high); border: 1px solid var(--outline-var); color: var(--on); box-shadow: 0 1px 0 rgba(0,0,0,.4); }
+
+  /* ── 安装日志（className 整体替换成 'install-log show ok/err'）── */
+  .install-log { display: none; margin-top: 4px; padding: 8px; border-radius: .25rem; background: var(--sc-lowest);
+    border-left: 2px solid var(--primary-c); font-family: 'JetBrains Mono',monospace; font-size: 12px;
+    white-space: pre-wrap; max-height: 120px; overflow-y: auto; color: var(--on-var); }
+  .install-log.show { display: block; }
+  .install-log.ok { border-left-color: var(--mint); } .install-log.err { border-left-color: var(--danger); color: #ffd7d3; }
+
+  /* ── 左右拖拽分隔条 ── */
+  .vsplit { width: 6px; flex-shrink: 0; cursor: col-resize; border-radius: 3px; background: transparent; transition: background .15s; align-self: stretch; }
+  .vsplit:hover { background: rgba(77,142,255,.5); }
+
+  /* ── 卡片折叠（快捷键面板）── */
+  .card.collapsed .card-body { display: none; }
+  [data-toggle] { user-select: none; }
+
+  /* ── OCR 框 ── */
+  .ocr-box { position: absolute; border: 1px solid; border-radius: 2px; transition: background .15s, transform .15s; }
+  .ocr-box.hi { border-color: rgba(78,222,163,.8); background: rgba(78,222,163,.10); }
+  .ocr-box.mid { border-color: rgba(251,191,36,.8); background: rgba(251,191,36,.10); }
+  .ocr-box.lo { border-color: rgba(248,113,113,.8); background: rgba(248,113,113,.12); animation: pulse-low 1.6s infinite; }
+  @keyframes pulse-low { 0%,100% { background: rgba(248,113,113,.12); } 50% { background: rgba(248,113,113,.22); } }
+  .ocr-box:hover { background: rgba(77,142,255,.25) !important; border-color: #4d8eff !important; transform: scale(1.04); }
+  .ocr-box .conf { position: absolute; top: -14px; left: 0; font-size: 9px; font-family: 'JetBrains Mono',monospace; background: rgba(0,0,0,.75); color: #fff; padding: 1px 4px; border-radius: 2px; pointer-events: none; }
+  .ocr-box .txt { position: absolute; top: -28px; left: 0; font-size: 10px; background: rgba(0,0,0,.85); color: #fff; padding: 2px 6px; border-radius: 3px; pointer-events: none; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+  /* ocrStats 里用到的独立文字色 */
+  .hi { color: var(--mint); } .mid { color: var(--amber); } .lo { color: var(--danger); }
+
+  .marker { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: rgba(244,63,94,.9); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.5); pointer-events: none; animation: marker-pop .3s ease-out; }
+  @keyframes marker-pop { from { transform: scale(0); } to { transform: scale(1); } }
+
+  /* ── 响应式：<1024px 三栏堆叠 ── */
+  @media (max-width: 1023px) {
+    .main-grid { flex-direction: column !important; overflow-y: auto !important; }
+    .left-col, .mid-col, .right-col { width: 100% !important; min-width: 0 !important; flex: none !important; }
+    .left-col { min-height: 70vh; }
+    .vsplit { display: none !important; }
+  }
+</style>
+</head>
+<body class="text-on-surface h-screen flex flex-col overflow-hidden">
+
+<!-- ── 顶栏 ── -->
+<header class="bg-surface-container docked full-width top-0 border-b border-outline-variant flex justify-between items-center w-full px-4 h-14 shrink-0 z-50">
+  <div class="flex items-center gap-3">
+    <span class="font-mono font-bold text-primary tracking-tight text-lg">⚡ 冷启动计时器</span>
+    <div class="h-6 w-px bg-outline-variant"></div>
+    <div class="flex items-center gap-2 bg-surface-container-high px-2 py-1 rounded border border-outline-variant">
+      <span class="text-on-surface-variant text-sm">📱</span>
+      <select id="deviceSel" class="bg-transparent border-none text-xs font-mono focus:ring-0 py-0 pl-1 pr-4 cursor-pointer text-on-surface max-w-[280px]">
+        <option value="">加载中...</option>
+      </select>
+    </div>
+    <button id="refreshDevBtn" class="p-1 text-on-surface-variant hover:text-primary transition-colors border border-outline-variant rounded hover:bg-surface-container-highest" title="重新扫描">↻</button>
+  </div>
+  <div class="flex items-center gap-3">
+    <div id="statusBadge" class="status"><span class="dot"></span><span id="statusText">检测中...</span></div>
+  </div>
+</header>
+
+<!-- ── 主区：三栏（<1024px 上下堆叠）── -->
+<main id="main" class="main-grid flex-1 flex overflow-hidden p-3 gap-3">
+
+  <!-- ═══ 左栏：设备画面 + 坐标 ═══ -->
+  <section class="left-col flex-1 flex flex-col gap-3 min-w-[360px]">
+
+    <!-- 画面工具栏 -->
+    <div class="glass-panel p-1.5 rounded flex items-center justify-between shrink-0 flex-wrap gap-1">
+      <div class="flex items-center gap-2">
+        <button id="manualShotBtn" class="flex items-center gap-1 px-2.5 py-1 bg-primary-container text-on-primary-container rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95">📸 截图</button>
+        <label class="flex items-center gap-1 text-xs font-mono cursor-pointer hover:text-primary">
+          <input id="liveToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary focus:ring-primary"> 直播
+        </label>
+        <select id="liveGap" class="bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-0.5">
+          <option value="300">极速</option>
+          <option value="600" selected>流畅</option>
+          <option value="1200">省流</option>
+          <option value="2500">节能</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="flex items-center gap-1 text-xs font-mono">
+          <input id="showBoxToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary"> OCR框
+        </label>
+        <label class="flex items-center gap-1 text-xs font-mono" title="OCR 框显示置信度">
+          <input id="showConfToggle" type="checkbox" class="rounded bg-surface-container-high border-outline-variant text-primary"> conf
+        </label>
+        <label class="flex items-center gap-1 text-xs font-mono" title="只显示 ≥ 此值的 OCR">
+          阈值
+          <input id="confRange" type="range" min="0" max="100" value="0" class="w-12">
+          <span id="confVal" class="font-mono text-xs w-8">0%</span>
+        </label>
+      </div>
+      <div class="flex items-center gap-2 ml-auto">
+        <span id="shotMonitor" class="text-xs font-mono text-on-surface-variant px-2 py-1 bg-surface-container-high border border-outline-variant rounded min-w-[110px] text-center">⏱ --</span>
+        <span id="ocrStats" class="text-xs font-mono text-on-surface-variant"></span>
+        <button id="refreshOcrBtn" class="px-2 py-1 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">OCR</button>
+      </div>
+    </div>
+
+    <!-- 画面 -->
+    <div id="stageWrap" class="flex-1 glass-panel rounded relative overflow-hidden" style="background: linear-gradient(rgba(255,255,255,.015) 1px, transparent 1px) 0 0/18px 18px, linear-gradient(90deg, rgba(255,255,255,.015) 1px, transparent 1px) 0 0/18px 18px, #060d20;">
+      <!-- 滚动层：画面放大后在此出现上下/左右滚动条；缩放控件在滚动层外，不随内容卷走 -->
+      <div id="stageScroll" class="custom-scrollbar">
+        <div id="stage" class="stage empty" style="width:260px;height:500px;">
+          <div class="flex flex-col items-center gap-2 text-on-surface-variant text-xs">
+            <div class="text-3xl">📱</div>
+            <div>初始化中...</div>
+            <div class="text-[10px]">正在检测设备</div>
+          </div>
+        </div>
+      </div>
+      <!-- 缩放控件 -->
+      <div class="absolute right-3 bottom-3 glass-dim border border-outline-variant rounded p-1.5 flex flex-col gap-1 opacity-50 hover:opacity-100 transition z-10">
+        <div class="flex items-center gap-1">
+          <button id="zoomOut" class="w-6 h-5 bg-surface-container-high border border-outline-variant rounded text-xs">−</button>
+          <span id="zoomPct" class="font-mono text-xs text-on-surface-variant min-w-[44px] text-center">适配</span>
+          <button id="zoomIn" class="w-6 h-5 bg-surface-container-high border border-outline-variant rounded text-xs">＋</button>
+        </div>
+        <div class="flex items-center gap-1">
+          <button id="zoomFit" class="on flex-1 px-2 py-0.5 bg-primary text-on-primary border border-primary rounded text-[10px]">适配</button>
+          <button id="zoom100" class="flex-1 px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded text-[10px]">1:1</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 坐标输入（按 Stitch 设计移到左栏画面下方） -->
+    <div class="glass-panel p-2 rounded flex gap-2 items-end shrink-0">
+      <div class="flex-1 grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">图标 X (0~1)</label>
+          <input id="tapX" type="number" step="0.001" min="0" max="1" placeholder="点画面拾取" class="w-full bg-surface-container-high border border-outline-variant rounded text-sm font-mono focus:ring-primary focus:border-primary py-1.5 px-2">
+        </div>
+        <div>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">图标 Y (0~1)</label>
+          <input id="tapY" type="number" step="0.001" min="0" max="1" placeholder="点画面拾取" class="w-full bg-surface-container-high border border-outline-variant rounded text-sm font-mono focus:ring-primary focus:border-primary py-1.5 px-2">
+        </div>
+      </div>
+      <button id="locateBtn" class="bg-primary-container text-on-primary-container rounded font-mono text-xs font-bold px-3 py-2 hover:brightness-110 transition active:scale-95 whitespace-nowrap" title="在画面上点一下图标位置">点画面定位</button>
+    </div>
+
+    <!-- 底部状态条 -->
+    <div id="stageInfo" class="text-xs font-mono text-on-surface-variant px-2 shrink-0 truncate">点击画面 = 设坐标 · 点 OCR 框 = 文字定位 · 滚轮缩放</div>
+  </section>
+
+  <!-- ═══ 中栏：计时器 + 操作 + 快捷键 ═══ -->
+  <section class="mid-col w-[340px] flex flex-col gap-3 shrink-0">
+
+    <!-- 计时器 -->
+    <div id="timerCard" class="glass-panel rounded p-4 flex flex-col items-center justify-center relative overflow-hidden border-t-4 border-t-primary min-h-[220px]">
+      <div class="absolute inset-0 bg-primary/5"></div>
+      <div id="display" class="text-[72px] font-mono font-bold text-on-surface relative z-10 tracking-tighter leading-none timer-glow">0.000<span class="unit">s</span></div>
+      <div id="state" class="timer-state">就绪 · 按 Space 启动</div>
+    </div>
+
+    <!-- 主按钮 -->
+    <button id="mainBtn" class="w-full py-3 bg-primary-container text-on-primary-container rounded font-sans font-bold text-base tracking-wide hover:brightness-110 transition active:scale-95 shadow-lg">按 SPACE 启动</button>
+
+    <!-- 平台选择 -->
+    <div class="glass-panel p-2 rounded flex items-center gap-3 shrink-0">
+      <span class="text-[10px] font-mono font-bold text-on-surface-variant">平台</span>
+      <label class="flex items-center gap-1 text-xs font-mono cursor-pointer"><input type="radio" name="platform" value="gp" checked class="text-primary"> GP（安卓）</label>
+      <label class="flex items-center gap-1 text-xs font-mono cursor-pointer"><input type="radio" name="platform" value="ios" class="text-primary"> iOS（-1s）</label>
+    </div>
+
+    <!-- 启动方式 + 次要操作 -->
+    <div class="glass-panel p-2 rounded flex flex-col gap-2 shrink-0">
+      <div>
+        <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动方式</label>
+        <select id="launchMode" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs py-1.5 px-2 focus:ring-primary focus:border-primary">
+          <option value="tap">模拟点击图标（真实冷启动）</option>
+          <option value="pkg">包名启动（绕过触摸）</option>
+        </select>
+      </div>
+      <div class="grid grid-cols-3 gap-1.5">
+        <button id="reinstallBtn" class="py-1.5 bg-surface-container-high border border-warning/30 text-warning hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">卸载重装</button>
+        <button id="forceStopBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs font-mono font-bold transition active:scale-95">杀进程</button>
+        <button id="backHomeBtn" class="py-1.5 bg-surface-container-high border border-outline-variant text-on-surface hover:bg-surface-container-highest rounded text-xs font-mono font-bold transition active:scale-95">回主页</button>
+      </div>
+    </div>
+
+    <!-- 下一条提示 -->
+    <div id="nextHint" class="text-xs px-2.5 py-1.5 rounded border border-dashed flex items-center gap-1.5 shrink-0"></div>
+
+    <!-- 快捷键（按 Stitch 设计，中栏底部可折叠）；class=card + id 让折叠 JS 找得到目标 -->
+    <div id="cardShortcut" class="card glass-panel rounded p-2 mt-auto border border-outline-variant shrink-0">
+      <div class="flex items-center justify-between cursor-pointer hover:text-primary text-on-surface-variant" data-toggle>
+        <span class="font-mono text-[10px] font-bold tracking-wider">⌨ 快捷键</span>
+        <span class="text-xs">▼</span>
+      </div>
+      <div class="card-body grid grid-cols-2 gap-x-3 gap-y-1 mt-2 text-xs font-mono text-on-surface-variant">
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">Space</kbd> 启动/停止</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">Q</kbd> 卸载重装</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">W</kbd> 杀进程</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">R</kbd> 清空历史</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">Del</kbd> 删最后一条</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">B/H</kbd> 返回/主页</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">F</kbd> 画面适配</div>
+        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">O</kbd> 重抓 OCR</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 拖拽分隔条：拖动调整右栏宽度（<1024px 由 CSS 隐藏）-->
+  <div id="vsplit" class="vsplit" title="拖拽调整宽度"></div>
+
+  <!-- ═══ 右栏：配置 + 统计 + 历史 ═══ -->
+  <aside id="controlPanel" class="right-col w-[420px] flex flex-col gap-3 shrink-0 overflow-y-auto pr-1 custom-scrollbar">
+
+    <!-- 应用配置 -->
+    <div id="cardConfig" class="card glass-panel rounded border border-outline-variant overflow-hidden shrink-0">
+      <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
+        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">⚙ 应用配置</span>
+        <span class="text-[10px] text-on-surface-variant">自动保存</span>
+      </div>
+      <div class="p-2.5 flex flex-col gap-2.5">
+        <div>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK 包名</label>
+          <div class="flex gap-1.5">
+            <input id="apkPkg" type="text" list="pkgList" placeholder="输入或选择已装应用" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <datalist id="pkgList"></datalist>
+            <button id="refreshAppsBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="刷新设备上的应用列表">↻</button>
+          </div>
+        </div>
+        <div>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK 文件路径（可拖拽 .apk 到此）</label>
+          <div id="apkDropZone" class="flex gap-1.5 relative">
+            <input id="apkPath" type="text" placeholder="拖拽 .apk 文件或点击浏览" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <button id="browseApkBtn" class="px-2.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:bg-surface-container-highest">浏览</button>
+            <input id="apkFileInput" type="file" accept=".apk" class="hidden">
+          </div>
+        </div>
+        <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[100px] overflow-y-auto hidden"></div>
+      </div>
+    </div>
+
+    <!-- 统计 -->
+    <div id="cardStats" class="card glass-panel rounded border border-outline-variant overflow-hidden shrink-0">
+      <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
+        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">📊 统计</span>
+        <span id="statsHint" class="text-[10px] text-on-surface-variant"></span>
+      </div>
+      <div class="p-2.5 flex flex-col gap-2">
+        <!-- 双栏分组统计 -->
+        <div class="grid grid-cols-2 gap-2">
+          <div class="bg-surface-container border-l-4 border-l-primary p-2 rounded flex flex-col">
+            <div class="flex items-center gap-1 mb-1"><span class="text-[9px] px-1.5 py-0.5 rounded font-bold bg-primary/20 text-primary">首次冷启动</span></div>
+            <div id="firstFinal" class="text-2xl font-mono font-bold text-on-surface leading-tight">—<span class="text-xs text-on-surface-variant ml-1 font-normal">s</span></div>
+            <div id="firstMeta" class="text-[10px] font-mono text-on-surface-variant mt-1 leading-relaxed">暂无数据</div>
+          </div>
+          <div class="bg-surface-container border-l-4 border-l-warning p-2 rounded flex flex-col">
+            <div class="flex items-center gap-1 mb-1"><span class="text-[9px] px-1.5 py-0.5 rounded font-bold bg-warning/20 text-warning">二次冷启动</span></div>
+            <div id="secondFinal" class="text-2xl font-mono font-bold text-on-surface leading-tight">—<span class="text-xs text-on-surface-variant ml-1 font-normal">s</span></div>
+            <div id="secondMeta" class="text-[10px] font-mono text-on-surface-variant mt-1 leading-relaxed">暂无数据</div>
+          </div>
+        </div>
+        <!-- 老的一锅烩统计 -->
+        <div class="grid grid-cols-4 gap-1.5 mt-1">
+          <div class="col-span-2 bg-gradient-to-br from-primary/30 to-primary/10 border border-primary/40 p-2 rounded">
+            <div class="text-[9px] font-mono text-on-surface-variant uppercase">全部均值（去极值）</div>
+            <div id="statAvg" class="text-lg font-mono font-bold text-white">—<span class="text-xs text-on-surface-variant ml-1 font-normal">s</span></div>
+          </div>
+          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最大</div><div id="statMax" class="text-sm font-mono font-bold text-danger">—</div></div>
+          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最小</div><div id="statMin" class="text-sm font-mono font-bold text-tertiary">—</div></div>
+        </div>
+        <div class="bg-surface-container-high px-2 py-1 rounded flex justify-between items-center">
+          <span class="text-[10px] font-mono text-on-surface-variant">总次数</span>
+          <span id="statCount" class="font-mono font-bold text-sm text-primary">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 历史记录 -->
+    <div id="cardHistory" class="card glass-panel rounded border border-outline-variant overflow-hidden flex-1 flex flex-col">
+      <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
+        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">📝 历史记录</span>
+        <span><span id="histBadge" class="text-[10px] px-1.5 py-0.5 bg-surface-container-high rounded font-mono">0</span> <span class="text-[10px] text-on-surface-variant">条</span></span>
+      </div>
+      <div id="historyList" class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-0.5 custom-scrollbar">
+        <div class="text-center text-on-surface-variant py-5 text-xs">暂无记录 · 按 <kbd class="px-1 py-0.5 bg-surface-container-high border border-outline-variant rounded text-[9px]">Space</kbd> 开始</div>
+      </div>
+      <div class="grid grid-cols-3 gap-1.5 p-2 border-t border-outline-variant shrink-0">
+        <button id="copyBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">复制报告</button>
+        <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">导出 CSV</button>
+        <button id="clearBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs">清空</button>
+      </div>
+    </div>
+  </aside>
+
+</main>
+
+<script>
+
+const API = '';
+const STORAGE_KEY = 'cst_v2_records';
+const CONFIG_KEY = 'cst_v2_config';
+const LAYOUT_KEY = 'cst_v2_layout';
+
+let records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+let config = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}');
+let layout = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+let ocrResult = null;
+let deviceReady = false;
+let tick = 0, ocrTick = 0;
+let running = false;
+// 计时核心（v1 逻辑，已验证 correct）：
+//   按 Space → fetch('/api/cold_start') 让服务端编排点击 → 响应回来后
+//   startTs = performance.now() → loop() elapsed = performance.now() - startTs
+//
+// 计时起点 = 服务端 tap 命令执行完 + 网络返回之后（漏掉了 tap 执行时间 ~200ms，
+// 偏小但每次都偏，横向对比有效）。用单一 performance.now() 时钟，不做跨进程
+// 校准——简单到一眼能看懂，不会有混时钟的 bug。
+let startTs = 0;
+let rafId = null;
+let startingLock = false;
+let markers = [];
+
+// 画面缩放状态
+let zoomMode = layout.zoomMode || 'fit';   // 'fit' | 'manual'
+let zoomPct = layout.zoomPct || 100;        // manual 模式下的百分比
+
+const $ = id => document.getElementById(id);
+
+// ── 布局持久化 ──
+function applyLayout() {
+  if (layout.panelW) {
+    document.getElementById('controlPanel').style.flexBasis = layout.panelW + 'px';
+  }
+  // 折叠状态
+  ['cardShortcut','cardConfig','cardStats','cardHistory'].forEach(id => {
+    if (layout[id + '_collapsed']) {
+      document.getElementById(id).classList.add('collapsed');
+    }
+  });
+}
+function saveLayout() { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); }
+
+// 卡片折叠
+document.querySelectorAll('[data-toggle]').forEach(head => {
+  head.addEventListener('click', () => {
+    const card = head.closest('.card');
+    card.classList.toggle('collapsed');
+    layout[card.id + '_collapsed'] = card.classList.contains('collapsed');
+    saveLayout();
+  });
+});
+
+// ── 左右拖拽 ──
+const vsplit = $('vsplit');
+const main = $('main');
+const controlPanel = $('controlPanel');
+let dragging = false;
+
+function startDrag(e) {
+  dragging = true;
+  document.body.style.cursor = 'col-resize';
+  e.preventDefault();
+}
+function onDrag(e) {
+  if (!dragging) return;
+  const rect = main.getBoundingClientRect();
+  const panelW = rect.right - e.clientX;
+  const minW = 320, maxW = Math.min(720, rect.width - 280);
+  const clamped = Math.max(minW, Math.min(maxW, panelW));
+  controlPanel.style.flexBasis = clamped + 'px';
+  layout.panelW = clamped;
+  scheduleStageResize();
+}
+function endDrag() {
+  if (!dragging) return;
+  dragging = false;
+  document.body.style.cursor = '';
+  saveLayout();
+}
+vsplit.addEventListener('mousedown', startDrag);
+window.addEventListener('mousemove', onDrag);
+window.addEventListener('mouseup', endDrag);
+vsplit.addEventListener('dblclick', () => {
+  controlPanel.style.flexBasis = '440px';
+  layout.panelW = 440;
+  saveLayout();
+  scheduleStageResize();
+});
+
+// ── 配置 ──
+function loadConfig() {
+  $('tapX').value = config.x ?? '';
+  $('tapY').value = config.y ?? '';
+  $('apkPkg').value = config.apkPkg ?? '';
+  $('apkPath').value = config.apkPath ?? '';
+  $('launchMode').value = config.launchMode ?? 'tap';
+  // 平台单选（GP/iOS）
+  const platform = config.platform || 'gp';
+  document.querySelectorAll('input[name="platform"]').forEach(r => {
+    r.checked = (r.value === platform);
+  });
+}
+function saveConfig() {
+  config.x = parseFloat($('tapX').value) || null;
+  config.y = parseFloat($('tapY').value) || null;
+  config.apkPkg = $('apkPkg').value.trim() || null;
+  config.apkPath = $('apkPath').value.trim() || null;
+  config.launchMode = $('launchMode').value;
+  const checkedPlatform = document.querySelector('input[name="platform"]:checked');
+  if (checkedPlatform) config.platform = checkedPlatform.value;
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+}
+['tapX','tapY','apkPkg','apkPath'].forEach(id => $(id).addEventListener('input', saveConfig));
+$('launchMode').addEventListener('change', saveConfig);
+// 平台切换 → 保存 + 立即重算统计（-1s 调整依赖平台）
+document.querySelectorAll('input[name="platform"]').forEach(r => {
+  r.addEventListener('change', () => { saveConfig(); renderStats(); renderHistory(); });
+});
+
+// ── 已装应用列表（包名下拉）──
+async function refreshAppList() {
+  if (!deviceReady) return;
+  const btn = $('refreshAppsBtn');
+  btn.textContent = '...';
+  try {
+    const r = await fetch(API + '/api/apps');
+    const j = await r.json();
+    const pkgs = j.apps || [];
+    $('pkgList').innerHTML = pkgs.map(p => `<option value="${p}">`).join('');
+    btn.textContent = '↻';
+    btn.title = `${pkgs.length} 个第三方应用`;
+  } catch(e) {
+    btn.textContent = '↻';
+    btn.title = '加载失败：' + e.message;
+  }
+}
+$('refreshAppsBtn').addEventListener('click', refreshAppList);
+
+// ── APK 拖拽上传 ──
+// 浏览器在 http:// 下拿不到本地完整路径（安全限制），所以走上传方案：
+// 拖拽/选择文件 → 上传到后端临时目录 → 返回路径 → 填入 apkPath 输入框
+async function uploadApkFile(file) {
+  if (!file.name.toLowerCase().endsWith('.apk')) {
+    alert('请选择 .apk 文件');
+    return;
+  }
+  $('apkPath').value = '上传中...';
+  $('apkPath').disabled = true;
+  $('browseApkBtn').disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch(API + '/api/upload_apk', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.ok) {
+      $('apkPath').value = j.path;
+      saveConfig();
+    } else {
+      alert('上传失败：' + (j.detail || '未知错误'));
+      $('apkPath').value = '';
+    }
+  } catch(e) {
+    alert('上传失败：' + e.message);
+    $('apkPath').value = '';
+  } finally {
+    $('apkPath').disabled = false;
+    $('browseApkBtn').disabled = false;
+  }
+}
+
+// 拖拽到路径输入框区域
+const dropZone = $('apkDropZone');
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.background = 'var(--primary-soft)'; });
+dropZone.addEventListener('dragleave', () => { dropZone.style.background = ''; });
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.style.background = '';
+  const file = e.dataTransfer.files[0];
+  if (file) uploadApkFile(file);
+});
+
+// 浏览按钮
+$('browseApkBtn').addEventListener('click', () => $('apkFileInput').click());
+$('apkFileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) uploadApkFile(file);
+  e.target.value = '';  // 允许重复选同一文件
+});
+
+// ── 画面尺寸自适应（fit 模式）──
+function fitStage() {
+  const stage = $('stage');
+  const wrap = $('stageWrap');
+  if (!stage || stage.classList.contains('empty')) return;
+  if (zoomMode !== 'fit') return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const pad = 24;
+  const maxW = wrapRect.width - pad;
+  const maxH = wrapRect.height - pad;
+  // 设备屏宽高比（从最近一次 OCR 或截图）
+  const ratio = ocrResult ? (ocrResult.width / ocrResult.height) : (9/19.5);
+  let w = maxW, h = w / ratio;
+  if (h > maxH) { h = maxH; w = h * ratio; }
+  stage.style.width = Math.max(100, w) + 'px';
+  stage.style.height = Math.max(100, h) + 'px';
+  $('zoomPct').textContent = '适配';
+  $('zoomFit').classList.add('on');
+  $('zoom100').classList.remove('on');
+}
+function applyManualZoom() {
+  const stage = $('stage');
+  if (!stage || stage.classList.contains('empty')) return;
+  const ratio = ocrResult ? (ocrResult.width / ocrResult.height) : (9/19.5);
+  // 以高度为基准（手机是竖屏）：填满高度，宽度按比例
+  const wrap = $('stageWrap');
+  const wrapRect = wrap.getBoundingClientRect();
+  const h = wrapRect.height - 24;
+  const w = h * ratio;
+  const factor = zoomPct / 100;
+  stage.style.width = (w * factor) + 'px';
+  stage.style.height = (h * factor) + 'px';
+  $('zoomPct').textContent = zoomPct + '%';
+  $('zoomFit').classList.remove('on');
+  $('zoom100').classList.toggle('on', zoomPct === 100);
+}
+function relayoutStage() {
+  if (zoomMode === 'fit') fitStage(); else applyManualZoom();
+}
+let resizeTimer = null;
+function scheduleStageResize() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(relayoutStage, 50);
+}
+window.addEventListener('resize', scheduleStageResize);
+
+$('zoomIn').addEventListener('click', () => { setZoom(zoomPct + 10); });
+$('zoomOut').addEventListener('click', () => { setZoom(zoomPct - 10); });
+$('zoomFit').addEventListener('click', () => { zoomMode = 'fit'; layout.zoomMode = 'fit'; saveLayout(); relayoutStage(); });
+$('zoom100').addEventListener('click', () => { setZoom(100); });
+function setZoom(p) {
+  zoomMode = 'manual';
+  zoomPct = Math.max(30, Math.min(300, p));
+  layout.zoomMode = 'manual';
+  layout.zoomPct = zoomPct;
+  saveLayout();
+  relayoutStage();
+}
+// 滚轮缩放
+$('stageWrap').addEventListener('wheel', e => {
+  if (!deviceReady) return;
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -10 : 10;
+  if (zoomMode === 'fit') { setZoom(100 + delta); return; }
+  setZoom(zoomPct + delta);
+}, { passive: false });
+
+// ── 设备 ──
+async function refreshDevices() {
+  try {
+    const r = await fetch(API + '/api/devices');
+    const j = await r.json();
+    const sel = $('deviceSel');
+    const devs = j.devices || [];
+    const cur = sel.value;
+    if (!devs.length) {
+      sel.innerHTML = '<option value="">（无设备）</option>';
+    } else {
+      sel.innerHTML = devs.map(d => {
+        const label = d.model ? `${d.model} · ${d.serial}` : `${d.serial}`;
+        const ok = d.state === 'device';
+        return `<option value="${d.serial}" ${ok?'':'disabled'}>${label}${ok?'':' ['+d.state+']'}</option>`;
+      }).join('');
+      if (cur && devs.find(d => d.serial === cur)) sel.value = cur;
+      else if (config.serial && devs.find(d => d.serial === config.serial)) sel.value = config.serial;
+    }
+    return devs;
+  } catch {
+    $('deviceSel').innerHTML = '<option value="">（后端未启动）</option>';
+    return [];
+  }
+}
+async function selectDevice(serial) {
+  if (!serial) return;
+  try {
+    await fetch(API + '/api/device/select', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({serial})
+    });
+    config.serial = serial;
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+    deviceReady = true;
+    renderStage();
+    relayoutStage();
+    // 立即打一次诊断截图（手动模式跳缓存），让用户立刻看到画面 + 验证 adb 通路
+    // 这解决了"显示未连接设备但其实连了"——其实是连上了但截图没刷过来
+    updateShotMonitor('wait', '首次截图中…');
+    await fetchShotOnce(true);
+    refreshOcr();
+    refreshAppList();  // 拉一次已装应用列表（包名下拉用）
+    // 启动直播链（如果之前没启）
+    if ($('liveToggle').checked && !liveTimer) startLive();
+  } catch(e) {
+    console.error(e);
+    updateShotMonitor('err', '连接失败：' + e.message);
+  }
+}
+$('deviceSel').addEventListener('change', e => selectDevice(e.target.value));
+$('refreshDevBtn').addEventListener('click', refreshDevices);
+
+async function checkHealth() {
+  try {
+    const r = await fetch(API + '/api/health');
+    if (r.ok) {
+      $('statusBadge').className = 'status ok';
+      $('statusText').textContent = '服务已连接';
+      return true;
+    }
+  } catch {}
+  $('statusBadge').className = 'status err';
+  $('statusText').textContent = '后端未启动';
+  deviceReady = false;
+  return false;
+}
+
+// ── 直播轮询（串行 setTimeout 链：上一次完成再发下一次，避免请求堆积）──
+// 旧版用 setInterval 盲发，浏览器会取消未完成的请求 → adb 截图白做 → 永远看不到新画面
+let liveTimer = null;
+let liveBusy = false;        // 当前是否正在等截图响应（防止重入）
+let shotStats = { ok: 0, err: 0, lastMs: 0, avgMs: 0, cacheHits: 0, total: 0 };
+
+function updateShotMonitor(state, text) {
+  const el = $('shotMonitor');
+  el.className = 'shot-monitor' + (state ? ' ' + state : '');
+  el.innerHTML = '<span class="pip"></span>' + text;
+}
+
+function fmtShotStats() {
+  const s = shotStats;
+  if (s.total === 0 && s.err === 0) return '等待中…';
+  const avg = s.avgMs ? `均${s.avgMs.toFixed(0)}ms` : '';
+  const last = s.lastMs ? `近${s.lastMs.toFixed(0)}ms` : '';
+  const okerr = `<span style="color:#4ade80">✓${s.ok}</span>/<span style="color:#f87171">✗${s.err}</span>`;
+  const cache = s.cacheHits ? `·cache×${s.cacheHits}` : '';
+  return `${last} ${avg} ${okerr} ${cache}`.trim();
+}
+
+// 核心：发起一次截图请求，统计耗时和成败，更新诊断面板
+async function fetchShotOnce(manual = false) {
+  if (liveBusy && !manual) return;  // 自动轮询重入保护；手动截图允许并发
+  liveBusy = true;
+  if (manual) updateShotMonitor('wait', '截图中…（手动）');
+  // 自动轮询不显示"加载中"（跳动膈应）：wait 阶段不动监视器，由成功/失败回调静默刷新统计行
+  const t0 = performance.now();
+  // 手动截图带 ?manual=1 跳过后端缓存，确保拿最新画面
+  // 每次带唯一 token 防止浏览器任何层级缓存
+  const url = `${API}/api/screenshot?_=${Date.now()}_${tick}${manual ? '&manual=1' : ''}`;
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const ms = performance.now() - t0;
+      shotStats.ok++;
+      shotStats.total++;
+      // 优先用后端响应头里的真实 adb 耗时（不含网络传输），更准
+      // 因为 Image 不直接暴露响应头，这里用前端总耗时近似（含网络，对本地 127.0.0.1 误差小）
+      shotStats.lastMs = ms;
+      const w = Math.min(shotStats.total, 20);
+      shotStats.avgMs = shotStats.avgMs * (1 - 1/w) + ms / w;
+      // 把图刷到画面上
+      const stageImg = document.getElementById('shot');
+      if (stageImg) stageImg.src = img.src;
+      updateShotMonitor('ok', fmtShotStats());
+      liveBusy = false;
+      resolve(true);
+    };
+    img.onerror = () => {
+      shotStats.err++;
+      shotStats.lastMs = performance.now() - t0;
+      updateShotMonitor('err', `失败 ✗${shotStats.err} · 点「截图」重试`);
+      liveBusy = false;
+      resolve(false);
+    };
+    img.src = url;
+  });
+}
+
+function startLive() {
+  stopLive();
+  const gap = parseInt($('liveGap').value);
+  // 串行链：发请求 → 等响应 → 间隔 gap → 再发下一次
+  // 这样永远只有一个截图请求在飞，浏览器不会取消，adb 不会白做
+  const loop = async () => {
+    if (!liveTimer) return;  // 已 stop
+    if (deviceReady && $('liveToggle').checked) {
+      await fetchShotOnce(false);
+    }
+    if (!liveTimer) return;
+    liveTimer = setTimeout(loop, gap);
+  };
+  liveTimer = setTimeout(loop, 100);  // 立即开始第一次
+  updateShotMonitor('', '已启动轮询');
+}
+function stopLive() {
+  if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+  liveBusy = false;
+}
+$('liveToggle').addEventListener('change', e => e.target.checked ? startLive() : stopLive());
+$('liveGap').addEventListener('change', () => $('liveToggle').checked && startLive());
+
+// 手动截图按钮：跳过缓存，强制拿最新画面，无论直播开关状态
+$('manualShotBtn').addEventListener('click', () => fetchShotOnce(true));
+
+// 旧的 refreshShot 不再使用（保留兼容）
+function refreshShot() { tick++; return fetchShotOnce(false); }
+
+function renderStage() {
+  const stage = $('stage');
+  if (!deviceReady) {
+    stage.className = 'stage empty';
+    // 区分两种情况：有设备但没选 vs 完全没设备
+    const sel = $('deviceSel');
+    const hasDevice = sel && sel.options.length > 0 && sel.options[0].value !== '';
+    const msg = hasDevice ? '请选择设备' : '未检测到设备';
+    const tip = hasDevice ? '顶部下拉框选一台' : '请连接手机并开 USB 调试';
+    stage.innerHTML = `<div class="col"><div style="font-size:28px;">📱</div><div>${msg}</div><div style="font-size:10px;">${tip}</div></div>`;
+    return;
+  }
+  stage.className = 'stage clickable';
+  stage.innerHTML = `<img id="shot" src="${shotUrl()}" draggable="false"><div id="overlay"></div>`;
+  stage.onclick = e => {
+    if (e.target.classList.contains('ocr-box')) return;
+    const r = stage.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    const y = (e.clientY - r.top) / r.height;
+    setCoords(x, y, '画面点击');
+  };
+}
+function shotUrl() { return `${API}/api/screenshot?_=${Date.now()}_${tick}`; }
+// refreshShot 已在直播模块定义（fetchShotOnce 包装）
+void refreshShot;
+
+// ── OCR ──
+function renderOcrBoxes() {
+  const overlay = document.getElementById('overlay');
+  if (!overlay) return;
+  overlay.innerHTML = '';
+  if (!$('showBoxToggle').checked || !ocrResult) return;
+  const minConf = parseInt($('confRange').value) / 100;
+  for (const it of ocrResult.items) {
+    if (it.confidence < minConf) continue;
+    const cls = it.confidence >= 0.8 ? 'hi' : it.confidence >= 0.6 ? 'mid' : 'lo';
+    const div = document.createElement('div');
+    div.className = `ocr-box ${cls}`;
+    div.style.left = `${(it.cx - it.w/2) * 100}%`;
+    div.style.top = `${(it.cy - it.h/2) * 100}%`;
+    div.style.width = `${it.w * 100}%`;
+    div.style.height = `${it.h * 100}%`;
+    div.title = `${it.text} (${(it.confidence*100).toFixed(0)}%)`;
+    if ($('showConfToggle').checked) {
+      const c = document.createElement('span'); c.className = 'conf';
+      c.textContent = Math.round(it.confidence*100);
+      div.appendChild(c);
+    }
+    div.addEventListener('mouseenter', () => {
+      if (div.querySelector('.txt')) return;
+      const t = document.createElement('span'); t.className = 'txt'; t.textContent = it.text;
+      div.appendChild(t);
+    });
+    div.addEventListener('mouseleave', () => {
+      const t = div.querySelector('.txt'); if (t) t.remove();
+    });
+    div.addEventListener('click', e => {
+      e.stopPropagation();
+      setCoords(it.cx, it.cy, `OCR：${it.text}`);
+    });
+    overlay.appendChild(div);
+  }
+  for (const m of markers) {
+    const d = document.createElement('div'); d.className = 'marker';
+    d.style.left = `${m.x * 100}%`; d.style.top = `${m.y * 100}%`;
+    overlay.appendChild(d);
+  }
+}
+$('showBoxToggle').addEventListener('change', renderOcrBoxes);
+$('showConfToggle').addEventListener('change', renderOcrBoxes);
+$('confRange').addEventListener('input', e => {
+  $('confVal').textContent = e.target.value + '%';
+  renderOcrBoxes();
+});
+function updateOcrStats() {
+  const el = $('ocrStats');
+  if (!ocrResult || !ocrResult.stats || !ocrResult.stats.count) { el.innerHTML = ''; return; }
+  const s = ocrResult.stats;
+  el.innerHTML = `OCR 均 ${(s.mean*100).toFixed(0)}% · <span class="hi">≥80 ×${s.ge_0_8}</span> <span class="mid">60-80 ×${s.ge_0_6_lt_0_8}</span> <span class="lo"><60 ×${s.lt_0_6}</span>`;
+}
+async function refreshOcr() {
+  if (!deviceReady) return;
+  try {
+    const r = await fetch(API + '/api/ocr');
+    if (!r.ok) return;
+    ocrResult = await r.json();
+    ocrTick++;
+    // OCR 用了独立的截图，画面要同步刷新一次（直播时下次循环会自然跟上，
+    // 但手动 OCR 后立即刷一下反馈更直接）
+    if (!$('liveToggle').checked) fetchShotOnce(true);
+    renderOcrBoxes();
+    updateOcrStats();
+    $('stageInfo').innerHTML = `分辨率 <b>${ocrResult.width}×${ocrResult.height}</b> · OCR <b>${ocrResult.stats.count}</b> 条`;
+    relayoutStage();
+  } catch(e) { console.warn('OCR failed', e); }
+}
+$('refreshOcrBtn').addEventListener('click', refreshOcr);
+// refreshShotBtn 已合并到顶部「📸 截图」按钮（manualShotBtn）
+
+// ── 坐标点选 ──
+function setCoords(x, y, source) {
+  $('tapX').value = x.toFixed(4);
+  $('tapY').value = y.toFixed(4);
+  saveConfig();
+  markers = [{x, y}];
+  renderOcrBoxes();
+  setTimeout(() => { markers = []; renderOcrBoxes(); }, 2000);
+  fetch(API + '/api/tap', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({x, y, norm: true})
+  }).then(() => setTimeout(refreshOcr, 400)).catch(() => {});
+  setState('ok', `坐标已设置 (${x.toFixed(3)}, ${y.toFixed(3)}) · ${source}`);
+}
+$('locateBtn').addEventListener('click', () => setState('', '请在左侧画面上点一下 App 图标位置'));
+
+// ── 计时器 ──
+function fmt(ms) { return (ms / 1000).toFixed(3); }
+function setState(kind, text) {
+  $('state').className = 'timer-state' + (kind ? ' ' + kind : '');
+  $('state').textContent = text;
+}
+function loop() {
+  const elapsedMs = performance.now() - startTs;
+  $('display').innerHTML = fmt(elapsedMs) + '<span class="unit">s</span>';
+  rafId = requestAnimationFrame(loop);
+}
+async function startTimer() {
+  if (startingLock || running) return;
+  startingLock = true;
+  const mode = $('launchMode').value;
+  const x = parseFloat($('tapX').value);
+  const y = parseFloat($('tapY').value);
+  const pkg = $('apkPkg').value.trim();
+  if (mode === 'tap' && (!x || !y)) { setState('err','⚠ 请先在画面上点图标位置'); startingLock = false; return; }
+  if (mode === 'pkg' && !pkg) { setState('err','⚠ pkg 模式需要包名'); startingLock = false; return; }
+
+  setState('running', '冷启动中...');
+  $('mainBtn').disabled = true;
+  try {
+    const body = { mode, package: pkg || null };
+    if (mode === 'tap') { body.x = x; body.y = y; }
+    const r = await fetch(API + '/api/cold_start', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.detail || 'failed');
+    // v1 逻辑：响应回来后直接打点。单一 performance.now() 时钟，不校准。
+    startTs = performance.now();
+    running = true;
+    $('display').classList.add('running');
+    $('timerCard').classList.add('running');
+    $('mainBtn').textContent = '按 SPACE 停止';
+    $('mainBtn').classList.add('stop');
+    $('mainBtn').disabled = false;
+    setState('running', '计时中 · 看到关卡按钮再按 Space');
+    loop();
+  } catch(e) {
+    setState('err', '✗ ' + e.message);
+    $('mainBtn').disabled = false;
+  } finally { startingLock = false; }
+}
+function stopTimer() {
+  if (!running) return;
+  running = false;
+  cancelAnimationFrame(rafId);
+  const elapsedMs = performance.now() - startTs;
+  $('display').classList.remove('running');
+  $('timerCard').classList.remove('running');
+  $('mainBtn').classList.remove('stop');
+  $('mainBtn').textContent = '按 SPACE 启动';
+  setState('ok', `已记录 ${fmt(elapsedMs)}s · 按 Space 继续`);
+  records.push({ time: elapsedMs, date: new Date().toISOString() });
+  saveRecords(); renderHistory(); renderStats();
+}
+$('mainBtn').addEventListener('click', () => running ? stopTimer() : startTimer());
+
+// ── 历史/统计 ──
+function saveRecords() { localStorage.setItem(STORAGE_KEY, JSON.stringify(records)); }
+function computeStats() {
+  if (!records.length) return { avg: null, max: null, min: null, maxIdx: -1, minIdx: -1 };
+  const t = records.map(r => r.time);
+  const max = Math.max(...t), min = Math.min(...t);
+  const maxIdx = t.indexOf(max), minIdx = t.indexOf(min);
+  let avg;
+  if (records.length >= 3) {
+    const rest = t.filter((_, i) => i !== maxIdx && i !== minIdx);
+    avg = rest.reduce((a, b) => a + b, 0) / rest.length;
+  } else {
+    avg = t.reduce((a, b) => a + b, 0) / t.length;
+  }
+  return { avg, max, min, maxIdx, minIdx };
+}
+
+// 分组统计：首次冷启动（奇数序号）和二次冷启动（偶数序号）各自独立截尾平均。
+// 按显示序号（1-based）：#01=首次，#02=二次，#03=首次...
+// 详见 AGENTS.md §2.3。每组独立剔 1 max + 1 min，iOS 首次 -1 秒。
+function computeStatsGrouped() {
+  const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
+  const first = [], second = [];
+  records.forEach((r, i) => {
+    const displayIdx = i + 1;
+    if (displayIdx % 2 === 1) first.push({ ...r, displayIdx });
+    else second.push({ ...r, displayIdx });
+  });
+
+  function trimMean(group) {
+    if (!group.length) return null;
+    const values = group.map(g => g.time);
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const maxIdx = values.indexOf(max);
+    const minIdx = values.indexOf(min);
+    if (group.length >= 3) {
+      // 剔 1 max + 1 min（并列只剔第一个匹配）
+      const kept = group.filter((_, i) => i !== maxIdx && i !== minIdx);
+      const mean = kept.reduce((s, g) => s + g.time, 0) / kept.length;
+      return {
+        raw: values,
+        dropped_max: { idx: group[maxIdx].displayIdx, value: max },
+        dropped_min: { idx: group[minIdx].displayIdx, value: min },
+        kept: kept.map(g => g.time),
+        mean: mean,
+      };
+    } else if (group.length > 0) {
+      // 不足 3 条，全量平均（不剔）
+      const mean = values.reduce((s, v) => s + v, 0) / values.length;
+      return { raw: values, dropped_max: null, dropped_min: null, kept: values, mean, warning: '不足 3 条，未去极值' };
+    }
+    return null;
+  }
+
+  const firstResult = trimMean(first);
+  const secondResult = trimMean(second);
+  const firstAdjustMs = platform === 'ios' ? -1000 : 0;  // iOS 首次 -1 秒
+  const secondAdjustMs = 0;
+
+  return {
+    platform,
+    first: firstResult ? {
+      ...firstResult,
+      adjustment: firstAdjustMs,
+      final: firstResult.mean + firstAdjustMs,
+    } : null,
+    second: secondResult ? {
+      ...secondResult,
+      adjustment: secondAdjustMs,
+      final: secondResult.mean + secondAdjustMs,
+    } : null,
+    counts: { first: first.length, second: second.length },
+  };
+}
+
+function renderStats() {
+  const s = computeStats();
+  // 老的一锅烩统计（保留作对照）
+  $('statCount').textContent = records.length;
+  $('statMax').innerHTML = s.max !== null ? fmt(s.max) + '<span class="unit">s</span>' : '—';
+  $('statMin').innerHTML = s.min !== null ? fmt(s.min) + '<span class="unit">s</span>' : '—';
+  $('statAvg').innerHTML = s.avg !== null ? fmt(s.avg) + '<span class="unit">s</span>' : '—<span class="unit">s</span>';
+  $('statsHint').textContent = records.length === 0 ? '' : records.length < 3 ? '至少 3 条才去极值' : `去极值 · 中间 ${records.length-2} 个`;
+
+  // 新的分组统计（首次/二次）
+  const gs = computeStatsGrouped();
+  const fmtDrop = d => d ? `#${d.idx}(${fmt(d.value)}s)` : '—';
+  const fmtArr = arr => arr && arr.length ? arr.map(v => fmt(v)).join(', ') : '—';
+
+  // 首次冷启动栏
+  if (gs.first) {
+    $('firstFinal').innerHTML = fmt(gs.first.final) + '<span class="unit">s</span>';
+    let meta = `${gs.counts.first}样本 · 剔 Max ${fmtDrop(gs.first.dropped_max)} Min ${fmtDrop(gs.first.dropped_min)}`;
+    if (gs.first.adjustment !== 0) meta += ` · 调整 ${gs.first.adjustment/1000}s`;
+    if (gs.first.warning) meta += ` · ⚠ ${gs.first.warning}`;
+    $('firstMeta').textContent = meta;
+  } else {
+    $('firstFinal').innerHTML = '—<span class="unit">s</span>';
+    $('firstMeta').textContent = '暂无数据';
+  }
+  // 二次冷启动栏
+  if (gs.second) {
+    $('secondFinal').innerHTML = fmt(gs.second.final) + '<span class="unit">s</span>';
+    let meta = `${gs.counts.second}样本 · 剔 Max ${fmtDrop(gs.second.dropped_max)} Min ${fmtDrop(gs.second.dropped_min)}`;
+    if (gs.second.warning) meta += ` · ⚠ ${gs.second.warning}`;
+    $('secondMeta').textContent = meta;
+  } else {
+    $('secondFinal').innerHTML = '—<span class="unit">s</span>';
+    $('secondMeta').textContent = '暂无数据';
+  }
+
+  // 下一条提示（帮用户保持"卸装→测→测"节奏）
+  const nextIdx = records.length + 1;       // 下一条的显示序号
+  const nextIsFirst = nextIdx % 2 === 1;
+  const hintEl = $('nextHint');
+  if (nextIsFirst) {
+    hintEl.className = 'next-hint first';
+    hintEl.innerHTML = '<span class="tag-first" style="font-size:9px;padding:1px 5px;border-radius:2px;background:rgba(59,130,243,.25);color:#93c5fd;">首次</span> 下一条应是 <b style="color:#93c5fd;">首次冷启动</b> · 请先卸载重装，再按 Space';
+  } else {
+    hintEl.className = 'next-hint second';
+    hintEl.innerHTML = '<span class="tag-second" style="font-size:9px;padding:1px 5px;border-radius:2px;background:rgba(245,158,11,.25);color:#fcd34d;">二次</span> 下一条应是 <b style="color:#fcd34d;">二次冷启动</b> · 杀进程后按 Space（不要卸载）';
+  }
+}
+function renderHistory() {
+  const el = $('historyList');
+  $('histBadge').textContent = records.length;
+  if (!records.length) {
+    el.innerHTML = '<div class="empty-msg">暂无记录 · 按 <span class="kbd" style="font-size:9px;">Space</span> 开始</div>';
+    return;
+  }
+  const s = computeStats();
+  const gs = computeStatsGrouped();
+  // 建一个"序号 → 是否被分组剔除"的查找表
+  const droppedMap = {};  // displayIdx -> 'max_first' / 'min_first' / 'max_second' / 'min_second'
+  if (gs.first && gs.first.dropped_max) droppedMap[gs.first.dropped_max.idx] = 'max_first';
+  if (gs.first && gs.first.dropped_min) droppedMap[gs.first.dropped_min.idx] = 'min_first';
+  if (gs.second && gs.second.dropped_max) droppedMap[gs.second.dropped_max.idx] = 'max_second';
+  if (gs.second && gs.second.dropped_min) droppedMap[gs.second.dropped_min.idx] = 'min_second';
+
+  el.innerHTML = records.map((r, i) => {
+    const displayIdx = i + 1;
+    const isOdd = displayIdx % 2 === 1;
+    const typeTag = isOdd
+      ? '<span class="tag-type tag-first">首</span>'
+      : '<span class="tag-type tag-second">二</span>';
+    // 分组剔除标记（优先显示，比老的一锅烩 MAX/MIN 更准确）
+    let tag = '';
+    const drop = droppedMap[displayIdx];
+    if (drop === 'max_first' || drop === 'max_second') tag = '<span class="tag max">MAX</span>';
+    else if (drop === 'min_first' || drop === 'min_second') tag = '<span class="tag min">MIN</span>';
+    // 老的一锅烩标记（如果分组没剔但一锅烩剔了，显示小字）
+    else if (records.length >= 3) {
+      if (i === s.maxIdx) tag = '<span class="tag max" style="opacity:.5" title="全部一起算时剔除">MAX*</span>';
+      else if (i === s.minIdx) tag = '<span class="tag min" style="opacity:.5" title="全部一起算时剔除">MIN*</span>';
+    }
+    return `<div class="hist-item"><span class="idx">#${String(displayIdx).padStart(2,'0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}<button class="del" data-idx="${i}">✕</button></div>`;
+  }).reverse().join('');
+  el.querySelectorAll('.del').forEach(b => b.addEventListener('click', e => {
+    const idx = parseInt(e.target.dataset.idx);
+    records.splice(idx, 1); saveRecords(); renderHistory(); renderStats();
+  }));
+}
+function removeLast() { if (!records.length) return; records.pop(); saveRecords(); renderHistory(); renderStats(); }
+function clearAll() {
+  if (!records.length) return;
+  if (!confirm(`清空全部 ${records.length} 条？`)) return;
+  records = []; saveRecords(); renderHistory(); renderStats();
+  setState('', '已清空');
+}
+$('clearBtn').addEventListener('click', clearAll);
+
+// ── 操作 ──
+async function reinstall() {
+  const pkg = $('apkPkg').value.trim();
+  const apkPath = $('apkPath').value.trim();
+  const log = $('installLog');
+  if (!pkg || !apkPath) {
+    log.className = 'install-log show err'; log.textContent = '⚠ 请先填 APK 包名 和 文件路径'; return;
+  }
+  if (!confirm(`确认卸载并重装？\n包名：${pkg}\nAPK：${apkPath}`)) return;
+  const btn = $('reinstallBtn');
+  btn.disabled = true; btn.textContent = '处理中...';
+  log.className = 'install-log show'; log.textContent = '正在卸载旧版本...';
+  try {
+    const r = await fetch(API + '/api/reinstall', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({package: pkg, apk_path: apkPath})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      log.className = 'install-log show ok';
+      log.textContent = '✓ 卸载重装成功\n\n' + (j.log || []).join('\n');
+      setState('ok', '重装成功 · 可以开始测试首启动');
+    } else {
+      log.className = 'install-log show err';
+      log.textContent = '✗ ' + (j.error || '失败') + '\n\n' + (j.log || []).join('\n');
+    }
+  } catch(e) {
+    log.className = 'install-log show err'; log.textContent = '✗ ' + e.message;
+  } finally { btn.disabled = false; btn.textContent = '卸载重装'; }
+}
+async function forceStop() {
+  const pkg = $('apkPkg').value.trim();
+  if (!pkg) { setState('err', '⚠ 请先填包名'); return; }
+  try {
+    await fetch(API + '/api/force_stop', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({package: pkg})
+    });
+    setState('ok', `已杀进程：${pkg}`);
+  } catch(e) { setState('err', '✗ ' + e.message); }
+}
+async function pressKey(code) {
+  try {
+    await fetch(API + '/api/key', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code})
+    });
+    setTimeout(refreshOcr, 300);
+  } catch(e) {}
+}
+$('reinstallBtn').addEventListener('click', reinstall);
+$('forceStopBtn').addEventListener('click', forceStop);
+$('backHomeBtn').addEventListener('click', () => pressKey(3));
+
+// ── 报告/CSV ──
+function buildReport() {
+  const s = computeStats();
+  const gs = computeStatsGrouped();
+  const platform = gs.platform === 'ios' ? 'iOS（首次 -1s）' : 'GP（安卓）';
+  const now = new Date().toLocaleString('zh-CN', { hour12: false });
+  const L = [];
+  L.push('══════════════════════════════════════════');
+  L.push('   冷启动性能测试报告');
+  L.push('══════════════════════════════════════════');
+  L.push('');
+  L.push(`测试时间    ${now}`);
+  L.push(`设备        ${$('deviceSel').selectedOptions[0]?.text || '—'}`);
+  if (ocrResult) L.push(`分辨率      ${ocrResult.width} × ${ocrResult.height}`);
+  L.push(`平台        ${platform}`);
+  L.push(`启动方式    ${$('launchMode').value === 'pkg' ? '包名启动' : '模拟点击'}`);
+  L.push(`应用包名    ${$('apkPkg').value || '—'}`);
+  L.push('');
+
+  // 分组统计：首次冷启动
+  L.push(`── 首次冷启动（${gs.counts.first} 次） ──`);
+  if (gs.first) {
+    records.forEach((r, i) => {
+      if ((i+1) % 2 !== 1) return;  // 只看奇数
+      let tag = '';
+      if (gs.first.dropped_max && gs.first.dropped_max.idx === i+1) tag = '   ← 最大（剔除）';
+      else if (gs.first.dropped_min && gs.first.dropped_min.idx === i+1) tag = '   ← 最小（剔除）';
+      L.push(`  #${String(i+1).padStart(2,'0')}   ${fmt(r.time)} s${tag}`);
+    });
+    L.push(`  代表值（去极值）= ${fmt(gs.first.mean)} s`);
+    if (gs.first.adjustment !== 0) L.push(`  平台调整 = ${gs.first.adjustment/1000} s`);
+    if (gs.first.warning) L.push(`  ⚠ ${gs.first.warning}`);
+    L.push(`  ★ 最终值 = ${fmt(gs.first.final)} s`);
+  } else {
+    L.push('  （暂无数据）');
+  }
+  L.push('');
+
+  // 分组统计：二次冷启动
+  L.push(`── 二次冷启动（${gs.counts.second} 次） ──`);
+  if (gs.second) {
+    records.forEach((r, i) => {
+      if ((i+1) % 2 !== 0) return;  // 只看偶数
+      let tag = '';
+      if (gs.second.dropped_max && gs.second.dropped_max.idx === i+1) tag = '   ← 最大（剔除）';
+      else if (gs.second.dropped_min && gs.second.dropped_min.idx === i+1) tag = '   ← 最小（剔除）';
+      L.push(`  #${String(i+1).padStart(2,'0')}   ${fmt(r.time)} s${tag}`);
+    });
+    L.push(`  代表值（去极值）= ${fmt(gs.second.mean)} s`);
+    if (gs.second.warning) L.push(`  ⚠ ${gs.second.warning}`);
+    L.push(`  ★ 最终值 = ${fmt(gs.second.final)} s`);
+  } else {
+    L.push('  （暂无数据）');
+  }
+  L.push('');
+
+  // 老的"全部一起算"统计（保留作对照参考）
+  L.push(`── 全部记录一锅烩（对照参考） ──`);
+  L.push(`  最大值 ${fmt(s.max)} s · 最小值 ${fmt(s.min)} s · 去极值均值 ${fmt(s.avg)} s`);
+  L.push('');
+
+  L.push(`── 数据说明 ──`);
+  L.push(`  · 起点误差：漏掉 adb input tap 工具链执行时间（约 150-250ms，每次`);
+  L.push(`    都漏，横向对比不受影响）`);
+  L.push(`  · 终点误差：人工按键停止（反应时间约 250-400ms，系统性正偏——你永远`);
+  L.push(`    "看到之后"才按，绝对值偏高约 0.3s）`);
+  L.push(`  · 结论：同设备同 APK 横向对比有效；绝对值仅供参考；差异 <~0.3s 视为`);
+  L.push(`    噪声，>0.5s 才值得当结论`);
+  L.push('══════════════════════════════════════════');
+  return L.join('\n');
+}
+$('copyBtn').addEventListener('click', () => {
+  if (!records.length) return;
+  navigator.clipboard.writeText(buildReport()).then(() => {
+    const b = $('copyBtn'); const t = b.textContent;
+    b.textContent = '✓ 已复制'; setTimeout(() => b.textContent = t, 1200);
+  });
+});
+$('csvBtn').addEventListener('click', () => {
+  if (!records.length) return;
+  const s = computeStats();
+  const gs = computeStatsGrouped();
+  const platform = gs.platform;
+  const L = [];
+  L.push('# 冷启动性能测试报告');
+  L.push(`# 测试时间,${new Date().toLocaleString('zh-CN')}`);
+  L.push(`# 设备,${$('deviceSel').selectedOptions[0]?.text || ''}`);
+  if (ocrResult) L.push(`# 分辨率,${ocrResult.width}×${ocrResult.height}`);
+  L.push(`# 平台,${platform}`);
+  L.push(`# 启动方式,${$('launchMode').value === 'pkg' ? '包名启动' : '模拟点击'}`);
+  L.push(`# 应用包名,${$('apkPkg').value || ''}`);
+  L.push('# 数据说明,起点漏 adb input 执行(~150-250ms); 终点含人工反应(偏高~0.3s)');
+  L.push('# 可比性,同设备同APK横向对比有效; 差异<~0.3s视为噪声');
+  L.push('');
+  L.push('序号,类型,耗时(s),采集时间,状态');
+  // 建分组剔除查找表
+  const droppedMap = {};
+  if (gs.first && gs.first.dropped_max) droppedMap[gs.first.dropped_max.idx] = '剔除(首次最大)';
+  if (gs.first && gs.first.dropped_min) droppedMap[gs.first.dropped_min.idx] = '剔除(首次最小)';
+  if (gs.second && gs.second.dropped_max) droppedMap[gs.second.dropped_max.idx] = '剔除(二次最大)';
+  if (gs.second && gs.second.dropped_min) droppedMap[gs.second.dropped_min.idx] = '剔除(二次最小)';
+  records.forEach((r, i) => {
+    const displayIdx = i + 1;
+    const type = displayIdx % 2 === 1 ? '首次' : '二次';
+    const st = droppedMap[displayIdx] || '有效';
+    L.push(`${displayIdx},${type},${fmt(r.time)},${new Date(r.date).toLocaleString('zh-CN')},${st}`);
+  });
+  L.push('');
+  L.push('# 首次冷启动统计');
+  if (gs.first) {
+    L.push(`# 首次_样本数,${gs.counts.first}`);
+    L.push(`# 首次_剔除最大,#${gs.first.dropped_max ? gs.first.dropped_max.idx + '(' + fmt(gs.first.dropped_max.value) + 's)' : '无'}`);
+    L.push(`# 首次_剔除最小,#${gs.first.dropped_min ? gs.first.dropped_min.idx + '(' + fmt(gs.first.dropped_min.value) + 's)' : '无'}`);
+    L.push(`# 首次_去极值均值,${fmt(gs.first.mean)}s`);
+    L.push(`# 首次_平台调整,${gs.first.adjustment/1000}s`);
+    L.push(`# 首次_最终值,${fmt(gs.first.final)}s`);
+  }
+  L.push('');
+  L.push('# 二次冷启动统计');
+  if (gs.second) {
+    L.push(`# 二次_样本数,${gs.counts.second}`);
+    L.push(`# 二次_剔除最大,#${gs.second.dropped_max ? gs.second.dropped_max.idx + '(' + fmt(gs.second.dropped_max.value) + 's)' : '无'}`);
+    L.push(`# 二次_剔除最小,#${gs.second.dropped_min ? gs.second.dropped_min.idx + '(' + fmt(gs.second.dropped_min.value) + 's)' : '无'}`);
+    L.push(`# 二次_去极值均值,${fmt(gs.second.mean)}s`);
+    L.push(`# 二次_最终值,${fmt(gs.second.final)}s`);
+  }
+  L.push('');
+  L.push('# 全部记录一锅烩(对照参考)');
+  L.push(`最大值,${fmt(s.max)} s`);
+  L.push(`最小值,${fmt(s.min)} s`);
+  L.push(`去极值均值,${fmt(s.avg)} s`);
+  const blob = new Blob(['\uFEFF' + L.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `冷启动_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+  a.click();
+});
+
+// ── 快捷键 ──
+document.addEventListener('keydown', e => {
+  if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if (e.code === 'Space') { e.preventDefault(); running ? stopTimer() : startTimer(); }
+  else if (e.key === 'Delete') { e.preventDefault(); removeLast(); }
+  else if (e.key.toLowerCase() === 'q') { e.preventDefault(); reinstall(); }
+  else if (e.key.toLowerCase() === 'w') { e.preventDefault(); forceStop(); }
+  else if (e.key.toLowerCase() === 'r') { e.preventDefault(); clearAll(); }
+  else if (e.key.toLowerCase() === 'b') { e.preventDefault(); pressKey(4); }
+  else if (e.key.toLowerCase() === 'h') { e.preventDefault(); pressKey(3); }
+  else if (e.key.toLowerCase() === 'o') { e.preventDefault(); refreshOcr(); }
+  else if (e.key.toLowerCase() === 'f') { e.preventDefault(); zoomMode='fit'; layout.zoomMode='fit'; saveLayout(); relayoutStage(); }
+});
+
+// ── 启动 ──
+applyLayout();
+loadConfig();
+renderStats();
+renderHistory();
+(async function init() {
+  await checkHealth();
+  const devs = await refreshDevices();
+  // 自动选中设备：优先用上次保存的 serial，否则取第一台可用设备
+  // 这是测试工具——绝大多数情况只连一台机器，不该让用户每次手动选
+  const ready = devs.filter(d => d.state === 'device');
+  let target = null;
+  if (ready.length > 0) {
+    if (config.serial && ready.find(d => d.serial === config.serial)) {
+      target = config.serial;
+    } else {
+      target = ready[0].serial;
+    }
+  }
+  if (target) {
+    $('deviceSel').value = target;
+    await selectDevice(target);
+  }
+  // 后台 3 个轮询（health/设备监控/OCR）—— 可被 visibilitychange 暂停
+  // 用对象集中管理，便于切回前台时恢复
+  const pollers = {
+    health: null,
+    devices: null,
+    ocr: null,
+  };
+  pollers.health = setInterval(checkHealth, 5000);
+  pollers.devices = setInterval(async () => {
+    const before = deviceReady ? $('deviceSel').value : null;
+    const list = await refreshDevices();
+    const currentOk = list.find(d => d.serial === before && d.state === 'device');
+    if (!currentOk) {
+      const ready2 = list.filter(d => d.state === 'device');
+      if (ready2.length > 0 && (!deviceReady || !currentOk)) {
+        const newTarget = ready2[0].serial;
+        if (newTarget !== before) {
+          $('deviceSel').value = newTarget;
+          await selectDevice(newTarget);
+        }
+      }
+    }
+  }, 5000);
+  pollers.ocr = setInterval(() => { if (deviceReady && $('liveToggle').checked) refreshOcr(); }, 3000);
+
+  // 标签页隐藏时暂停所有轮询（避免后台空转烧 CPU）；切回前台时恢复
+  // 这是 72 小时连续运行 CPU 占用 40% 的根因：直播链 + 3 个 setInterval 在后台标签一直跑
+  let wasLiveOn = false;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // 隐藏：暂停直播链 + 3 个后台轮询
+      wasLiveOn = !!liveTimer;
+      stopLive();
+      Object.values(pollers).forEach(id => id && clearInterval(id));
+      pollers.health = pollers.devices = pollers.ocr = null;
+    } else {
+      // 可见：恢复
+      if (pollers.health === null) {
+        pollers.health = setInterval(checkHealth, 5000);
+        pollers.devices = setInterval(async () => {
+          const before = deviceReady ? $('deviceSel').value : null;
+          const list = await refreshDevices();
+          const currentOk = list.find(d => d.serial === before && d.state === 'device');
+          if (!currentOk) {
+            const ready2 = list.filter(d => d.state === 'device');
+            if (ready2.length > 0 && (!deviceReady || !currentOk)) {
+              const newTarget = ready2[0].serial;
+              if (newTarget !== before) {
+                $('deviceSel').value = newTarget;
+                await selectDevice(newTarget);
+              }
+            }
+          }
+        }, 5000);
+        pollers.ocr = setInterval(() => { if (deviceReady && $('liveToggle').checked) refreshOcr(); }, 3000);
+      }
+      if (wasLiveOn && !liveTimer) startLive();
+      wasLiveOn = false;
+    }
+  });
+
+  startLive();
+  relayoutStage();
+  // DOM 布局稳定后再校准一次画面尺寸（首次 fit 模式下 wrap 尺寸刚算出来）
+  setTimeout(relayoutStage, 100);
+  setTimeout(relayoutStage, 500);
+})();
+
+</script>
+</body>
+</html>
