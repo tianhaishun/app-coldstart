@@ -1,4 +1,4 @@
-# 📱 冷启动计时器 v2 · 使用说明
+# 📱 App 冷启测速 · 使用说明
 
 > Python + FastAPI + RapidOCR 重写版。**实时画面 + OCR 文字框 + 点选坐标**，告别 v1 的 getevent 等待。
 
@@ -143,7 +143,7 @@ POST /api/cold_start
 ## 🛠 文件结构
 
 ```
-冷启动计时器_Windows_v1.5/
+app-coldstart/
 ├── Start.bat              ← 双击启动（自动建 venv + 装依赖）
 ├── server.py              ← FastAPI 后端
 ├── static/index.html      ← 前端单文件（HTML+CSS+JS 内嵌）

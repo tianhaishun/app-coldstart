@@ -1,4 +1,4 @@
-"""冷启动计时器 v2 —— FastAPI 后端。
+"""App 冷启测速 —— FastAPI 后端。
 
 参考 GameAuto（D:\\work\\GameAuto）的设计哲学：
   - 截图走 `adb exec-out screencap -p`（直出 PNG bytes，比 screencap+pull 快）
@@ -462,7 +462,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-app = FastAPI(title="Cold Start Timer v2", version="2.0")
+app = FastAPI(title="App Cold Start Profiler", version="2.0")
 
 
 @app.on_event("startup")

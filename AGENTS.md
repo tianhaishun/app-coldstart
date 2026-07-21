@@ -1,6 +1,6 @@
-# 冷启动计时器 - Agent 工作规则
+# App 冷启测速 - Agent 工作规则
 
-本文件是本项目（D:\work\tool\冷启动计时器_Windows_v1.5）的硬规范。
+本文件是本项目（D:\work\tool\app-coldstart）的硬规范。
 任何 agent（Claude / 其他 AI / 人类协作者）进入本项目前必须先读完。
 冲突优先级：用户当次明确指令 > 本文件 > agent 私有记忆。
 

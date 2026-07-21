@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title Cold Start Timer v2
+title App Cold Start Profiler
 
 set "ROOT=%~dp0"
 set "VENV=%ROOT%.venv"
@@ -8,7 +8,7 @@ set "PY=%VENV%\Scripts\python.exe"
 set "PORT=8766"
 
 echo ============================================
-echo   Cold Start Timer v2
+echo   App Cold Start Profiler
 echo ============================================
 echo.
 
@@ -48,7 +48,7 @@ REM -- Start backend --
 echo [RUN] Starting backend on http://127.0.0.1:%PORT% ...
 echo       Browser will open automatically. Keep this window open.
 echo.
-start "Cold Start Timer Backend - DO NOT CLOSE" "%PY%" -m uvicorn server:app --host 127.0.0.1 --port %PORT% --app-dir "%ROOT%"
+start "App Cold Start Profiler - Backend (DO NOT CLOSE)" "%PY%" -m uvicorn server:app --host 127.0.0.1 --port %PORT% --app-dir "%ROOT%"
 
 REM -- Wait for service then open browser --
 echo [WAIT] Waiting for service...
