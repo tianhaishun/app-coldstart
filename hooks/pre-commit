@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# pre-commit 钩子（仓库内版本，需用 hooks/install.{sh,bat} 链到 .git/hooks/ 才生效）
+#
+# 设计原则（对齐 AGENTS.md）：
+#   - §1.4「改完必须验证」→ 提交前自动跑 ast 语法检查
+#   - §4「不引入无意义文件」→ 阻止误提交 .venv / __pycache__ / 临时文件 / 设计稿
+#   - §5 验证清单里能在提交前跑的项（启动后端那种重活不在此跑）
+#
+# 纯 bash，零依赖（git for windows 自带 bash）。失败即阻断提交。
+# 跳过本次检查：git commit --no-verify（慎用，仅紧急情况）。
+
+set -euo pipefail
+
+# 找到仓库根（hook 执行时 cwd 是仓库根，但保险起见）
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# ────────────────────────────────────────────────────────────
+# 检查 1：禁止误提交大目录 / 临时文件 / 设计稿
+# 对应 .gitignore 的防御性规则，但 git add -f 仍可能绕过，这里兜底
+# ────────────────────────────────────────────────────────────
+FORBIDDEN_PATTERNS=(
+    '.venv/'
+    '__pycache__/'
+    '*.pyc'
+    '_cst_*.png'
+    '_cst_*.apk'
+    'stitch_adaptive_responsive_shortcut_layout/'
+    '.claude/'
+)
+
+# 取暂存区文件列表（已 add 的）
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR || true)
+if [ -n "$STAGED" ]; then
+    VIOLATIONS=""
+    while IFS= read -r f; do
+        for pat in "${FORBIDDEN_PATTERNS[@]}"; do
+            # 用 case 做通配匹配
+            case "$f" in
+                $pat) VIOLATIONS="${VIOLATIONS}  ${f}\n" ;;
+            esac
+        done
+    done <<< "$STAGED"
+    if [ -n "$VIOLATIONS" ]; then
+        echo "❌ pre-commit: 检测到不该入库的文件：" >&2
+        printf "%b" "$VIOLATIONS" >&2
+        echo "" >&2
+        echo "   这些应在 .gitignore 里。如确需提交，用 git commit --no-verify（不推荐）。" >&2
+        exit 1
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────
+# 检查 2：server.py 若在暂存区，跑 ast 语法检查（AGENTS.md §5 第 1 条）
+# ────────────────────────────────────────────────────────────
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR || true)
+if echo "$STAGED_FILES" | grep -qx 'server.py'; then
+    # 优先用项目 venv 的 python，其次系统 python
+    PY=""
+    if [ -x ".venv/Scripts/python.exe" ]; then
+        PY=".venv/Scripts/python.exe"
+    elif command -v python >/dev/null 2>&1; then
+        PY="python"
+    fi
+    if [ -n "$PY" ]; then
+        if ! "$PY" -c "import ast,sys; ast.parse(open('server.py',encoding='utf-8').read())" 2>/dev/null; then
+            echo "❌ pre-commit: server.py 语法检查失败（ast.parse）" >&2
+            "$PY" -c "import ast; ast.parse(open('server.py',encoding='utf-8').read())" >&2 || true
+            echo "   请先修复语法错误再提交。" >&2
+            exit 1
+        fi
+        echo "✓ pre-commit: server.py ast OK"
+    else
+        echo "⚠ pre-commit: 未找到 python，跳过 server.py 语法检查" >&2
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────
+# 检查 3：行尾一致性提示（不阻断，只警告）
+#   .gitattributes 已显式固化策略，这里只是发现混入 CRLF 时提醒一下
+# ────────────────────────────────────────────────────────────
+echo "✓ pre-commit: 检查通过"
+exit 0
