@@ -437,7 +437,7 @@
             <button id="browseApkBtn" class="px-2.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:bg-surface-container-highest">浏览</button>
             <input id="apkFileInput" type="file" accept=".apk" class="hidden">
           </div>
-          <!-- APK 指纹信息行：上传成功后显示原始名/大小/MD5，提升可信度 -->
+          <!-- APK 信息行：上传成功后显示原始名/大小，让用户知道传的是哪个文件 -->
           <div id="apkInfo" class="mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed hidden"></div>
         </div>
         <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[220px] overflow-y-auto hidden"></div>
@@ -656,8 +656,7 @@ $('refreshAppsBtn').addEventListener('click', refreshAppList);
 // ── APK 拖拽上传 ──
 // 浏览器在 http:// 下拿不到本地完整路径（安全限制），所以走上传方案：
 // 拖拽/选择文件 → 上传到后端 _cst_uploads/（保留原始文件名）→ 返回路径 → 填入 apkPath
-// 同时把 APK 指纹（原始名/大小）显示在 apkInfo 行，提升可信度。
-// MD5 不在这里算（大文件耗时），留给 reinstall 时算一次。
+// 同时把 APK 信息（原始名/大小）显示在 apkInfo 行，让用户确认传对了文件。
 async function uploadApkFile(file) {
   if (!file.name.toLowerCase().endsWith('.apk')) {
     alert('请选择 .apk 文件');
@@ -678,7 +677,7 @@ async function uploadApkFile(file) {
       const info = $('apkInfo');
       const orig = j.original_name || file.name;
       const sizeMb = j.size_mb != null ? j.size_mb : (file.size / 1048576).toFixed(1);
-      info.innerHTML = `📦 原始文件: <b class="text-on-surface">${escapeHtml(orig)}</b> · 大小: <b class="text-on-surface">${sizeMb} MB</b> · MD5 将在重装时计算`;
+      info.innerHTML = `📦 原始文件: <b class="text-on-surface">${escapeHtml(orig)}</b> · 大小: <b class="text-on-surface">${sizeMb} MB</b>`;
       info.className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed';
     } else {
       alert('上传失败：' + (j.detail || '未知错误'));
@@ -1640,15 +1639,14 @@ async function runAutoLoop() {
       });
       const reinstallData = await reinstallResp.json();
       if (!reinstallData.ok) {
-        // 把后端返回的 log 也显示出来，便于诊断
+        // 失败时显示后端原始 adb 输出，便于诊断（adb 真实反馈，不加工）
         if (reinstallData.log && reinstallData.log.length) {
-          autoLog('卸装重装日志：', 'warn');
           reinstallData.log.forEach(line => autoLog('  ' + line));
         }
         throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
       }
-      // 显示 reinstall 详细日志（uninstall/install 每步输出 + APK 指纹 + 总耗时）
-      // 这是可信度证据，也让用户看到"真的卸了装了"，避免以为没生效
+      // 显示 adb 原始输出（uninstall: ... / install: Success）—— 简单透明，
+      // 用户能直接看到 adb 的真实反馈，确认卸装重装真的执行了
       if (reinstallData.log && reinstallData.log.length) {
         reinstallData.log.forEach(line => autoLog('  ' + line));
       }

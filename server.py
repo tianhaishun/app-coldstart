@@ -86,18 +86,6 @@ def _safe_apk_filename(original: str) -> str:
     return candidate
 
 
-def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
-    """流式算文件 MD5（大 APK 不一次性读进内存）。"""
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        while True:
-            buf = f.read(chunk)
-            if not buf:
-                break
-            h.update(buf)
-    return h.hexdigest()
-
-
 # ── OCR ────────────────────────────────────────────────────────────────
 
 
@@ -208,21 +196,8 @@ class AdbDevice:
         *,
         timeout: float = 30.0,
         check: bool = True,
-        capture_err: bool = False,
-    ):
-        """同步跑 adb 命令，返回 stdout（已 strip）。失败抛 AdbError。
-
-        adb 的失败诊断信息分布因命令/版本而异：
-          - uninstall 失败：``Failure [DELETE_FAILED_*]`` 在 **stdout**（实测确认）
-          - install 失败：``Performing Streamed Install`` 在 stdout，真因如
-            ``failed to stat ...`` / ``INSTALL_FAILED_*`` 在 **stderr**（实测确认）
-
-        所以默认只返回 stdout 满足大多数调用；但 install 这类需要 stderr 诊断
-        的调用应传 ``capture_err=True``，此时返回 ``(stdout, stderr)`` 元组。
-
-        向后兼容：``capture_err=False``（默认）时返回值与历史完全一致（str），
-        老的 13 处调用不受影响。
-        """
+    ) -> str:
+        """同步跑 adb 命令，返回 stdout（已 strip）。失败抛 AdbError。"""
         cmd = self._build_args(args)
         try:
             cp = subprocess.run(
@@ -241,8 +216,6 @@ class AdbDevice:
             tail = (err or out).strip().splitlines()
             last = tail[-1] if tail else f"exit={cp.returncode}"
             raise AdbError(last)
-        if capture_err:
-            return out.strip(), err.strip()
         return out.strip()
 
     def run_bytes(self, args: list[str], *, timeout: float = 30.0) -> bytes:
@@ -368,56 +341,25 @@ class AdbDevice:
         return sorted(pkgs)
 
     def reinstall(self, pkg: str, apk_path: str) -> list[str]:
-        """卸载重装，返回带时间戳的日志行。失败抛 AdbError。
+        """卸载重装，返回日志行。失败抛 AdbError。
 
-        日志格式（每行前缀 [YYYY-MM-DD HH:MM:SS]，可信度证据）：
-          - 开头：APK 元信息（文件名 / 大小 / MD5 前 8 位 / 路径）
-          - 中间：uninstall / install 每步带时间戳
-          - 结尾：总耗时
-        MD5 在这里算（大文件 1-3 秒），不在 upload 时算（避免上传多一次 IO）。
+        保持简单透明：uninstall → 兜底 pm uninstall → install → 判 Success。
+        返回的 log 是 adb 原始输出（uninstall: ... / install: ...），不加工。
+        前端原样显示，用户能直接看到 adb 真实反馈。
         """
-        apk = Path(apk_path)
-        if not apk.exists():
+        if not Path(apk_path).exists():
             raise AdbError(f"APK 文件不存在：{apk_path}")
-
-        def ts() -> str:
-            return time.strftime("[%Y-%m-%d %H:%M:%S]")
-
         log: list[str] = []
-        t_start = time.time()
-        log.append(f"{ts()} 开始卸载重装 · 包名: {pkg}")
-        # APK 指纹（防偷换 APK，可信度关键）
-        try:
-            size_bytes = apk.stat().st_size
-            size_mb = size_bytes / 1048576
-            md5_full = _file_md5(apk)
-            md5_short = md5_full[:8]
-            log.append(
-                f"{ts()} APK 文件: {apk.name} · 原始路径: {apk_path} · "
-                f"大小: {size_mb:.1f} MB ({size_bytes} bytes) · MD5: {md5_short}..."
-            )
-        except OSError as e:
-            log.append(f"{ts()} ⚠ 读取 APK 元信息失败: {e}")
-
         out = self.run(["uninstall", pkg], check=False, timeout=60.0)
-        log.append(f"{ts()} uninstall: {out}")
+        log.append(f"uninstall: {out}")
         if "Failure" in out:
+            # 兜底：部分设备（如装为系统用户）需要 --user 0 才能卸
             out2 = self.run(["shell", "pm", "uninstall", "--user", "0", pkg], check=False, timeout=30.0)
-            log.append(f"{ts()} pm uninstall --user 0: {out2}")
-        # install 用 capture_err=True：adb install 失败时真因（failed to stat /
-        # INSTALL_FAILED_*）在 stderr，不在 stdout（实测确认，见 run() docstring）。
-        # 不拿 stderr 的话，错误信息只是无意义的 "Performing Streamed Install"。
-        out3, err3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0, capture_err=True)
-        log.append(f"{ts()} install: {out3}")
-        if err3:
-            log.append(f"{ts()} install stderr: {err3}")
+            log.append(f"pm uninstall --user 0: {out2}")
+        out3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0)
+        log.append(f"install: {out3}")
         if "Success" not in out3:
-            elapsed = time.time() - t_start
-            log.append(f"{ts()} 失败 · 已耗时: {elapsed:.1f}s")
-            # 错误信息优先用 stderr（真因），没有才退回 stdout
-            raise AdbError(f"安装失败：{err3 or out3}")
-        elapsed = time.time() - t_start
-        log.append(f"{ts()} 完成 · 总耗时: {elapsed:.1f}s")
+            raise AdbError(f"安装失败：{out3}")
         return log
 
 
@@ -744,7 +686,6 @@ async def upload_apk(file: UploadFile) -> dict:
       - original_name：用户原始文件名（未过滤，含中文/空格）
       - saved_name：实际存盘文件名（已过滤）
       - size_bytes：精确字节数
-    MD5 不在这里算（大文件耗时），留给 reinstall 时算一次（见 AdbDevice.reinstall）。
     """
     if not file.filename or not file.filename.lower().endswith(".apk"):
         raise _err(400, "请上传 .apk 文件")
