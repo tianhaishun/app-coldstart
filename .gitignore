@@ -8,6 +8,9 @@ __pycache__/
 # Claude Code 本地配置
 .claude/
 
+# ZCode agent 本地配置 + plan 文件（agent 工具自动生成，与项目无关）
+.zcode/
+
 # 临时文件（防御性，正常不会在项目目录）
 _cst_*.png
 _cst_*.apk
