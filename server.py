@@ -17,6 +17,7 @@ v1 → v2 的关键修复：
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -36,6 +37,55 @@ if str(ROOT) not in sys.path:
 # 内置 adb（同目录 adb\\adb.exe），找不到再回退 PATH
 _BUNDLED_ADB = ROOT / "adb" / "adb.exe"
 ADB_EXE = str(_BUNDLED_ADB) if _BUNDLED_ADB.exists() else "adb"
+
+# APK 上传目录（每次上传保留原始文件名，不再覆盖式存储）。
+# 复数 _cst_uploads 与老的单数 _cst_upload.apk 区分；启动时整目录清空重建。
+APK_UPLOAD_DIR = Path(tempfile.gettempdir()) / "_cst_uploads"
+
+
+def _safe_apk_filename(original: str) -> str:
+    """把用户上传的原始文件名过滤成安全的磁盘文件名。
+
+    防御点（可信度要求高，路径攻击必须拦）：
+      - 只取 basename：防 ``../../evil.apk`` 路径穿越写到任意目录
+      - 非 [A-Za-z0-9_\\-.] 字符（含中文/空格/特殊符号）替换为 ``_``：避免文件系统/adb 命令解析问题
+      - 强制 .apk 后缀
+      - 过滤后为空或过短，用 ``apk_<short>`` 兜底
+      - 与目录内已有文件同名时追加短 hash 后缀（不覆盖，保历史）
+    返回值仅为文件名（不含路径），调用方拼到 APK_UPLOAD_DIR 下。
+    """
+    name = os.path.basename(original or "").strip()
+    if not name:
+        name = "apk_upload.apk"
+    # 强制 .apk 后缀（无论原名后缀是什么）
+    stem = name
+    if stem.lower().endswith(".apk"):
+        stem = stem[:-4]
+    # 非 ASCII 字母数字/下划线/连字符/点 → 下划线
+    safe_stem = re.sub(r"[^A-Za-z0-9_\-.]", "_", stem)
+    # 去掉开头的点（防隐藏文件 / 多余分隔）
+    safe_stem = safe_stem.lstrip(".")
+    # 空或全是下划线 → 兜底名
+    if not safe_stem or set(safe_stem) == {"_"}:
+        safe_stem = "apk_upload"
+    candidate = f"{safe_stem}.apk"
+    # 同名冲突 → 追加 6 位短 hash
+    if (APK_UPLOAD_DIR / candidate).exists():
+        short = hashlib.md5(f"{candidate}{time.time()}".encode()).hexdigest()[:6]
+        candidate = f"{safe_stem}_{short}.apk"
+    return candidate
+
+
+def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
+    """流式算文件 MD5（大 APK 不一次性读进内存）。"""
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        while True:
+            buf = f.read(chunk)
+            if not buf:
+                break
+            h.update(buf)
+    return h.hexdigest()
 
 
 # ── OCR ────────────────────────────────────────────────────────────────
@@ -293,19 +343,50 @@ class AdbDevice:
         return sorted(pkgs)
 
     def reinstall(self, pkg: str, apk_path: str) -> list[str]:
-        """卸载重装，返回日志行。失败抛 AdbError。"""
-        if not Path(apk_path).exists():
+        """卸载重装，返回带时间戳的日志行。失败抛 AdbError。
+
+        日志格式（每行前缀 [YYYY-MM-DD HH:MM:SS]，可信度证据）：
+          - 开头：APK 元信息（文件名 / 大小 / MD5 前 8 位 / 路径）
+          - 中间：uninstall / install 每步带时间戳
+          - 结尾：总耗时
+        MD5 在这里算（大文件 1-3 秒），不在 upload 时算（避免上传多一次 IO）。
+        """
+        apk = Path(apk_path)
+        if not apk.exists():
             raise AdbError(f"APK 文件不存在：{apk_path}")
+
+        def ts() -> str:
+            return time.strftime("[%Y-%m-%d %H:%M:%S]")
+
         log: list[str] = []
+        t_start = time.time()
+        log.append(f"{ts()} 开始卸载重装 · 包名: {pkg}")
+        # APK 指纹（防偷换 APK，可信度关键）
+        try:
+            size_bytes = apk.stat().st_size
+            size_mb = size_bytes / 1048576
+            md5_full = _file_md5(apk)
+            md5_short = md5_full[:8]
+            log.append(
+                f"{ts()} APK 文件: {apk.name} · 原始路径: {apk_path} · "
+                f"大小: {size_mb:.1f} MB ({size_bytes} bytes) · MD5: {md5_short}..."
+            )
+        except OSError as e:
+            log.append(f"{ts()} ⚠ 读取 APK 元信息失败: {e}")
+
         out = self.run(["uninstall", pkg], check=False, timeout=60.0)
-        log.append(f"uninstall: {out}")
+        log.append(f"{ts()} uninstall: {out}")
         if "Failure" in out:
             out2 = self.run(["shell", "pm", "uninstall", "--user", "0", pkg], check=False, timeout=30.0)
-            log.append(f"pm uninstall --user 0: {out2}")
+            log.append(f"{ts()} pm uninstall --user 0: {out2}")
         out3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0)
-        log.append(f"install: {out3}")
+        log.append(f"{ts()} install: {out3}")
         if "Success" not in out3:
+            elapsed = time.time() - t_start
+            log.append(f"{ts()} 失败 · 已耗时: {elapsed:.1f}s")
             raise AdbError(f"安装失败：{out3}")
+        elapsed = time.time() - t_start
+        log.append(f"{ts()} 完成 · 总耗时: {elapsed:.1f}s")
         return log
 
 
@@ -472,16 +553,25 @@ def cleanup_stale_temp_files() -> None:
     72 小时连续运行 + 多次重启会累积一堆 _cst_live_{oldpid}.png 和 _cst_upload.apk
     （232MB）。这里在每次启动时清理掉所有 _cst_* 文件——本进程的会在使用中，
     但启动瞬间还没创建，所以清的是历史残留。
+
+    v2 新增：清空 _cst_uploads/ 整个目录（用户上传的 APK 现在按原始名保留，
+    不再覆盖式，会累积。启动时整目录清空重建空目录，避免堆积 + 跨设备冲突）。
     """
     import glob
+    import shutil
     tempdir = tempfile.gettempdir()
+    # 老的单数文件（兼容历史）
     for pattern in ("_cst_live_*.png", "_cst_ocr_*.png", "_cst_upload.apk"):
         for path in glob.glob(str(Path(tempdir) / pattern)):
             try:
                 Path(path).unlink()
             except OSError:
                 pass  # 文件可能正被占用
-    print("[startup] 清理了 tempdir 下的旧 _cst_* 临时文件", flush=True)
+    # 新的 APK 上传目录：清空后重建空目录
+    if APK_UPLOAD_DIR.exists():
+        shutil.rmtree(APK_UPLOAD_DIR, ignore_errors=True)
+    APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    print("[startup] 清理了 tempdir 下的旧 _cst_* 临时文件 + _cst_uploads/", flush=True)
 
 
 class DeviceSelectReq(BaseModel):
@@ -583,20 +673,40 @@ def list_apps() -> dict:
 
 @app.post("/api/upload_apk")
 async def upload_apk(file: UploadFile) -> dict:
-    """接收前端拖拽/选择上传的 APK，存到固定临时路径（覆盖式），返回该路径。
+    """接收前端拖拽/选择上传的 APK，**保留原始文件名**存到 _cst_uploads/。
 
-    设计：浏览器安全限制拿不到用户本地完整路径，所以走"上传到后端临时目录"
-    方案。前端拿到返回的 temp 路径后填入 apkPath 输入框，reinstall 继续用
-    apkPath 字段 —— 上传和重装两条链路解耦，reinstall 零改动。
-    每次上传覆盖同一个文件，不堆积。
+    设计（v2 改进）：
+      - 浏览器 http:// 下拿不到本地完整路径（安全限制），仍走"上传到后端"方案
+      - 但不再覆盖式存到固定 _cst_upload.apk —— 那样前端显示的路径毫无可信度，
+        看不出是哪个 APK。现在按原始文件名（经安全过滤）存到 _cst_uploads/
+      - 前端 apkPath 输入框显示后端真实路径（含原始名），一眼能识别是哪个 APK
+      - 同名冲突不覆盖，追加短 hash 后缀，保留历史（启动时会清空）
+
+    返回字段（**只新增不删除**，契约向前兼容）：
+      - ok / path / size_mb：老字段，保留
+      - original_name：用户原始文件名（未过滤，含中文/空格）
+      - saved_name：实际存盘文件名（已过滤）
+      - size_bytes：精确字节数
+    MD5 不在这里算（大文件耗时），留给 reinstall 时算一次（见 AdbDevice.reinstall）。
     """
     if not file.filename or not file.filename.lower().endswith(".apk"):
         raise _err(400, "请上传 .apk 文件")
-    target = Path(tempfile.gettempdir()) / "_cst_upload.apk"
+    APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    saved_name = _safe_apk_filename(file.filename)
+    target = APK_UPLOAD_DIR / saved_name
     with target.open("wb") as f:
         while chunk := await file.read(1024 * 1024):
             f.write(chunk)
-    return {"ok": True, "path": str(target), "size_mb": round(target.stat().st_size / 1048576, 1)}
+    size_bytes = target.stat().st_size
+    return {
+        "ok": True,
+        "path": str(target),
+        "size_mb": round(size_bytes / 1048576, 1),
+        # 新增字段（可信度增强）
+        "original_name": file.filename,
+        "saved_name": saved_name,
+        "size_bytes": size_bytes,
+    }
 
 
 @app.get("/api/device/current")

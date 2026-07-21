@@ -372,8 +372,10 @@
             <button id="browseApkBtn" class="px-2.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:bg-surface-container-highest">浏览</button>
             <input id="apkFileInput" type="file" accept=".apk" class="hidden">
           </div>
+          <!-- APK 指纹信息行：上传成功后显示原始名/大小/MD5，提升可信度 -->
+          <div id="apkInfo" class="mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed hidden"></div>
         </div>
-        <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[100px] overflow-y-auto hidden"></div>
+        <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[220px] overflow-y-auto hidden"></div>
       </div>
     </div>
 
@@ -576,7 +578,9 @@ $('refreshAppsBtn').addEventListener('click', refreshAppList);
 
 // ── APK 拖拽上传 ──
 // 浏览器在 http:// 下拿不到本地完整路径（安全限制），所以走上传方案：
-// 拖拽/选择文件 → 上传到后端临时目录 → 返回路径 → 填入 apkPath 输入框
+// 拖拽/选择文件 → 上传到后端 _cst_uploads/（保留原始文件名）→ 返回路径 → 填入 apkPath
+// 同时把 APK 指纹（原始名/大小）显示在 apkInfo 行，提升可信度。
+// MD5 不在这里算（大文件耗时），留给 reinstall 时算一次。
 async function uploadApkFile(file) {
   if (!file.name.toLowerCase().endsWith('.apk')) {
     alert('请选择 .apk 文件');
@@ -593,17 +597,30 @@ async function uploadApkFile(file) {
     if (j.ok) {
       $('apkPath').value = j.path;
       saveConfig();
+      // APK 指纹信息行（可信度证据）
+      const info = $('apkInfo');
+      const orig = j.original_name || file.name;
+      const sizeMb = j.size_mb != null ? j.size_mb : (file.size / 1048576).toFixed(1);
+      info.innerHTML = `📦 原始文件: <b class="text-on-surface">${escapeHtml(orig)}</b> · 大小: <b class="text-on-surface">${sizeMb} MB</b> · MD5 将在重装时计算`;
+      info.className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed';
     } else {
       alert('上传失败：' + (j.detail || '未知错误'));
       $('apkPath').value = '';
+      $('apkInfo').className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed hidden';
     }
   } catch(e) {
     alert('上传失败：' + e.message);
     $('apkPath').value = '';
+    $('apkInfo').className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed hidden';
   } finally {
     $('apkPath').disabled = false;
     $('browseApkBtn').disabled = false;
   }
+}
+
+// HTML 转义（apkInfo 显示用户输入的文件名，防 XSS）
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 // 拖拽到路径输入框区域
