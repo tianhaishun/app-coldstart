@@ -208,8 +208,21 @@ class AdbDevice:
         *,
         timeout: float = 30.0,
         check: bool = True,
-    ) -> str:
-        """同步跑 adb 命令，返回 stdout（已 strip）。失败抛 AdbError。"""
+        capture_err: bool = False,
+    ):
+        """同步跑 adb 命令，返回 stdout（已 strip）。失败抛 AdbError。
+
+        adb 的失败诊断信息分布因命令/版本而异：
+          - uninstall 失败：``Failure [DELETE_FAILED_*]`` 在 **stdout**（实测确认）
+          - install 失败：``Performing Streamed Install`` 在 stdout，真因如
+            ``failed to stat ...`` / ``INSTALL_FAILED_*`` 在 **stderr**（实测确认）
+
+        所以默认只返回 stdout 满足大多数调用；但 install 这类需要 stderr 诊断
+        的调用应传 ``capture_err=True``，此时返回 ``(stdout, stderr)`` 元组。
+
+        向后兼容：``capture_err=False``（默认）时返回值与历史完全一致（str），
+        老的 13 处调用不受影响。
+        """
         cmd = self._build_args(args)
         try:
             cp = subprocess.run(
@@ -228,6 +241,8 @@ class AdbDevice:
             tail = (err or out).strip().splitlines()
             last = tail[-1] if tail else f"exit={cp.returncode}"
             raise AdbError(last)
+        if capture_err:
+            return out.strip(), err.strip()
         return out.strip()
 
     def run_bytes(self, args: list[str], *, timeout: float = 30.0) -> bytes:
@@ -389,12 +404,18 @@ class AdbDevice:
         if "Failure" in out:
             out2 = self.run(["shell", "pm", "uninstall", "--user", "0", pkg], check=False, timeout=30.0)
             log.append(f"{ts()} pm uninstall --user 0: {out2}")
-        out3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0)
+        # install 用 capture_err=True：adb install 失败时真因（failed to stat /
+        # INSTALL_FAILED_*）在 stderr，不在 stdout（实测确认，见 run() docstring）。
+        # 不拿 stderr 的话，错误信息只是无意义的 "Performing Streamed Install"。
+        out3, err3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0, capture_err=True)
         log.append(f"{ts()} install: {out3}")
+        if err3:
+            log.append(f"{ts()} install stderr: {err3}")
         if "Success" not in out3:
             elapsed = time.time() - t_start
             log.append(f"{ts()} 失败 · 已耗时: {elapsed:.1f}s")
-            raise AdbError(f"安装失败：{out3}")
+            # 错误信息优先用 stderr（真因），没有才退回 stdout
+            raise AdbError(f"安装失败：{err3 or out3}")
         elapsed = time.time() - t_start
         log.append(f"{ts()} 完成 · 总耗时: {elapsed:.1f}s")
         return log
