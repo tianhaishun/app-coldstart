@@ -19,27 +19,45 @@ cd "$REPO_ROOT"
 # 检查 1：禁止误提交大目录 / 临时文件 / 设计稿
 # 对应 .gitignore 的防御性规则，但 git add -f 仍可能绕过，这里兜底
 # ────────────────────────────────────────────────────────────
-FORBIDDEN_PATTERNS=(
+# 前缀匹配规则：路径以这些开头即拦截（git 路径用正斜杠，不区分盘符）
+FORBIDDEN_PREFIXES=(
     '.venv/'
     '__pycache__/'
-    '*.pyc'
-    '_cst_*.png'
-    '_cst_*.apk'
-    'stitch_adaptive_responsive_shortcut_layout/'
     '.claude/'
+    'stitch_adaptive_responsive_shortcut_layout/'
 )
+# 通配规则：用 bash 内置 [[ ]] 的 extglob 通配
+# *.pyc / _cst_*.png / _cst_*.apk 等
+is_forbidden() {
+    local f="$1"
+    # 1) 前缀匹配
+    for p in "${FORBIDDEN_PREFIXES[@]}"; do
+        if [[ "$f" == "$p"* ]]; then
+            return 0
+        fi
+    done
+    # 2) 通配匹配（文件名模式，跨任意目录层级）
+    #    __pycache__/ 可能在任意子目录
+    case "$f" in
+        */__pycache__/*|*/__pycache__) return 0 ;;
+    esac
+    # 3) basename 通配：*.pyc / _cst_*.png / _cst_*.apk
+    local bn="${f##*/}"
+    case "$bn" in
+        *.pyc) return 0 ;;
+        _cst_*.png) return 0 ;;
+        _cst_*.apk) return 0 ;;
+    esac
+    return 1
+}
 
-# 取暂存区文件列表（已 add 的）
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR || true)
 if [ -n "$STAGED" ]; then
     VIOLATIONS=""
     while IFS= read -r f; do
-        for pat in "${FORBIDDEN_PATTERNS[@]}"; do
-            # 用 case 做通配匹配
-            case "$f" in
-                $pat) VIOLATIONS="${VIOLATIONS}  ${f}\n" ;;
-            esac
-        done
+        if is_forbidden "$f"; then
+            VIOLATIONS="${VIOLATIONS}  ${f}\n"
+        fi
     done <<< "$STAGED"
     if [ -n "$VIOLATIONS" ]; then
         echo "❌ pre-commit: 检测到不该入库的文件：" >&2
