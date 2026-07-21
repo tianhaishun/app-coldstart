@@ -1,0 +1,38 @@
+# 行尾与二进制规范化
+# 目的：把这个 Windows 专用工具的行尾策略显式写死，避免不同协作者
+# core.autocrlf 设置不同导致的虚假 diff / 文件被意外改坏。
+#
+# 策略（与当前 core.autocrlf=true 的实际行为对齐，不引入批量重规范化）：
+#   - 文本：text=auto，git 自动识别；提交时按平台规范处理
+#   - Start.bat：强制 CRLF（cmd.exe 解析 GBK/ASCII，CRLF 最稳，LF 偶发解析异常）
+#   - adb 二进制：显式 binary，杜绝任何行尾/内容转换（被转换过就启动不了）
+#   - .png/.apk：二进制
+
+# 默认：让 git 自动判断文本/二进制
+* text=auto
+
+# Windows 批处理必须 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与文档（不强制，遵循 text=auto 的平台默认）
+*.py   text
+*.html text
+*.md   text
+*.txt  text
+*.css  text
+*.js   text
+*.json text
+
+# 二进制：永远不做任何转换
+*.exe  binary
+*.dll  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.apk  binary
+*.so   binary
+*.onnx binary
+*.zip  binary
+*.tar  binary
+*.gz   binary
