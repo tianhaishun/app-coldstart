@@ -1619,9 +1619,10 @@ async function runAutoLoop() {
   $('autoProgress').classList.remove('hidden');
   $('autoProgress').innerHTML = '';
   $('cardReport').classList.add('hidden');
-  // 暂停直播（避免与 OCR 轮询抢 adb 锁）
+  // 注意：循环期间保持直播开着，让用户能看到手机屏幕变化（卸装/重装/启动全过程）。
+  // 只有 OCR/模板停表的高频轮询阶段才在 measureOnce 内临时停直播（避免抢 adb 锁），
+  // 停表一结束立刻恢复。这样既不抢锁，又不让用户面对冻结画面以为"没生效"。
   autoLiveWasOn = !!liveTimer;
-  if (autoLiveWasOn) stopLive();
 
   const t0 = performance.now();
   const modeLabel = detectMode === 'template' ? `模板比对(~${gapMs}ms/次)` : `文字匹配「${marker}」(~1s/次)`;
@@ -1632,14 +1633,24 @@ async function runAutoLoop() {
       if (autoAbortFlag) throw new Error('用户中断');
 
       // ── 阶段 1：卸装重装（回到干净状态）──
-      autoLog(`── 第 ${round}/${rounds} 轮 · 卸装重装 ──`, 'warn');
+      autoLog(`── 第 ${round}/${rounds} 轮 · 卸装重装（30-60s，请看左侧画面）──`, 'warn');
       const reinstallResp = await fetch(API + '/api/reinstall', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ package: pkg, apk_path: apkPath })
       });
       const reinstallData = await reinstallResp.json();
       if (!reinstallData.ok) {
+        // 把后端返回的 log 也显示出来，便于诊断
+        if (reinstallData.log && reinstallData.log.length) {
+          autoLog('卸装重装日志：', 'warn');
+          reinstallData.log.forEach(line => autoLog('  ' + line));
+        }
         throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
+      }
+      // 显示 reinstall 详细日志（uninstall/install 每步输出 + APK 指纹 + 总耗时）
+      // 这是可信度证据，也让用户看到"真的卸了装了"，避免以为没生效
+      if (reinstallData.log && reinstallData.log.length) {
+        reinstallData.log.forEach(line => autoLog('  ' + line));
       }
 
       // ── 阶段 2：测首次冷启动 ──
@@ -1691,7 +1702,7 @@ async function runAutoLoop() {
   }
 }
 
-// 单次测速：cold_start → 单一时钟打点 → OCR 停表
+// 单次测速：cold_start → 单一时钟打点 → OCR/模板停表
 async function measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs, gapMs, label, round) {
   if (autoAbortFlag) throw new Error('用户中断');
   const body = { mode: launchMode, package: pkg };
@@ -1704,7 +1715,16 @@ async function measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs,
   if (!j.ok) throw new Error(`${label}启动失败：${j.detail || '未知'}`);
   // §2.1：响应回来后直接打点，单一 performance.now() 时钟
   const startTs = performance.now();
-  return await waitForLaunchDone(startTs, detectMode, marker, timeoutMs, gapMs);
+  // OCR/模板停表阶段：临时停直播（避免高频轮询抢 adb 锁），结束恢复。
+  // 这段时间很短（首次冷启动 1-5s），用户看不到画面也能接受。
+  const liveWasOn = !!liveTimer;
+  if (liveWasOn) stopLive();
+  try {
+    return await waitForLaunchDone(startTs, detectMode, marker, timeoutMs, gapMs);
+  } finally {
+    // 停表一结束立刻恢复直播，让用户能看到后续 force_stop、下一轮 reinstall 等
+    if (liveWasOn && $('liveToggle').checked) startLive();
+  }
 }
 
 // ── 报告生成（页面内 + 可复制）──
