@@ -3,6 +3,9 @@
 # 首次双击 Start.bat 会自动建 venv 并装这些
 
 fastapi>=0.110
+# FastAPI 处理 UploadFile/表单数据必须的依赖（/api/upload_apk 用到）。
+# FastAPI 官方规定：凡有 File()/UploadFile/Form() 都需显式声明，否则装饰器阶段就抛 RuntimeError。
+python-multipart>=0.0.7
 uvicorn[standard]>=0.27
 rapidocr-onnxruntime>=1.3.24
 opencv-python>=4.8
