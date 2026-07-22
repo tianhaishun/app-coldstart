@@ -1036,10 +1036,8 @@ function setCoords(x, y, source) {
   markers = [{x, y}];
   renderOcrBoxes();
   setTimeout(() => { markers = []; renderOcrBoxes(); }, 2000);
-  fetch(API + '/api/tap', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({x, y, norm: true})
-  }).then(() => setTimeout(refreshOcr, 400)).catch(() => {});
+  // 不真实点击设备屏幕：设坐标只是记录位置，真实点击只在自动循环 cold_start 时发生。
+  // 之前的验证点击（POST tap 端点）会干扰设备（误触 App 按钮、跳页面），去掉。
   setState('ok', `坐标已设置 (${x.toFixed(3)}, ${y.toFixed(3)}) · ${source}`);
 }
 $('locateBtn').addEventListener('click', () => setState('', '请在左侧画面上点一下 App 图标位置'));
