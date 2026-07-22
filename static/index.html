@@ -325,44 +325,23 @@
     <!-- 下一条提示 -->
     <div id="nextHint" class="text-xs px-2.5 py-1.5 rounded border border-dashed flex items-center gap-1.5 shrink-0"></div>
 
-    <!-- 🤖 自动测速（OCR 终点判定 + 全自动循环）-->
+    <!-- 🤖 自动测速（模板比对停表 + 全自动循环）-->
     <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-outline-variant shrink-0">
       <div class="flex items-center justify-between cursor-pointer hover:text-primary text-on-surface-variant" data-toggle>
-        <span class="font-mono text-[10px] font-bold tracking-wider">🤖 自动测速（OCR 停表）</span>
+        <span class="font-mono text-[10px] font-bold tracking-wider">🤖 自动测速（模板停表）</span>
         <span class="text-xs">▼</span>
       </div>
       <div class="card-body flex flex-col gap-2 mt-2">
-        <!-- 检测模式：模板比对（快，推荐）vs 文字匹配（慢，降级）-->
+        <!-- 启动元素模板：点画面选定，OCR 识别到该区域即停表 -->
         <div>
-          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动成功检测方式</label>
-          <div class="grid grid-cols-2 gap-1.5">
-            <label class="flex items-center gap-1.5 text-[11px] font-mono cursor-pointer bg-surface-container-high border border-outline-variant rounded px-2 py-1.5 hover:border-primary transition">
-              <input type="radio" name="markerMode" value="template" checked class="text-primary">
-              <span>🎯 模板比对<br><span class="text-[9px] text-on-surface-variant">~50ms/次 · 推荐</span></span>
-            </label>
-            <label class="flex items-center gap-1.5 text-[11px] font-mono cursor-pointer bg-surface-container-high border border-outline-variant rounded px-2 py-1.5 hover:border-primary transition">
-              <input type="radio" name="markerMode" value="text" class="text-primary">
-              <span>🔤 文字匹配<br><span class="text-[9px] text-on-surface-variant">~1s/次 · 降级</span></span>
-            </label>
-          </div>
-        </div>
-
-        <!-- 模板比对模式：点画面选定启动元素 -->
-        <div id="templateConfigBlock">
           <div class="flex gap-1.5 items-end">
             <div class="flex-1">
-              <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动元素模板</label>
+              <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动元素模板（识别到此区域即停表）</label>
               <button id="setMarkerBtn" class="w-full py-1.5 bg-surface-container-high border border-tertiary/40 text-tertiary hover:bg-tertiary/10 rounded text-xs font-mono font-bold transition active:scale-95">📍 点画面选定启动元素</button>
             </div>
             <div id="markerPreviewWrap" class="hidden w-[72px] h-[44px] bg-surface-container-lowest border border-outline-variant rounded overflow-hidden flex items-center justify-center text-[9px] text-on-surface-variant">无</div>
           </div>
           <div id="markerStatus" class="mt-1 text-[10px] font-mono text-on-surface-variant">未设模板 · 请先手动启动 App 到首页，再点上面按钮选定元素</div>
-        </div>
-
-        <!-- 文字匹配模式：填标识文字（默认隐藏，选文字模式时显示）-->
-        <div id="textConfigBlock" class="hidden">
-          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动成功标识文字（OCR 识别到此文字即停表）</label>
-          <input id="successMarker" type="text" placeholder='如：开始游戏 / Enter / Skip' class="w-full bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
         </div>
 
         <!-- 参数行：超时 / 轮询间隔 / 轮数 -->
@@ -1525,17 +1504,6 @@ let autoLiveWasOn = false;      // 循环开始前直播是否开着（结束恢
 let markerTemplateReady = false;  // 模板是否已设（用户点画面选定后置 true）
 let markerPickingMode = false;    // 是否处于"选定模板"模式（下一次画面点击用于设模板）
 
-// ── OCR 文字匹配：识别到「启动成功标识」即判定启动完成 ──
-function ocrHitSuccessMarker(ocrData, marker) {
-  if (!marker || !ocrData || !Array.isArray(ocrData.items)) return false;
-  const m = String(marker).trim().toLowerCase();
-  if (!m) return false;
-  return ocrData.items.some(it => {
-    if (!it || !it.text) return false;
-    return String(it.text).trim().toLowerCase().includes(m);
-  });
-}
-
 // ── 进度日志（追加到 autoProgress 区，自动滚到底）──
 function autoLog(line, kind = '') {
   const el = $('autoProgress');
@@ -1546,65 +1514,49 @@ function autoLog(line, kind = '') {
   el.scrollTop = el.scrollHeight;
 }
 
-// ── 自动停表：cold_start 响应回来后高频检测，命中即停表，超时即抛错 ──
+// ── 自动停表：cold_start 响应回来后高频调 /api/check_marker，命中即停表 ──
 // 调用方在 fetch cold_start 返回后立即调用，传入已经打好的 startTs（§2.1 单一时钟）
-// detectMode: 'template'（cv2 模板比对，~50ms/次）或 'text'（OCR 文字匹配，~1s/次）
-async function waitForLaunchDone(startTs, detectMode, marker, timeoutMs, gapMs) {
+// 模板比对用 cv2.matchTemplate，毫秒级，可高频轮询（默认 80ms）
+async function waitForLaunchDone(startTs, timeoutMs, gapMs) {
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
     if (elapsed > timeoutMs) {
-      const what = detectMode === 'template' ? '模板' : `「${marker}」`;
-      throw new Error(`超时 ${(timeoutMs/1000).toFixed(0)}s 未检测到${what}`);
+      throw new Error(`超时 ${(timeoutMs/1000).toFixed(0)}s 未检测到启动模板`);
     }
     try {
-      let hit = false;
-      if (detectMode === 'template') {
-        // 模板比对：毫秒级，可高频轮询
-        const r = await fetch(API + '/api/check_marker');
-        if (r.ok) {
-          const j = await r.json();
-          hit = !!j.hit;
+      const r = await fetch(API + '/api/check_marker');
+      if (r.ok) {
+        const j = await r.json();
+        if (j.hit) {
+          return performance.now() - startTs;  // 命中即停表
         }
-      } else {
-        // 文字匹配：秒级，OCR 全图推理
-        const r = await fetch(API + '/api/ocr');
-        if (r.ok) {
-          const data = await r.json();
-          hit = ocrHitSuccessMarker(data, marker);
-        }
-      }
-      if (hit) {
-        return performance.now() - startTs;  // 命中即停表
       }
     } catch (e) {
       // 网络抖动/后端临时错误：记下但继续轮询（只要没超时）
       // 注意：try 必须包住整个 fetch + json()，否则单次抖动会让整个循环挂掉
-      console.warn('检测轮询失败（将继续重试）:', e.message);
+      console.warn('模板检测轮询失败（将继续重试）:', e.message);
     }
     await sleep(gapMs);
   }
 }
+
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── 主状态机：卸装 → 测首次 → force_stop → 测二次，循环 N 轮 ──
 async function runAutoLoop() {
   // ── 前置校验 ──
-  const detectMode = document.querySelector('input[name="markerMode"]:checked')?.value || 'template';
-  const marker = $('successMarker').value.trim();
   const pkg = $('apkPkg').value.trim();
   const apkPath = $('apkPath').value.trim();
   const x = parseFloat($('tapX').value);
   const y = parseFloat($('tapY').value);
   const timeoutMs = Math.max(5, parseFloat($('autoTimeout').value) || 30) * 1000;
-  const gapMs = Math.max(50, parseFloat($('autoGap').value) || (detectMode === 'template' ? 80 : 300));
+  const gapMs = Math.max(50, parseFloat($('autoGap').value) || 80);
   const rounds = Math.min(10, Math.max(1, parseInt($('autoRounds').value) || 5));
   const launchMode = $('launchMode').value;
 
-  // 按模式校验
-  if (detectMode === 'text' && !marker) { alert('文字模式请填「启动成功标识」文字'); return; }
-  if (detectMode === 'template' && !markerTemplateReady) { alert('模板模式请先点画面选定「启动元素」'); return; }
+  if (!markerTemplateReady) { alert('请先点画面选定「启动元素」'); return; }
   if (!pkg) { alert('请填 APK 包名'); return; }
   if (!apkPath) { alert('请先上传/填 APK 路径'); return; }
   if (launchMode === 'tap' && (!x || !y)) { alert('tap 模式请先在画面上点图标位置'); return; }
@@ -1624,8 +1576,7 @@ async function runAutoLoop() {
   autoLiveWasOn = !!liveTimer;
 
   const t0 = performance.now();
-  const modeLabel = detectMode === 'template' ? `模板比对(~${gapMs}ms/次)` : `文字匹配「${marker}」(~1s/次)`;
-  autoLog(`开始自动测速 · ${rounds} 轮 · ${modeLabel} · 超时 ${timeoutMs/1000}s`);
+  autoLog(`开始自动测速 · ${rounds} 轮 · 模板比对(~${gapMs}ms/次) · 超时 ${timeoutMs/1000}s`);
 
   try {
     for (let round = 1; round <= rounds; round++) {
@@ -1654,7 +1605,7 @@ async function runAutoLoop() {
       // ── 阶段 2：测首次冷启动 ──
       if (autoAbortFlag) throw new Error('用户中断');
       autoLog(`第 ${round} 轮 · 测首次冷启动 ...`);
-      const firstMs = await measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs, gapMs, '首次', round);
+      const firstMs = await measureOnce(pkg, launchMode, x, y, timeoutMs, gapMs, '首次', round);
       records.push({ time: firstMs, date: new Date().toISOString(), source: 'auto', type: 'first', round });
       saveRecords(); renderHistory(); renderStats();
       autoLog(`第 ${round} 轮 · 首次冷启动 = ${fmt(firstMs)}s`, 'ok');
@@ -1668,7 +1619,7 @@ async function runAutoLoop() {
 
       // ── 阶段 4：测二次冷启动 ──
       autoLog(`第 ${round} 轮 · 测二次冷启动 ...`);
-      const secondMs = await measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs, gapMs, '二次', round);
+      const secondMs = await measureOnce(pkg, launchMode, x, y, timeoutMs, gapMs, '二次', round);
       records.push({ time: secondMs, date: new Date().toISOString(), source: 'auto', type: 'second', round });
       saveRecords(); renderHistory(); renderStats();
       autoLog(`第 ${round} 轮 · 二次冷启动 = ${fmt(secondMs)}s`, 'ok');
@@ -1683,13 +1634,13 @@ async function runAutoLoop() {
     // ── 全部完成 ──
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
     autoLog(`✓ 全部完成 · 总耗时 ${totalSec}s`, 'ok');
-    renderAutoReport({ success: true, rounds, marker, totalSec });
+    renderAutoReport({ success: true, rounds, totalSec });
 
   } catch (e) {
     // ── 失败即停（用户选的策略）──
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
     autoLog(`✗ 中止：${e.message} · 已耗时 ${totalSec}s`, 'err');
-    renderAutoReport({ success: false, rounds, marker, totalSec, error: e.message });
+    renderAutoReport({ success: false, rounds, totalSec, error: e.message });
   } finally {
     autoRunning = false;
     autoAbortFlag = false;
@@ -1700,8 +1651,8 @@ async function runAutoLoop() {
   }
 }
 
-// 单次测速：cold_start → 单一时钟打点 → OCR/模板停表
-async function measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs, gapMs, label, round) {
+// 单次测速：cold_start → 单一时钟打点 → 模板比对停表
+async function measureOnce(pkg, launchMode, x, y, timeoutMs, gapMs, label, round) {
   if (autoAbortFlag) throw new Error('用户中断');
   const body = { mode: launchMode, package: pkg };
   if (launchMode === 'tap') { body.x = x; body.y = y; }
@@ -1718,7 +1669,7 @@ async function measureOnce(pkg, launchMode, x, y, detectMode, marker, timeoutMs,
   const liveWasOn = !!liveTimer;
   if (liveWasOn) stopLive();
   try {
-    return await waitForLaunchDone(startTs, detectMode, marker, timeoutMs, gapMs);
+    return await waitForLaunchDone(startTs, timeoutMs, gapMs);
   } finally {
     // 停表一结束立刻恢复直播，让用户能看到后续 force_stop、下一轮 reinstall 等
     if (liveWasOn && $('liveToggle').checked) startLive();
@@ -1784,7 +1735,7 @@ function renderAutoReport(ctx) {
   L.push(`设备        ${device}`);
   L.push(`应用包名    ${pkg}`);
   L.push(`APK 文件    ${apkName}`);
-  L.push(`启动标识    "${ctx.marker}"`);
+  L.push(`启动判定    模板比对（cv2.matchTemplate）`);
   L.push(`平台        ${platformLabel}`);
   L.push(`轮数        ${ctx.rounds} 轮（首次 ${firsts.length} + 二次 ${seconds.length}）`);
   L.push(`总耗时      ${ctx.totalSec}s`);
@@ -1871,29 +1822,6 @@ $('autoStopBtn').addEventListener('click', () => {
   autoLog('收到停止指令，当前步骤完成后退出...', 'warn');
   $('autoStopBtn').disabled = true;
 });
-
-// ── 检测模式切换：模板比对 vs 文字匹配 ──
-// 切换时显示/隐藏对应配置块，并调整默认轮询间隔（模板快可低，文字慢要高）
-function applyMarkerMode(mode) {
-  if (mode === 'template') {
-    $('templateConfigBlock').classList.remove('hidden');
-    $('textConfigBlock').classList.add('hidden');
-    // 文字→模板切换时，若当前轮询较高（300+），降到模板推荐的 80
-    const cur = parseInt($('autoGap').value) || 80;
-    if (cur >= 300) $('autoGap').value = 80;
-  } else {
-    $('templateConfigBlock').classList.add('hidden');
-    $('textConfigBlock').classList.remove('hidden');
-    // 模板→文字切换时，若当前轮询太低（<300），升到文字需要的 300（OCR 全图推理慢）
-    const cur = parseInt($('autoGap').value) || 300;
-    if (cur < 300) $('autoGap').value = 300;
-  }
-}
-document.querySelectorAll('input[name="markerMode"]').forEach(radio => {
-  radio.addEventListener('change', e => applyMarkerMode(e.target.value));
-});
-// 初始模式（页面加载时按默认选中项应用一次）
-applyMarkerMode(document.querySelector('input[name="markerMode"]:checked')?.value || 'template');
 
 // ── 模板选定流程：点「点画面选定」→ 进入选定模式 → 用户点画面 → 调 set_marker_template ──
 $('setMarkerBtn').addEventListener('click', () => {
