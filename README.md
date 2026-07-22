@@ -145,16 +145,20 @@ POST /api/cold_start
 ```
 app-coldstart/
 ├── Start.bat              ← 双击启动（自动建 venv + 装依赖）
-├── server.py              ← FastAPI 后端
+├── server.py              ← FastAPI 后端（单文件，含 OCR/ADB/模板比对）
 ├── static/index.html      ← 前端单文件（HTML+CSS+JS 内嵌）
 ├── requirements.txt       ← Python 依赖
-├── adb/                   ← 内置 ADB
+├── adb/                   ← 内置 ADB（不污染系统 PATH）
 │   ├── adb.exe
 │   ├── AdbWinApi.dll
 │   └── AdbWinUsbApi.dll
-├── .venv/                 ← 首次启动后自动创建
-├── *.v1.*.bak             ← v1.5 旧文件备份（可删）
-└── README.md              ← 本文档
+├── hooks/                 ← Git pre-commit 钩子（防误提交 + ast 语法检查）
+│   ├── pre-commit
+│   └── install.{sh,bat}   ← 安装脚本（拷贝到 .git/hooks/）
+├── AGENTS.md              ← 项目硬规范（任何 agent/协作者必读）
+├── README.md              ← 本文档
+├── .gitignore / .gitattributes  ← Git 配置
+└── .venv/                 ← 首次启动后自动创建（不入版本控制）
 ```
 
 ---
