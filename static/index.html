@@ -2325,7 +2325,9 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/** 测启动前：am kill-all 清后台 + force_stop 目标包 + 冷却 */
+/** 测启动前：am kill-all 清后台 + force_stop 目标包 + 冷却
+ *  任一步失败必须抛错中止——否则可能测到温启动，污染冷启样本。
+ */
 async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   autoLog('STEP', phase, 'am kill-all（清后台）…');
   const kr = await fetch(API + '/api/kill_all', {
@@ -2334,15 +2336,22 @@ async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   });
   const kj = await kr.json().catch(() => ({}));
   if (!kr.ok || !kj.ok) {
-    const msg = kj.detail || kj.error || `HTTP ${kr.status}`;
-    throw new Error(`kill-all 失败：${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
+    throw new Error(`kill-all 失败：${apiDetail(kj, `HTTP ${kr.status}`)}`);
   }
   autoLog('OK', phase, `kill-all ${kj.log || 'ok'}`);
+
   autoLog('STEP', phase, 'force_stop 目标包…');
-  await fetch(API + '/api/force_stop', {
+  const fr = await fetch(API + '/api/force_stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ package: pkg })
   });
+  const fj = await fr.json().catch(() => ({}));
+  if (!fr.ok || fj.ok === false) {
+    // /api/force_stop 成功时返回 {ok:true}；失败为 HTTP 400 + detail
+    throw new Error(`force_stop 失败：${apiDetail(fj, `HTTP ${fr.status}`)}`);
+  }
+  autoLog('OK', phase, `force_stop ${pkg}`);
+
   if (killCoolMs > 0) {
     autoLog('INFO', phase, `清进程后冷却 ${(killCoolMs / 1000).toFixed(1)}s`);
     await sleep(killCoolMs);

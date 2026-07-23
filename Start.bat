@@ -45,10 +45,16 @@ if not exist "%PY%" (
 )
 
 REM -- Start backend --
-echo [RUN] Starting backend on http://127.0.0.1:%PORT% ...
+REM HOST=0.0.0.0 → 允许局域网其他人访问（http://本机IP:8766）
+REM 要切回仅本机访问（更安全）：把下面的 0.0.0.0 改成 127.0.0.1
+set "HOST=0.0.0.0"
+echo [RUN] Starting backend on http://%HOST%:%PORT% ...
+echo       本机访问:  http://127.0.0.1:%PORT%/
+echo       局域网访问（同网段其他人用）:
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /C:"IPv4"') do echo         http://%%a:%PORT%/
 echo       Browser will open automatically. Keep this window open.
 echo.
-start "App Cold Start Profiler - Backend (DO NOT CLOSE)" "%PY%" -m uvicorn server:app --host 127.0.0.1 --port %PORT% --app-dir "%ROOT%"
+start "App Cold Start Profiler - Backend (DO NOT CLOSE)" "%PY%" -m uvicorn server:app --host %HOST% --port %PORT% --app-dir "%ROOT%"
 
 REM -- Wait for service then open browser --
 echo [WAIT] Waiting for service...

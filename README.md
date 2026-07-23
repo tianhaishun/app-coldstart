@@ -134,8 +134,24 @@ POST /api/cold_start
 
 - 工具**不上传任何数据**
 - 测试记录保存在浏览器 `localStorage`
-- 后端**只绑 127.0.0.1**，不对外
+- 后端默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，把 `Start.bat` 里 `HOST=0.0.0.0` 改成 `127.0.0.1`
 - 内置 adb（`adb/adb.exe`），不污染系统 PATH
+
+> ⚠️ **多人访问须知**：本服务无认证。同网段任何人都能操作这台机器上 USB 连接的手机（卸装/点击/截图/上传 APK）。
+> adb 设备是本机物理连接——别人浏览器只是远程操作界面，所有实际动作都走你这台机器。同一时刻只能一人使用（adb 串行锁）。
+> **切勿暴露到公网**。仅在可信内网使用。
+
+### 防火墙（首次开放访问需加，管理员 PowerShell 执行一次）
+
+```powershell
+New-NetFirewallRule -DisplayName "App Cold Start 8766" -Direction Inbound -Protocol TCP -LocalPort 8766 -Action Allow -Profile Private
+```
+
+改回安全（仅本机）后，删规则：
+
+```powershell
+Remove-NetFirewallRule -DisplayName "App Cold Start 8766"
+```
 
 ---
 
