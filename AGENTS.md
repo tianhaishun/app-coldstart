@@ -59,6 +59,25 @@
 - 截图优先 `exec-out screencap -p`（直出 PNG bytes），失败回退 `screencap + pull`
 - 所有 adb 调用集中在 `AdbDevice` 类，便于加锁 + 复用
 - Session 的 `_lock` 串行化所有设备 I/O（adb server 不擅长并发）
+- **所有会触发 adb 的端点必须用 `with SESSION.device_op() as dev:` 包住**（审核修复），
+  不能裸访问 `SESSION.device`。device_op 是统一加锁入口。
+- `run(check=False)` 会吞掉非零退出码，只用于"失败可接受"场景（force_stop 杀不存在的进程）。
+  关键操作（uninstall/install）必须验证输出含 Success/Failure，空输出（device offline）要抛错。
+
+### 2.5 模板比对停表（v3 新增，自动测速核心）
+- 用户点画面选定"启动元素"→ 后端以该坐标为中心截 240×120 小区域存为模板（`_cst_marker.png`）
+- 运行时 `check_marker` 截当前屏 + 在模板坐标 ±20px 范围用 `cv2.matchTemplate(TM_CCOEFF_NORMED)` 搜索
+- 置信度 ≥ 0.85 即判定启动成功，前端 `performance.now() - startTs` 停表
+- **matchTemplate 部分 3ms/次**（区域搜索比全图 OCR 快 49 倍）；实际单次耗时瓶颈是 adb 截图（300-800ms）
+- **纯色模板必须拒绝**（灰度标准差 < 15）：TM_CCOEFF_NORMED 对纯色返回 1.0 满置信度会误命中
+- 模板与设备/分辨率绑定，重启后端会清掉（Session._marker_template 是内存变量）
+- **不用 OCR 全图文字匹配做停表**（实测 RapidOCR 全图推理 1373ms/次，精度 ±1-2s 不可接受）
+
+### 2.6 自动测速批次隔离（v3 新增）
+- runAutoLoop 每轮开始时记 `runStartIndex = records.length` + `run_id`（时间戳）
+- records.push 带 `source:'auto' / type:'first'|'second' / round / run_id`
+- 报告（renderAutoReport）只取 `records.slice(runStartIndex)`，不混入历史 auto 记录
+- 删除中间一条记录会导致后续奇偶身份翻转（§2.3 依赖序号），所以删记录要谨慎
 
 ---
 
@@ -133,3 +152,46 @@ v1 漏掉了 tap 执行时间（~200ms，偏小但每次都偏），wall 校准�
 2. 重写 ≠ 改进，必须先证明原版有问题
 3. 改完必须用真实数据验证，不能凭"应该对"
 4. "更精确"的校准公式如果不验证，可能比原版偏得更大
+
+---
+
+**教训三：在错误的状态上叠加"可信度增强"（2026-07 自动测速迭代）**
+用户要求"卸装安装 log 加日期时间"，agent 逐步叠加了 MD5 指纹 → 时间戳 → capture_err
+三重处理，把 13 行的 `reinstall` 弄成 50 行怪兽。每层单独看"有道理"，叠在一起就成了灾难。
+用户原话："明明很简单的卸载和安装，现在被你弄得很不透明和可信"。
+最终回退到 13 行原始版（只留 adb 原始输出 + 前端 autoLog 加日期）。
+
+**教训四：文字 OCR 停表精度不可接受（2026-07 自动测速迭代）**
+为"自动判定启动成功"，先做了 OCR 全图文字匹配停表。实测 RapidOCR 全图推理
+1373ms/次（1080×2400），停表精度 ±1-2s。用户判断"1s 误差太大，直接放弃"。
+改用 cv2.matchTemplate 区域模板比对，matchTemplate 部分 3ms（区域搜索比全图快 49 倍）。
+**结论**：神经网络推理（OCR）本质比像素比对（模板）重几十倍，自动化停表首选模板比对。
+
+**教训五：纯色模板会让 matchTemplate 误命中（2026-07，第三方审核发现）**
+cv2.matchTemplate 用 TM_CCOEFF_NORMED 时，纯色模板会返回 1.0 满置信度（实测确认）。
+用户若点到画面空白处设模板，启动瞬间立即误命中停表，数据全错。
+**修复**：set_marker_template 存模板前算灰度标准差，<15 拒绝。
+**结论**：matchTemplate 不检查模板纹理，纯色/低方差模板必须在上游拒绝。
+
+**教训六：路径穿越是 catch-all 路由的标配漏洞（2026-07，第三方审核发现）**
+`@app.get("/{path:path}")` 直接拼接 `STATIC_DIR / path` 未验证边界，
+`GET /..%2Fserver.py` 可读取完整源码。修复：resolve 后用 `relative_to(STATIC_DIR)` 验证。
+**结论**：任何手写静态文件路由都必须做边界检查，或直接用框架的 StaticFiles。
+
+**教训七：adb check=False 会吞掉失败（2026-07，第三方审核发现）**
+`run(check=False)` 无视非零退出码。device offline 时 uninstall 输出为空，
+代码继续执行 install -r，覆盖安装被当"干净重装"，污染首次冷启动样本。
+**修复**：reinstall 里要求 adb 输出必须有明确 Success/Failure，空输出立即抛错。
+**结论**：check=False 只用于"失败可接受"的场景（如 force_stop 杀不存在的进程），
+关键操作（uninstall/install）必须验证输出。
+
+**根因（教训三~七同源）**：
+- 教训三：在错误状态上叠加修复，没有回滚到已知正确状态（违反本文件 §4）
+- 教训四~七：没有用真实数据/边界用例验证就交付（违反本文件 §1.4）
+
+**本次迭代新增的硬规则（agent 必须遵守）**：
+1. **改完代码必须重启后端 + 浏览器验证 + 保持后端常驻**（不能只改本地就让用户访问不了）
+2. **不擅自加"可信度增强"**（MD5/时间戳/指纹等），除非用户明确要
+3. **自动停表只用模板比对**（cv2.matchTemplate），不用 OCR 全图文字匹配
+4. **设模板必须拒绝纯色/低方差区域**（灰度标准差 < 15）
+5. **第三方审核/代码审查发现的问题，先实测验证再修**（不盲从也不辩护）
