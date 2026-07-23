@@ -18,7 +18,7 @@ v1 → v2 的关键修复：
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import hashlib
 import os
 import re
@@ -29,7 +29,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 # uvicorn 加载本模块时把根目录加进 sys.path，便于 from server import ...
 ROOT = Path(__file__).resolve().parent
@@ -546,13 +546,10 @@ SESSION = Session()
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
-
-app = FastAPI(title="App Cold Start Profiler", version="2.0")
+from pydantic import BaseModel, Field
 
 
-@app.on_event("startup")
-def cleanup_stale_temp_files() -> None:
+def _cleanup_stale_temp_files() -> None:
     """启动时清理 tempdir 下的旧 _cst_* 文件（避免长时间运行后堆积）。
 
     72 小时连续运行 + 多次重启会累积一堆 _cst_live_{oldpid}.png 和 _cst_upload.apk
@@ -584,6 +581,16 @@ def cleanup_stale_temp_files() -> None:
     print("[startup] 清理了 tempdir 下的旧 _cst_* 临时文件 + _cst_uploads/ + _cst_marker.png", flush=True)
 
 
+# FastAPI lifespan（替代已弃用的 on_event，官方推荐写法）
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _cleanup_stale_temp_files()
+    yield
+
+
+app = FastAPI(title="App Cold Start Profiler", version="2.0", lifespan=lifespan)
+
+
 class DeviceSelectReq(BaseModel):
     serial: Optional[str] = None
 
@@ -594,10 +601,10 @@ class SetMarkerReq(BaseModel):
     cx/cy 是归一化坐标（0~1），来自前端点画面或点 OCR 框。
     box_w/box_h 可选：若来自 OCR 框就用框的归一化尺寸换算像素；否则用默认。
     """
-    cx: float
-    cy: float
-    box_w: Optional[float] = None  # 归一化宽（0~1）
-    box_h: Optional[float] = None  # 归一化高（0~1）
+    cx: float = Field(ge=0.0, le=1.0)
+    cy: float = Field(ge=0.0, le=1.0)
+    box_w: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化宽（0~1）
+    box_h: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化高（0~1）
 
 
 class TapReq(BaseModel):
@@ -651,9 +658,9 @@ class ColdStartReq(BaseModel):
     注意：cold_start 不会自动回主页。用户需确保启动前已在桌面（或 App 已被 force_stop
     后系统自动回桌面）。独立的"回主页"能力保留在前端按钮 + /api/key 端点。
     """
-    mode: str = "tap"  # "tap" 或 "pkg"
-    x: Optional[float] = None
-    y: Optional[float] = None
+    mode: Literal["tap", "pkg"] = "tap"
+    x: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化坐标（mode=tap 时）
+    y: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     package: Optional[str] = None
     serial: Optional[str] = None
 

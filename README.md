@@ -11,7 +11,7 @@
 | 定位坐标 | getevent 监听 12 秒超时 | **点画面一下即得**，所见即所得 |
 | 画面 | 无 | **左侧实时画面**（截图轮询，可调速度） |
 | OCR | 无 | **RapidOCR 文字框叠加**，点文字框也能定位 |
-| 计时精度 | 含 HTTP+adb fork 延迟（100-400ms 抖动） | **服务端精确打点**，消除系统误差 |
+| 计时精度 | 含 HTTP+adb fork 延迟（100-400ms 抖动） | **单一 performance.now() 时钟**，OCR/模板自动停表消除终点人工误差 |
 | 前端 | 单 HTML，无反馈 | **左右分屏**，深色 UI，OCR 调试面板 |
 | 错误处理 | adb 卡死会让 fetch 挂起 | **所有 adb 调用有超时**，错误即时返回 |
 | 依赖 | 零安装 | 需要 Python 3.10+（首次自动建 venv） |
@@ -68,15 +68,14 @@
 
 v1 的计时包含 **HTTP 往返 + adb 进程 fork** 延迟，100-400ms 抖动直接污染冷启动数据。
 
-v2 的 `/api/cold_start` 端点编排了「杀进程 → 回桌面 → 点击图标」一气呵成；计时用 v1 验证过的纯前端 `performance.now()` 方案：
+v2 的 `/api/cold_start` 端点编排了「杀进程 → 点击图标/包名启动」一气呵成；计时用 v1 验证过的纯前端 `performance.now()` 方案：
 
 ```
 POST /api/cold_start
   ↓
 服务端 force_stop(pkg)          ← 确保冷启动
-服务端 keyevent(HOME)           ← 回桌面
-服务端 adb shell input tap X Y  ← 点击图标
-返回 { ok }                      ← 不带时间戳，前端不校准
+服务端 adb shell input tap X Y  ← 点击图标（或 monkey -p 包名启动）
+返回 { ok, start_wall }          ← start_wall 仅供诊断，前端计时用 performance.now() 不消费
   ↓
 前端 startTs = performance.now()  ← 响应回来后直接打点
 前端 loop() elapsed = performance.now() - startTs
