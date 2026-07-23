@@ -17,3 +17,4 @@ _cst_*.apk
 
 # Stitch 生成的 UI 设计稿（仅作设计参考，非项目运行所需，不入版本控制）
 stitch_adaptive_responsive_shortcut_layout/
+chk.html
