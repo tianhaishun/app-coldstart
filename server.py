@@ -346,18 +346,30 @@ class AdbDevice:
         保持简单透明：uninstall → 兜底 pm uninstall → install → 判 Success。
         返回的 log 是 adb 原始输出（uninstall: ... / install: ...），不加工。
         前端原样显示，用户能直接看到 adb 真实反馈。
+
+        严格性（审核修复）：adb 输出必须有明确的 Success/Failure 字样。
+        空输出（device offline / adb 断连）视为失败，不静默继续——否则
+        uninstall 静默失败后 install -r 会覆盖安装，被当"干净重装"，污染首次冷启动。
         """
         if not Path(apk_path).exists():
             raise AdbError(f"APK 文件不存在：{apk_path}")
         log: list[str] = []
         out = self.run(["uninstall", pkg], check=False, timeout=60.0)
         log.append(f"uninstall: {out}")
+        # adb uninstall 输出必须有明确结果（Success 或 Failure [xxx]）
+        # 空输出 = 设备离线/adb 断连，不能继续（否则 install -r 变覆盖安装）
+        if not out:
+            raise AdbError("卸载失败：adb 无输出（设备离线或 adb 断连）")
         if "Failure" in out:
             # 兜底：部分设备（如装为系统用户）需要 --user 0 才能卸
             out2 = self.run(["shell", "pm", "uninstall", "--user", "0", pkg], check=False, timeout=30.0)
             log.append(f"pm uninstall --user 0: {out2}")
+            if not out2:
+                raise AdbError("pm uninstall --user 0 无输出（设备离线或 adb 断连）")
         out3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0)
         log.append(f"install: {out3}")
+        if not out3:
+            raise AdbError("安装失败：adb 无输出（设备离线或 adb 断连）")
         if "Success" not in out3:
             raise AdbError(f"安装失败：{out3}")
         return log
