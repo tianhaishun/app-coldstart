@@ -1058,8 +1058,17 @@ def index() -> FileResponse:
 
 @app.get("/{path:path}")
 def static_fallback(path: str) -> FileResponse:
-    """其它路径都尝试从 static/ 取，找不到回 index.html（SPA 兜底）。"""
-    candidate = STATIC_DIR / path
+    """其它路径都尝试从 static/ 取，找不到回 index.html（SPA 兜底）。
+
+    安全：resolve 后验证目标仍在 STATIC_DIR 内，防路径穿越
+    （如 /..%2Fserver.py 读取项目源码）。越界或不存在都回 index.html。
+    """
+    candidate = (STATIC_DIR / path).resolve()
+    try:
+        candidate.relative_to(STATIC_DIR.resolve())
+    except ValueError:
+        # 越出 STATIC_DIR，拒绝（路径穿越攻击）
+        return FileResponse(STATIC_DIR / "index.html")
     if candidate.is_file():
         return FileResponse(candidate)
     return FileResponse(STATIC_DIR / "index.html")
