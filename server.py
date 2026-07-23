@@ -52,6 +52,23 @@ MARKER_MATCH_THRESHOLD = 0.85   # cv2.matchTemplate 命中阈值（TM_CCOEFF_NOR
 MARKER_SEARCH_PADDING = 20      # 模板坐标周围搜索范围（像素，容忍 UI 轻微位移）
 MARKER_DEFAULT_W = 240          # 默认模板宽（用户没传 box_w 时用）
 MARKER_DEFAULT_H = 120          # 默认模板高
+# 停表可信：连续 N 帧过阈才算命中（抗动画闪一下）；需先见过低于阈值（上升沿，抗桌面残留）
+MARKER_CONFIRM_FRAMES = 2
+MARKER_REQUIRE_RISING_EDGE = True
+
+# 跳过弹窗模板（通知权限「允许/不允许」等）：命中后自动点击，不停表
+SKIP_TEMPLATE_MAX = 3
+SKIP_TEMPLATE_DIR = Path(tempfile.gettempdir()) / "_cst_skips"
+SKIP_MATCH_THRESHOLD = 0.85
+SKIP_SEARCH_PADDING = 40        # 弹窗按钮位移通常比启动元素大一点
+SKIP_DEFAULT_W = 200            # 按钮区域默认比启动元素略窄
+SKIP_DEFAULT_H = 80
+SKIP_TAP_COOLDOWN_S = 1.5       # 同一跳过模板点击冷却，防连点
+
+# 项目持久化（启动模板 / 跳过模板 / 包名等）。不存 APK 本体——每次测试自行上传。
+# 目录：<仓库>/projects/<id>/meta.json + marker.png + skip_*.png
+PROJECTS_DIR = ROOT / "projects"
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_apk_filename(original: str) -> str:
@@ -319,14 +336,39 @@ class AdbDevice:
         self.run(["shell", "input", "keyevent", str(code)], check=False, timeout=5.0)
 
     def launch_pkg(self, pkg: str) -> None:
-        """包名启动（绕过 Launcher 触摸）。"""
-        self.run(
+        """包名启动（绕过 Launcher 触摸）。
+
+        严格性（对齐教训七）：启动是冷启动测速的关键操作，不能静默失败。
+        之前用 check=False 会吞掉 monkey 的非零退出码——错误包名实测返回退出码 252
+        且输出 ``No activities found to run, monkey aborted.``，却被当成功，
+        导致前端开始计时但应用根本没起来（自动测速多轮无人值守时尤其严重）。
+
+        不用 run 的 check=True：monkey 诊断噪音常走 stderr，check=True 优先取 stderr
+        会给用户无意义噪音。这里 check=False 自己解析 stdout：
+        成功标志含 ``Events injected``，失败标志含 ``aborted`` / ``No activities found``。
+        """
+        out = self.run(
             ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
             check=False, timeout=10.0,
         )
+        low = (out or "").lower()
+        # 失败信号优先（即使退出码 0，输出含失败标志也判败，应对 Android 碎片化）
+        if "aborted" in low or "no activities found" in low:
+            raise AdbError(f"包名启动失败：找不到可启动的 Activity（包名错或无桌面入口）。pkg={pkg}")
+        # 成功信号：必须注入了事件。无此标志视为异常（空输出 = 设备离线/adb 断连）
+        if "events injected" not in low:
+            raise AdbError(f"包名启动失败（monkey 输出异常）：{out.strip() or '(空输出，设备可能离线)'}")
 
     def force_stop(self, pkg: str) -> None:
         self.run(["shell", "am", "force-stop", pkg], check=False, timeout=5.0)
+
+    def kill_all(self) -> str:
+        """清后台：``am kill-all``（不清系统关键前台，比逐包 force-stop 温和）。
+
+        用于自动测速每轮启动前腾内存，减轻启动抖动。失败可接受（部分 ROM 无此命令）。
+        """
+        out = self.run(["shell", "am", "kill-all"], check=False, timeout=10.0)
+        return (out or "").strip()
 
     def list_packages(self) -> list[str]:
         """列出第三方已装包名。`pm list packages -3` 过滤掉系统 App。
@@ -397,13 +439,45 @@ class Session:
         self.shot_avg_ms = 0.0    # 滑动平均耗时
         # 启动成功模板（cv2.matchTemplate 用，详见 set_marker_template / check_marker）
         self._marker_template: Optional[Path] = None  # 模板图路径（None=未设）
+        self._marker_img = None                        # 内存缓存（BGR ndarray），避免每次 imread
         self._marker_w: int = 0                        # 模板像素宽
         self._marker_h: int = 0                        # 模板像素高
         self._marker_cx: float = 0.5                   # 模板中心归一化坐标（运行时搜索用）
         self._marker_cy: float = 0.5
+        # 停表观察状态（每次 cold_start / marker_watch_reset 清零）
+        self._marker_hit_streak: int = 0               # 连续过阈帧数
+        self._marker_seen_below: bool = False          # 是否已见过低于阈值（上升沿）
         self.marker_check_total = 0      # check_marker 累计调用次数（诊断用）
         self.marker_check_last_ms = 0.0  # 上次 check 耗时
         self.marker_check_last_conf = 0.0  # 上次置信度
+        # 跳过弹窗模板（最多 SKIP_TEMPLATE_MAX 个）。每项：
+        #   id/path/cx/cy/w/h/img/preview；last_tap_at 用于冷却防连点
+        self._skip_templates: list[dict] = []
+
+    def reset_marker_watch(self) -> None:
+        """新一次测速开始前清零连续确认 / 上升沿状态。"""
+        with self._lock:
+            self._marker_hit_streak = 0
+            self._marker_seen_below = False
+
+    def set_marker_image(self, img) -> None:
+        """写入启动模板内存缓存（拷贝，避免后续被改）。img 为 None 则清空。"""
+        if img is None:
+            self._marker_img = None
+        else:
+            self._marker_img = img.copy()
+
+    def ensure_marker_image(self):
+        """返回缓存的模板图；缓存空则从磁盘读并填入。"""
+        import cv2
+        if self._marker_img is not None:
+            return self._marker_img
+        if self._marker_template is None or not Path(self._marker_template).is_file():
+            return None
+        im = cv2.imread(str(self._marker_template))
+        if im is not None:
+            self._marker_img = im
+        return self._marker_img
 
     def select(self, serial: Optional[str]) -> dict:
         with self._lock:
@@ -568,17 +642,21 @@ def _cleanup_stale_temp_files() -> None:
     tempdir = tempfile.gettempdir()
     # 老的单数文件（兼容历史）
     for pattern in ("_cst_live_*.png", "_cst_ocr_*.png", "_cst_upload.apk",
-                    "_cst_marker.png", "_cst_marker_src_*.png", "_cst_marker_chk_*.png"):
+                    "_cst_marker.png", "_cst_marker_src_*.png", "_cst_marker_chk_*.png",
+                    "_cst_skip_*.png"):
         for path in glob.glob(str(Path(tempdir) / pattern)):
             try:
                 Path(path).unlink()
             except OSError:
                 pass  # 文件可能正被占用
-    # 新的 APK 上传目录：清空后重建空目录
-    if APK_UPLOAD_DIR.exists():
-        shutil.rmtree(APK_UPLOAD_DIR, ignore_errors=True)
+    # 跳过模板目录（通知权限等）
+    if SKIP_TEMPLATE_DIR.exists():
+        shutil.rmtree(SKIP_TEMPLATE_DIR, ignore_errors=True)
+    # 新的 APK 上传目录：只确保目录存在，**不在启动时清空**。
+    # 清空会导致前端 localStorage 里的 apkPath 失效，自动循环卡在「卸装重装」
+    # 或秒失败「APK 不存在」——测速会话跨重启必须还能用同一份 APK。
     APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    print("[startup] 清理了 tempdir 下的旧 _cst_* 临时文件 + _cst_uploads/ + _cst_marker.png", flush=True)
+    print("[startup] 清理了 tempdir 下的旧 _cst_* 截图/模板；保留 _cst_uploads/ 里的 APK", flush=True)
 
 
 # FastAPI lifespan（替代已弃用的 on_event，官方推荐写法）
@@ -607,6 +685,176 @@ class SetMarkerReq(BaseModel):
     box_h: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化高（0~1）
 
 
+class ClearSkipReq(BaseModel):
+    """清除跳过模板。id 为 None 时清空全部；指定 id 只删一条。"""
+    id: Optional[int] = None
+
+
+class ProjectCreateReq(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class ProjectRenameReq(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class ProjectSaveReq(BaseModel):
+    """把当前 Session 模板 + 表单配置写入指定项目（手动保存）。不存 APK。"""
+    name: Optional[str] = None
+    package: str = ""
+    launch_mode: Literal["tap", "pkg"] = "pkg"
+    tap_x: Optional[float] = None
+    tap_y: Optional[float] = None
+    platform: str = "gp"
+    apk_hint: str = ""  # 仅提示用文件名，不复制 APK
+
+
+def _safe_project_id(raw: str) -> str:
+    """项目 id：只允许 [A-Za-z0-9_-]，防路径穿越。"""
+    s = re.sub(r"[^A-Za-z0-9_-]", "", (raw or "").strip())
+    if not s or s in (".", ".."):
+        raise AdbError("非法项目 id")
+    return s
+
+
+def _project_dir(pid: str) -> Path:
+    d = (PROJECTS_DIR / _safe_project_id(pid)).resolve()
+    try:
+        d.relative_to(PROJECTS_DIR.resolve())
+    except ValueError as e:
+        raise AdbError("项目路径越界") from e
+    return d
+
+
+def _read_project_meta(pid: str) -> dict:
+    meta_path = _project_dir(pid) / "meta.json"
+    if not meta_path.is_file():
+        raise AdbError(f"项目不存在：{pid}")
+    import json
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def _write_project_meta(pid: str, meta: dict) -> None:
+    import json
+    d = _project_dir(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    meta["id"] = pid
+    meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    (_project_dir(pid) / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _preview_b64_from_path(path: Path) -> tuple[str, str]:
+    import cv2
+    img = cv2.imread(str(path))
+    if img is None:
+        return "", "image/jpeg"
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        return "", "image/jpeg"
+    return base64.b64encode(buf).decode("ascii"), "image/jpeg"
+
+
+def _apply_project_to_session(pid: str) -> dict:
+    """从磁盘项目加载模板到 Session（运行时内存），返回给前端的摘要。"""
+    import shutil
+
+    meta = _read_project_meta(pid)
+    pdir = _project_dir(pid)
+
+    with SESSION._lock:
+        # 清当前跳过模板
+        for t in SESSION._skip_templates:
+            try:
+                Path(t["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        SESSION._skip_templates.clear()
+        SKIP_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+
+        marker_src = pdir / "marker.png"
+        if marker_src.is_file():
+            shutil.copy2(marker_src, MARKER_TEMPLATE_PATH)
+            SESSION._marker_template = MARKER_TEMPLATE_PATH
+            m = meta.get("marker") or {}
+            SESSION._marker_w = int(m.get("w") or 0)
+            SESSION._marker_h = int(m.get("h") or 0)
+            SESSION._marker_cx = float(m.get("cx") if m.get("cx") is not None else 0.5)
+            SESSION._marker_cy = float(m.get("cy") if m.get("cy") is not None else 0.5)
+            import cv2
+            im = cv2.imread(str(MARKER_TEMPLATE_PATH))
+            if im is not None:
+                SESSION.set_marker_image(im)
+                if SESSION._marker_w <= 0 or SESSION._marker_h <= 0:
+                    SESSION._marker_h, SESSION._marker_w = im.shape[:2]
+            else:
+                SESSION.set_marker_image(None)
+            SESSION.reset_marker_watch()
+            marker_preview, marker_mime = _preview_b64_from_path(MARKER_TEMPLATE_PATH)
+        else:
+            SESSION._marker_template = None
+            SESSION.set_marker_image(None)
+            SESSION._marker_w = SESSION._marker_h = 0
+            SESSION.reset_marker_watch()
+            marker_preview, marker_mime = "", "image/jpeg"
+
+        skip_out = []
+        for s in meta.get("skips") or []:
+            sid = int(s["id"])
+            src = pdir / f"skip_{sid}.png"
+            if not src.is_file():
+                continue
+            dst = SKIP_TEMPLATE_DIR / f"skip_{sid}.png"
+            shutil.copy2(src, dst)
+            prev, mime = _preview_b64_from_path(dst)
+            import cv2
+            skip_img = cv2.imread(str(dst))
+            entry = {
+                "id": sid,
+                "path": dst,
+                "cx": float(s["cx"]),
+                "cy": float(s["cy"]),
+                "w": int(s.get("w") or 0),
+                "h": int(s.get("h") or 0),
+                "img": skip_img,  # 内存缓存，check_auto 免重复 imread
+                "last_tap_at": 0.0,
+                "preview_base64": prev,
+                "preview_mime": mime,
+            }
+            SESSION._skip_templates.append(entry)
+            skip_out.append({
+                "id": sid,
+                "width": entry["w"],
+                "height": entry["h"],
+                "center_x": round(entry["cx"], 5),
+                "center_y": round(entry["cy"], 5),
+                "preview_base64": prev,
+                "preview_mime": mime,
+            })
+
+    return {
+        "ok": True,
+        "id": pid,
+        "name": meta.get("name") or pid,
+        "package": meta.get("package") or "",
+        "launch_mode": meta.get("launch_mode") or "pkg",
+        "tap_x": meta.get("tap_x"),
+        "tap_y": meta.get("tap_y"),
+        "platform": meta.get("platform") or "gp",
+        "apk_hint": meta.get("apk_hint") or "",
+        "marker_ready": SESSION._marker_template is not None,
+        "marker_width": SESSION._marker_w,
+        "marker_height": SESSION._marker_h,
+        "marker_center_x": round(SESSION._marker_cx, 5) if SESSION._marker_template else None,
+        "marker_center_y": round(SESSION._marker_cy, 5) if SESSION._marker_template else None,
+        "marker_preview_base64": marker_preview,
+        "marker_preview_mime": marker_mime,
+        "skips": skip_out,
+        "updated_at": meta.get("updated_at") or "",
+    }
+
+
 class TapReq(BaseModel):
     x: float
     y: float
@@ -633,6 +881,10 @@ class LaunchPkgReq(BaseModel):
 
 class ForceStopReq(BaseModel):
     package: str
+    serial: Optional[str] = None
+
+
+class KillAllReq(BaseModel):
     serial: Optional[str] = None
 
 
@@ -879,6 +1131,8 @@ def set_marker_template(req: SetMarkerReq) -> dict:
             # 中心归一化坐标（实际截取后的中心，可能与请求的 cx/cy 略有偏差——因越界裁剪）
             SESSION._marker_cx = (x1 + actual_w / 2) / w_px
             SESSION._marker_cy = (y1 + actual_h / 2) / h_px
+            SESSION.set_marker_image(template)
+            SESSION.reset_marker_watch()
 
             # 6) 返回预览（base64 JPG，体积小，前端 <img> 直接显示）
             ok, buf = cv2.imencode(".jpg", template, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -976,6 +1230,564 @@ def check_marker() -> dict:
         return {"hit": False, "confidence": 0.0, "ms": 0.0, "error": f"{type(e).__name__}: {e}"}
 
 
+@app.get("/api/marker_status")
+def marker_status() -> dict:
+    """查询启动成功模板是否已设（供前端刷新后恢复 markerTemplateReady，无需再截屏匹配）。"""
+    ready = (
+        SESSION._marker_template is not None
+        and Path(SESSION._marker_template).exists()
+    )
+    return {
+        "ready": ready,
+        "width": SESSION._marker_w if ready else 0,
+        "height": SESSION._marker_h if ready else 0,
+        "center_x": round(SESSION._marker_cx, 5) if ready else None,
+        "center_y": round(SESSION._marker_cy, 5) if ready else None,
+    }
+
+
+@app.post("/api/preflight_auto")
+def preflight_auto(req: ReinstallReq) -> dict:
+    """自动循环开跑前自检：设备、APK 文件、包名非空。不占设备锁、不做 adb 卸装。"""
+    errors: list[str] = []
+    if SESSION._device is None:
+        errors.append("未选择设备")
+    if not (req.package or "").strip():
+        errors.append("包名为空")
+    apk = Path(req.apk_path or "")
+    if not apk.is_file():
+        errors.append(f"APK 不存在：{req.apk_path}（请重新上传）")
+    marker_ok = (
+        SESSION._marker_template is not None
+        and Path(SESSION._marker_template).exists()
+    )
+    if not marker_ok:
+        errors.append("未设启动元素模板")
+    return {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "apk_name": apk.name if apk.is_file() else "",
+        "apk_size_mb": round(apk.stat().st_size / 1048576, 1) if apk.is_file() else 0,
+        "marker_ready": marker_ok,
+        "device": SESSION._serial,
+    }
+
+
+# ── 项目持久化（手动保存；不复制 APK）──
+
+def _new_project_id(name: str) -> str:
+    """从显示名生成安全 id：ascii 前缀 + 短 hash，避免中文路径。"""
+    base = re.sub(r"[^A-Za-z0-9_-]", "", (name or "").strip())[:20] or "proj"
+    suffix = hashlib.md5(f"{name}-{time.time()}".encode("utf-8")).hexdigest()[:6]
+    pid = f"{base}_{suffix}"
+    return _safe_project_id(pid)
+
+
+@app.get("/api/projects")
+def list_projects() -> dict:
+    """列出本机 projects/ 下全部项目（不含模板预览，列表要轻）。"""
+    import json
+
+    items = []
+    if not PROJECTS_DIR.is_dir():
+        return {"ok": True, "items": []}
+    for d in sorted(PROJECTS_DIR.iterdir(), key=lambda p: p.name.lower()):
+        if not d.is_dir():
+            continue
+        meta_path = d / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items.append({
+            "id": d.name,
+            "name": meta.get("name") or d.name,
+            "package": meta.get("package") or "",
+            "platform": meta.get("platform") or "gp",
+            "launch_mode": meta.get("launch_mode") or "pkg",
+            "apk_hint": meta.get("apk_hint") or "",
+            "updated_at": meta.get("updated_at") or "",
+            "has_marker": (d / "marker.png").is_file(),
+            "skip_count": len(meta.get("skips") or []),
+        })
+    return {"ok": True, "items": items}
+
+
+@app.post("/api/projects")
+def create_project(req: ProjectCreateReq) -> dict:
+    """新建空项目（只写 meta.json，模板等用户设好后手动保存）。"""
+    name = (req.name or "").strip()
+    if not name:
+        raise _err(400, "项目名不能为空")
+    pid = _new_project_id(name)
+    pdir = _project_dir(pid)
+    if pdir.exists():
+        raise _err(400, f"项目 id 冲突：{pid}")
+    pdir.mkdir(parents=True, exist_ok=True)
+    _write_project_meta(pid, {
+        "name": name,
+        "package": "",
+        "launch_mode": "pkg",
+        "tap_x": None,
+        "tap_y": None,
+        "platform": "gp",
+        "apk_hint": "",
+        "marker": None,
+        "skips": [],
+    })
+    return {"ok": True, "id": pid, "name": name}
+
+
+@app.get("/api/projects/{pid}")
+def load_project(pid: str) -> dict:
+    """加载项目到 Session（模板写回内存/临时文件），并返回表单字段给前端。"""
+    try:
+        return _apply_project_to_session(pid)
+    except AdbError as e:
+        raise _err(400, str(e))
+
+
+@app.put("/api/projects/{pid}")
+def save_project(pid: str, req: ProjectSaveReq) -> dict:
+    """手动保存：把当前 Session 模板 + 请求里的表单配置写入 projects/<id>/。
+
+    不复制 APK——只记 apk_hint 文件名提醒用户下次再传。
+    """
+    import shutil
+
+    try:
+        pid = _safe_project_id(pid)
+        pdir = _project_dir(pid)
+        if not (pdir / "meta.json").is_file():
+            raise AdbError(f"项目不存在：{pid}，请先新建")
+        pdir.mkdir(parents=True, exist_ok=True)
+
+        old = _read_project_meta(pid)
+        display_name = (req.name or "").strip() or old.get("name") or pid
+
+        with SESSION._lock:
+            marker_meta = None
+            marker_dst = pdir / "marker.png"
+            if (
+                SESSION._marker_template is not None
+                and Path(SESSION._marker_template).is_file()
+            ):
+                shutil.copy2(SESSION._marker_template, marker_dst)
+                marker_meta = {
+                    "cx": SESSION._marker_cx,
+                    "cy": SESSION._marker_cy,
+                    "w": SESSION._marker_w,
+                    "h": SESSION._marker_h,
+                }
+            else:
+                marker_dst.unlink(missing_ok=True)
+
+            for old_skip in pdir.glob("skip_*.png"):
+                try:
+                    old_skip.unlink()
+                except OSError:
+                    pass
+            skips_meta = []
+            for t in SESSION._skip_templates:
+                src = Path(t["path"])
+                if not src.is_file():
+                    continue
+                sid = int(t["id"])
+                shutil.copy2(src, pdir / f"skip_{sid}.png")
+                skips_meta.append({
+                    "id": sid,
+                    "cx": float(t["cx"]),
+                    "cy": float(t["cy"]),
+                    "w": int(t.get("w") or 0),
+                    "h": int(t.get("h") or 0),
+                })
+
+        apk_hint = (req.apk_hint or "").strip()
+        if apk_hint:
+            apk_hint = Path(apk_hint).name  # 只留文件名，防路径泄漏
+
+        _write_project_meta(pid, {
+            "name": display_name,
+            "package": (req.package or "").strip(),
+            "launch_mode": req.launch_mode,
+            "tap_x": req.tap_x,
+            "tap_y": req.tap_y,
+            "platform": (req.platform or "gp").strip() or "gp",
+            "apk_hint": apk_hint,
+            "marker": marker_meta,
+            "skips": skips_meta,
+        })
+        return {
+            "ok": True,
+            "id": pid,
+            "name": display_name,
+            "has_marker": marker_meta is not None,
+            "skip_count": len(skips_meta),
+            "apk_hint": apk_hint,
+        }
+    except AdbError as e:
+        raise _err(400, str(e))
+
+
+@app.patch("/api/projects/{pid}")
+def rename_project(pid: str, req: ProjectRenameReq) -> dict:
+    """只改显示名，目录 id 不变。"""
+    try:
+        meta = _read_project_meta(pid)
+        name = (req.name or "").strip()
+        if not name:
+            raise AdbError("项目名不能为空")
+        meta["name"] = name
+        _write_project_meta(pid, meta)
+        return {"ok": True, "id": _safe_project_id(pid), "name": name}
+    except AdbError as e:
+        raise _err(400, str(e))
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str) -> dict:
+    """删除项目目录（含模板图）。测速历史在浏览器 localStorage，需前端一并清。"""
+    import shutil
+
+    try:
+        pdir = _project_dir(pid)
+        if not pdir.is_dir():
+            raise AdbError(f"项目不存在：{pid}")
+        shutil.rmtree(pdir, ignore_errors=False)
+        return {"ok": True, "id": _safe_project_id(pid)}
+    except AdbError as e:
+        raise _err(400, str(e))
+
+
+def _match_template_in_scene(scene, template, cx: float, cy: float, pad: int) -> float:
+    """在 scene 上以 (cx,cy) 为中心、pad 为边距做 matchTemplate，返回最高置信度。"""
+    import cv2
+
+    scene_h, scene_w = scene.shape[:2]
+    th, tw = template.shape[:2]
+    cx_px = int(cx * scene_w)
+    cy_px = int(cy * scene_h)
+    sx1 = max(0, cx_px - tw // 2 - pad)
+    sy1 = max(0, cy_px - th // 2 - pad)
+    sx2 = min(scene_w, cx_px + tw // 2 + pad)
+    sy2 = min(scene_h, cy_px + th // 2 + pad)
+    if sx2 - sx1 < tw or sy2 - sy1 < th:
+        sx1, sy1, sx2, sy2 = 0, 0, scene_w, scene_h
+    roi = scene[sy1:sy2, sx1:sx2]
+    res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(res)
+    return float(max_val)
+
+
+@app.post("/api/set_skip_template")
+def set_skip_template(req: SetMarkerReq) -> dict:
+    """添加一条跳过弹窗模板（通知权限按钮等）。最多 SKIP_TEMPLATE_MAX 条。
+
+    与启动模板相同：点按钮中心 → 截小区域存盘。自动测速轮询命中后对该中心 tap，
+    **不停表**，只为关掉挡在启动元素前面的系统/应用弹窗。
+    """
+    if not (0.0 <= req.cx <= 1.0 and 0.0 <= req.cy <= 1.0):
+        raise _err(400, f"cx/cy 必须在 0~1 之间，收到 cx={req.cx} cy={req.cy}")
+    try:
+        import cv2
+
+        with SESSION._lock:
+            if len(SESSION._skip_templates) >= SKIP_TEMPLATE_MAX:
+                raise AdbError(f"跳过模板已满（最多 {SKIP_TEMPLATE_MAX} 个），请先清除再添加")
+
+            shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}.png"
+            try:
+                SESSION.device.screenshot(shot)
+                img = cv2.imread(str(shot))
+            finally:
+                try:
+                    shot.unlink()
+                except OSError:
+                    pass
+            if img is None:
+                raise AdbError("截图失败或 cv2 读图失败")
+
+            h_px, w_px = img.shape[:2]
+            cx_px = int(req.cx * w_px)
+            cy_px = int(req.cy * h_px)
+
+            if req.box_w and req.box_h and 0 < req.box_w <= 1 and 0 < req.box_h <= 1:
+                tw = max(40, int(req.box_w * w_px))
+                th = max(40, int(req.box_h * h_px))
+            else:
+                tw = SKIP_DEFAULT_W
+                th = SKIP_DEFAULT_H
+
+            x1 = cx_px - tw // 2
+            y1 = cy_px - th // 2
+            x2 = x1 + tw
+            y2 = y1 + th
+            if x1 < 0:
+                x1, x2 = 0, tw
+            elif x2 > w_px:
+                x2, x1 = w_px, w_px - tw
+            if y1 < 0:
+                y1, y2 = 0, th
+            elif y2 > h_px:
+                y2, y1 = h_px, h_px - th
+
+            template = img[y1:y2, x1:x2]
+            if template.size == 0:
+                raise AdbError(f"跳过模板截取为空：区域 ({x1},{y1})-({x2},{y2})")
+
+            gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            std = float(gray.std())
+            if std < 15.0:
+                raise AdbError(
+                    f"选定区域几乎是纯色（标准差 {std:.1f} < 15），无法可靠匹配。"
+                    f"请点「允许/不允许/跳过」等按钮文字区域。"
+                )
+
+            SKIP_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+            # id 用递增：已有 max+1，避免删中间后撞名
+            next_id = (max((t["id"] for t in SESSION._skip_templates), default=0) + 1)
+            path = SKIP_TEMPLATE_DIR / f"skip_{next_id}.png"
+            cv2.imwrite(str(path), template)
+            actual_h, actual_w = template.shape[:2]
+            cx_n = (x1 + actual_w / 2) / w_px
+            cy_n = (y1 + actual_h / 2) / h_px
+
+            ok, buf = cv2.imencode(".jpg", template, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            preview_b64 = base64.b64encode(buf).decode("ascii") if ok else ""
+
+            entry = {
+                "id": next_id,
+                "path": path,
+                "cx": cx_n,
+                "cy": cy_n,
+                "w": actual_w,
+                "h": actual_h,
+                "img": template.copy(),  # 内存缓存
+                "last_tap_at": 0.0,
+                "preview_base64": preview_b64,
+                "preview_mime": "image/jpeg",
+            }
+            SESSION._skip_templates.append(entry)
+            print(f"[skip] 添加模板 #{next_id} {actual_w}x{actual_h} @({cx_n:.3f},{cy_n:.3f})", flush=True)
+
+            return {
+                "ok": True,
+                "id": next_id,
+                "width": actual_w,
+                "height": actual_h,
+                "center_x": round(cx_n, 5),
+                "center_y": round(cy_n, 5),
+                "count": len(SESSION._skip_templates),
+                "preview_base64": preview_b64,
+                "preview_mime": "image/jpeg",
+            }
+    except AdbError as e:
+        raise _err(400, str(e))
+
+
+@app.get("/api/skip_templates")
+def list_skip_templates() -> dict:
+    """列出当前跳过模板（含预览），供前端刷新列表。"""
+    items = []
+    for t in SESSION._skip_templates:
+        items.append({
+            "id": t["id"],
+            "width": t["w"],
+            "height": t["h"],
+            "center_x": round(t["cx"], 5),
+            "center_y": round(t["cy"], 5),
+            "preview_base64": t.get("preview_base64", ""),
+            "preview_mime": t.get("preview_mime", "image/jpeg"),
+        })
+    return {"ok": True, "items": items, "max": SKIP_TEMPLATE_MAX}
+
+
+@app.post("/api/clear_skip_templates")
+def clear_skip_templates(req: ClearSkipReq) -> dict:
+    """清除跳过模板：指定 id 删一条，否则清空全部。"""
+    with SESSION._lock:
+        if req.id is None:
+            for t in SESSION._skip_templates:
+                try:
+                    Path(t["path"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            SESSION._skip_templates.clear()
+            return {"ok": True, "count": 0}
+        kept = []
+        removed = False
+        for t in SESSION._skip_templates:
+            if t["id"] == req.id:
+                try:
+                    Path(t["path"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                removed = True
+            else:
+                kept.append(t)
+        SESSION._skip_templates = kept
+        if not removed:
+            raise _err(400, f"找不到跳过模板 id={req.id}")
+        return {"ok": True, "count": len(kept)}
+
+
+@app.get("/api/check_auto")
+def check_auto() -> dict:
+    """自动测速轮询（一次截图）：先跳过弹窗，再判定启动成功。
+
+    返回字段：
+      - skipped: 是否刚点击了跳过按钮（命中跳过模板并 tap）
+      - skip_id / skip_confidence: 若 skipped
+      - hit: 启动成功是否已确认（连续 MARKER_CONFIRM_FRAMES 帧过阈，且满足上升沿）
+      - confidence / threshold / streak / confirm_need / rising_ready
+      - shot_ms / match_ms / ms：耗时拆分（证明瓶颈在截图）
+    设计：一次 screencap 兼顾两者；模板走内存缓存；停表用连续确认+上升沿抗抖。
+    """
+    t0 = time.perf_counter()
+    try:
+        import cv2
+
+        with SESSION._lock:
+            # 1) 截当前屏（计时拆分：shot_ms）
+            t_shot0 = time.perf_counter()
+            shot = Path(tempfile.gettempdir()) / f"_cst_auto_chk_{os.getpid()}.png"
+            try:
+                SESSION.device.screenshot(shot)
+                scene = cv2.imread(str(shot))
+            finally:
+                try:
+                    shot.unlink()
+                except OSError:
+                    pass
+            shot_ms = (time.perf_counter() - t_shot0) * 1000
+            if scene is None:
+                return {
+                    "skipped": False, "hit": False, "confidence": 0.0,
+                    "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
+                    "match_ms": 0.0, "error": "截图失败",
+                }
+
+            now = time.time()
+            t_match0 = time.perf_counter()
+
+            # 2) 跳过模板：命中且过冷却 → tap；打断 marker 连续帧
+            for t in SESSION._skip_templates:
+                template = t.get("img")
+                if template is None:
+                    path = Path(t["path"])
+                    if path.exists():
+                        template = cv2.imread(str(path))
+                        t["img"] = template
+                if template is None:
+                    continue
+                conf = _match_template_in_scene(
+                    scene, template, t["cx"], t["cy"], SKIP_SEARCH_PADDING
+                )
+                if conf < SKIP_MATCH_THRESHOLD:
+                    continue
+                if now - float(t.get("last_tap_at") or 0) < SKIP_TAP_COOLDOWN_S:
+                    continue
+                SESSION.device.tap_norm(t["cx"], t["cy"])
+                t["last_tap_at"] = now
+                SESSION._marker_hit_streak = 0
+                # 弹窗屏 ≠ 启动成功态：视为已见过「低于成功阈值」，避免点完后
+                # 首页已就绪时上升沿永远充不上能（R5 死锁：conf 一直 100% 等上升沿）
+                SESSION._marker_seen_below = True
+                match_ms = (time.perf_counter() - t_match0) * 1000
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                print(
+                    f"[skip] 自动点击 #{t['id']} conf={conf:.3f} @({t['cx']:.3f},{t['cy']:.3f})"
+                    f" shot={shot_ms:.0f}ms match={match_ms:.0f}ms",
+                    flush=True,
+                )
+                return {
+                    "skipped": True,
+                    "skip_id": t["id"],
+                    "skip_confidence": round(conf, 4),
+                    "skip_cx": round(float(t["cx"]), 5),
+                    "skip_cy": round(float(t["cy"]), 5),
+                    "hit": False,
+                    "confidence": 0.0,
+                    "ms": round(elapsed_ms, 1),
+                    "shot_ms": round(shot_ms, 1),
+                    "match_ms": round(match_ms, 1),
+                }
+
+            # 3) 启动成功模板（内存缓存 + 连续确认 + 上升沿）
+            template = SESSION.ensure_marker_image()
+            if template is None:
+                match_ms = (time.perf_counter() - t_match0) * 1000
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                return {
+                    "skipped": False, "hit": False, "confidence": 0.0,
+                    "ms": round(elapsed_ms, 1), "shot_ms": round(shot_ms, 1),
+                    "match_ms": round(match_ms, 1), "error": "未设模板",
+                }
+
+            conf = _match_template_in_scene(
+                scene, template,
+                SESSION._marker_cx, SESSION._marker_cy,
+                MARKER_SEARCH_PADDING,
+            )
+            match_ms = (time.perf_counter() - t_match0) * 1000
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+            above = conf >= MARKER_MATCH_THRESHOLD
+            if not above:
+                SESSION._marker_seen_below = True
+                SESSION._marker_hit_streak = 0
+            else:
+                if MARKER_REQUIRE_RISING_EDGE and not SESSION._marker_seen_below:
+                    # 开跑时桌面/残留已过高：等掉下去再上来，避免误停
+                    SESSION._marker_hit_streak = 0
+                else:
+                    SESSION._marker_hit_streak += 1
+
+            hit = (
+                above
+                and SESSION._marker_hit_streak >= MARKER_CONFIRM_FRAMES
+                and (not MARKER_REQUIRE_RISING_EDGE or SESSION._marker_seen_below)
+            )
+
+            SESSION.marker_check_total += 1
+            SESSION.marker_check_last_ms = elapsed_ms
+            SESSION.marker_check_last_conf = conf
+            return {
+                "skipped": False,
+                "hit": bool(hit),
+                "confidence": round(conf, 4),
+                "threshold": MARKER_MATCH_THRESHOLD,
+                "above": bool(above),
+                "streak": SESSION._marker_hit_streak,
+                "confirm_need": MARKER_CONFIRM_FRAMES,
+                "rising_ready": bool(SESSION._marker_seen_below) or (not MARKER_REQUIRE_RISING_EDGE),
+                "ms": round(elapsed_ms, 1),
+                "shot_ms": round(shot_ms, 1),
+                "match_ms": round(match_ms, 1),
+            }
+    except AdbError as e:
+        return {"skipped": False, "hit": False, "confidence": 0.0, "ms": 0.0, "error": str(e)}
+    except Exception as e:
+        return {
+            "skipped": False, "hit": False, "confidence": 0.0,
+            "ms": 0.0, "error": f"{type(e).__name__}: {e}",
+        }
+
+
+@app.post("/api/marker_watch_reset")
+def marker_watch_reset() -> dict:
+    """测速开始前清零连续确认/上升沿（cold_start 成功时也会自动清）。"""
+    SESSION.reset_marker_watch()
+    return {
+        "ok": True,
+        "confirm_need": MARKER_CONFIRM_FRAMES,
+        "rising_edge": MARKER_REQUIRE_RISING_EDGE,
+        "threshold": MARKER_MATCH_THRESHOLD,
+    }
+
+
 @app.post("/api/tap")
 def tap(req: TapReq) -> dict:
     try:
@@ -1039,15 +1851,42 @@ def force_stop(req: ForceStopReq) -> dict:
     return {"ok": True}
 
 
+@app.post("/api/kill_all")
+def kill_all(req: Optional[KillAllReq] = None) -> dict:
+    """测速间隔清后台：am kill-all（方案 A，温和）。"""
+    body = req or KillAllReq()
+    if body.serial and body.serial != SESSION._serial:
+        SESSION.select(body.serial)
+    try:
+        with SESSION.device_op() as dev:
+            out = dev.kill_all()
+    except AdbError as e:
+        raise _err(400, str(e))
+    return {"ok": True, "log": out or "(ok)"}
+
+
 @app.post("/api/reinstall")
 def reinstall(req: ReinstallReq) -> dict:
     if req.serial and req.serial != SESSION._serial:
         SESSION.select(req.serial)
+    # 锁外先查 APK：否则直播截图占着 device_op 锁时，连「文件不存在」都要干等十几秒，
+    # 前端只看到「卸装重装」一行日志，像没执行。
+    apk = Path(req.apk_path)
+    if not apk.is_file():
+        return {
+            "ok": False,
+            "error": f"APK 文件不存在：{req.apk_path}（若刚重启过后端，请重新上传 APK）",
+            "log": [],
+        }
+    print(f"[reinstall] 开始 pkg={req.package} apk={apk.name} size={apk.stat().st_size}", flush=True)
     try:
         with SESSION.device_op() as dev:
+            print("[reinstall] 已拿到设备锁，执行 uninstall…", flush=True)
             log = dev.reinstall(req.package, req.apk_path)
     except AdbError as e:
+        print(f"[reinstall] 失败：{e}", flush=True)
         return {"ok": False, "error": str(e), "log": []}
+    print("[reinstall] 完成", flush=True)
     return {"ok": True, "log": log}
 
 
@@ -1087,9 +1926,15 @@ def cold_start(req: ColdStartReq) -> dict:
             else:
                 raise _err(400, f"未知 mode：{req.mode}")
 
+        # 新一次启动观察：清零连续确认 / 上升沿（前端起表后开始轮询）
+        SESSION.reset_marker_watch()
+
         return {
             "ok": True,
             "start_wall": start_wall,   # unix epoch 秒，仅供诊断；前端计时用 performance.now() 不消费此字段
+            "marker_confirm_frames": MARKER_CONFIRM_FRAMES,
+            "marker_rising_edge": MARKER_REQUIRE_RISING_EDGE,
+            "marker_threshold": MARKER_MATCH_THRESHOLD,
         }
     except AdbError as e:
         raise _err(400, str(e))

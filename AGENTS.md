@@ -98,6 +98,15 @@
 - 不引入 JS 框架（React/Vue 等），保持原生 JS
 - 所有交互元素的 id 保持稳定（JS 依赖），改样式不破坏 JS 契约
 
+### 3.3.1 设计令牌（OpenCode OC-2，硬规则）
+- **唯一色源**：[`static/themes/oc-2.json`](static/themes/oc-2.json)，锁定上游 `anomalyco/opencode@ec3ae17e`
+- **产物**：[`static/themes/oc-2.css`](static/themes/oc-2.css)（由 `_bake_oc2.py` 从 palette + overrides 生成）
+- 页面：`data-theme="oc-2"` + `data-color-scheme="light|dark"`；禁止再用 `data-theme="dark|light"` 表示明暗
+- **禁止**在 `index.html` 或组件样式里手填业务色 hex；只消费 `var(--…)`（兼容别名 `--bg/--primary/--mint` 等已在 `oc-2.css` 映射到 OC 语义）
+- 改色流程：换/改 `oc-2.json` → 运行 `python static/themes/_bake_oc2.py` → 硬刷新验证
+- 本阶段不移植 OpenCode 全量 OKLCH resolve；不引入 `@opencode-ai/ui`
+- 允许例外：透明黑白 `#000` / `#fff` 仅用于 `color-mix` / 描边对比
+
 ### 3.4 启动器
 - `Start.bat` 用纯 ASCII（cmd 的 GBK 解析不支持 UTF-8 中文）
 - 中文提示放 HTML/README 里（这些是 UTF-8）
