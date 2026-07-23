@@ -827,6 +827,16 @@ def set_marker_template(req: SetMarkerReq) -> dict:
             if template.size == 0:
                 raise AdbError(f"模板截取为空：img {w_px}x{h_px}, 区域 ({x1},{y1})-({x2},{y2})")
 
+            # 3.5) 拒绝低方差/纯色模板：TM_CCOEFF_NORMED 对纯色模板会返回 1.0 满置信度
+            # （实测确认），导致启动瞬间立即误命中停表。要求模板有足够纹理（标准差 ≥ 15）。
+            gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            std = float(gray.std())
+            if std < 15.0:
+                raise AdbError(
+                    f"选定区域几乎是纯色（标准差 {std:.1f} < 15），无法可靠匹配。"
+                    f"请点画面上有文字/图标/边缘的区域。"
+                )
+
             # 4) 存模板（覆盖式，单文件）
             cv2.imwrite(str(MARKER_TEMPLATE_PATH), template)
 
