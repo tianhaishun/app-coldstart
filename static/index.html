@@ -1575,6 +1575,9 @@ async function runAutoLoop() {
   autoLiveWasOn = !!liveTimer;
 
   const t0 = performance.now();
+  // 记录本轮起点：报告只算本轮新增记录，不混入历史 auto 记录（审核高5）
+  const runStartIndex = records.length;
+  const runId = new Date().toISOString();
   autoLog(`开始自动测速 · ${rounds} 轮 · 模板比对(~${gapMs}ms/次) · 超时 ${timeoutMs/1000}s`);
 
   try {
@@ -1605,7 +1608,7 @@ async function runAutoLoop() {
       if (autoAbortFlag) throw new Error('用户中断');
       autoLog(`第 ${round} 轮 · 测首次冷启动 ...`);
       const firstMs = await measureOnce(pkg, launchMode, x, y, timeoutMs, gapMs, '首次', round);
-      records.push({ time: firstMs, date: new Date().toISOString(), source: 'auto', type: 'first', round });
+      records.push({ time: firstMs, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId });
       saveRecords(); renderHistory(); renderStats();
       autoLog(`第 ${round} 轮 · 首次冷启动 = ${fmt(firstMs)}s`, 'ok');
 
@@ -1619,7 +1622,7 @@ async function runAutoLoop() {
       // ── 阶段 4：测二次冷启动 ──
       autoLog(`第 ${round} 轮 · 测二次冷启动 ...`);
       const secondMs = await measureOnce(pkg, launchMode, x, y, timeoutMs, gapMs, '二次', round);
-      records.push({ time: secondMs, date: new Date().toISOString(), source: 'auto', type: 'second', round });
+      records.push({ time: secondMs, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId });
       saveRecords(); renderHistory(); renderStats();
       autoLog(`第 ${round} 轮 · 二次冷启动 = ${fmt(secondMs)}s`, 'ok');
 
@@ -1633,13 +1636,13 @@ async function runAutoLoop() {
     // ── 全部完成 ──
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
     autoLog(`✓ 全部完成 · 总耗时 ${totalSec}s`, 'ok');
-    renderAutoReport({ success: true, rounds, totalSec });
+    renderAutoReport({ success: true, rounds, totalSec, runStartIndex });
 
   } catch (e) {
     // ── 失败即停（用户选的策略）──
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
     autoLog(`✗ 中止：${e.message} · 已耗时 ${totalSec}s`, 'err');
-    renderAutoReport({ success: false, rounds, totalSec, error: e.message });
+    renderAutoReport({ success: false, rounds, totalSec, error: e.message, runStartIndex });
   } finally {
     autoRunning = false;
     autoAbortFlag = false;
@@ -1687,10 +1690,12 @@ function renderAutoReport(ctx) {
   const apkPath = $('apkPath').value;
   const apkName = apkPath ? apkPath.split(/[\\/]/).pop() : '—';
 
-  // 只取本轮自动模式的记录（按 source==='auto' 过滤，避免混入手动数据）
-  const autoRecords = records.filter(r => r.source === 'auto');
-  const firsts = autoRecords.filter(r => r.type === 'first');
-  const seconds = autoRecords.filter(r => r.type === 'second');
+  // 只取本轮新增记录（审核高5：之前 filter 所有 auto 记录，第二次运行会混入第一次）
+  // 用 runStartIndex slice 出本轮记录，再按 source==='auto' 排除中途手动加的
+  const startIdx = ctx.runStartIndex || 0;
+  const runRecords = records.slice(startIdx).filter(r => r.source === 'auto');
+  const firsts = runRecords.filter(r => r.type === 'first');
+  const seconds = runRecords.filter(r => r.type === 'second');
 
   // 复用现有 trimMean 逻辑（与 computeStatsGrouped 一致：n>=3 截尾）
   function trimMean(arr) {
@@ -1795,10 +1800,13 @@ $('reportCopyBtn').addEventListener('click', async () => {
   }
 });
 $('reportCsvBtn').addEventListener('click', () => {
-  const autoRecords = records.filter(r => r.source === 'auto');
-  if (!autoRecords.length) { alert('无自动测速数据'); return; }
+  // 只导出最近一次 run_id 的记录（审核高5：不混入历史批次）
+  const autoAll = records.filter(r => r.source === 'auto' && r.run_id);
+  if (!autoAll.length) { alert('无自动测速数据'); return; }
+  const latestRunId = autoAll[autoAll.length - 1].run_id;
+  const runRecords = autoAll.filter(r => r.run_id === latestRunId);
   const rows = [['type', 'round', 'time_ms', 'time_s', 'date']];
-  autoRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), (r.time/1000).toFixed(3), r.date]));
+  runRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), (r.time/1000).toFixed(3), r.date]));
   const csv = '\uFEFF' + rows.map(row => row.join(',')).join('\n');  // BOM 防 Excel 乱码
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
