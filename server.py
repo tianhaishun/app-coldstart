@@ -18,6 +18,7 @@ v1 → v2 的关键修复：
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import os
 import re
@@ -420,6 +421,16 @@ class Session:
             raise AdbError("未选择设备，请先在左上角连接设备")
         return self._device
 
+    @contextmanager
+    def device_op(self):
+        """设备操作统一入口：在同一把锁下执行 ADB I/O（adb server 不擅长并发）。
+
+        所有会触发 adb 命令的端点都应用 ``with SESSION.device_op() as dev:`` 包住，
+        替代裸 ``SESSION.device`` 访问，避免直播截图/OCR/自动测速/卸装操作并发竞争。
+        """
+        with self._lock:
+            yield self.device
+
     def screenshot_bytes(self, *, use_cache: bool = True) -> tuple[bytes, dict]:
         """截图并返回 (PNG bytes, 诊断元信息)。
 
@@ -676,7 +687,8 @@ def list_apps() -> dict:
     复用 Session.device（已选设备）；未选设备时返回空列表 + error。
     """
     try:
-        pkgs = SESSION.device.list_packages()
+        with SESSION.device_op() as dev:
+            pkgs = dev.list_packages()
         return {"apps": pkgs}
     except AdbError as e:
         return {"apps": [], "error": str(e)}
@@ -960,10 +972,11 @@ def check_marker() -> dict:
 @app.post("/api/tap")
 def tap(req: TapReq) -> dict:
     try:
-        if req.norm:
-            SESSION.device.tap_norm(req.x, req.y)
-        else:
-            SESSION.device.tap_pixel(int(req.x), int(req.y))
+        with SESSION.device_op() as dev:
+            if req.norm:
+                dev.tap_norm(req.x, req.y)
+            else:
+                dev.tap_pixel(int(req.x), int(req.y))
     except AdbError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -972,7 +985,8 @@ def tap(req: TapReq) -> dict:
 @app.post("/api/key")
 def key(req: KeyReq) -> dict:
     try:
-        SESSION.device.keyevent(req.code)
+        with SESSION.device_op() as dev:
+            dev.keyevent(req.code)
     except AdbError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -981,13 +995,14 @@ def key(req: KeyReq) -> dict:
 @app.post("/api/swipe")
 def swipe(req: SwipeReq) -> dict:
     try:
-        if req.norm:
-            w, h = SESSION.device.screen_size()
-            x1, y1 = int(req.x1 * w), int(req.y1 * h)
-            x2, y2 = int(req.x2 * w), int(req.y2 * h)
-        else:
-            x1, y1, x2, y2 = int(req.x1), int(req.y1), int(req.x2), int(req.y2)
-        SESSION.device.swipe(x1, y1, x2, y2, req.dur_ms)
+        with SESSION.device_op() as dev:
+            if req.norm:
+                w, h = dev.screen_size()
+                x1, y1 = int(req.x1 * w), int(req.y1 * h)
+                x2, y2 = int(req.x2 * w), int(req.y2 * h)
+            else:
+                x1, y1, x2, y2 = int(req.x1), int(req.y1), int(req.x2), int(req.y2)
+            dev.swipe(x1, y1, x2, y2, req.dur_ms)
     except AdbError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -998,7 +1013,8 @@ def launch_pkg(req: LaunchPkgReq) -> dict:
     if req.serial and req.serial != SESSION._serial:
         SESSION.select(req.serial)
     try:
-        SESSION.device.launch_pkg(req.package)
+        with SESSION.device_op() as dev:
+            dev.launch_pkg(req.package)
     except AdbError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -1009,7 +1025,8 @@ def force_stop(req: ForceStopReq) -> dict:
     if req.serial and req.serial != SESSION._serial:
         SESSION.select(req.serial)
     try:
-        SESSION.device.force_stop(req.package)
+        with SESSION.device_op() as dev:
+            dev.force_stop(req.package)
     except AdbError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -1020,7 +1037,8 @@ def reinstall(req: ReinstallReq) -> dict:
     if req.serial and req.serial != SESSION._serial:
         SESSION.select(req.serial)
     try:
-        log = SESSION.device.reinstall(req.package, req.apk_path)
+        with SESSION.device_op() as dev:
+            log = dev.reinstall(req.package, req.apk_path)
     except AdbError as e:
         return {"ok": False, "error": str(e), "log": []}
     return {"ok": True, "log": log}
@@ -1033,32 +1051,34 @@ def cold_start(req: ColdStartReq) -> dict:
     计时由前端完成（v1 单一 performance.now() 方案，详见 ColdStartReq docstring）。
     本端点不自动回主页 —— 用户需确保启动前已在桌面。独立的回主页能力在
     前端"回主页"按钮 + /api/key 端点，与启动流程解耦。
+    全程在 device_op() 锁下执行（审核高3：force_stop + tap 必须串行，避免并发竞争）。
     """
     if req.serial and req.serial != SESSION._serial:
         SESSION.select(req.serial)
 
     try:
-        # 1) 先把上一次的同包进程杀掉，确保冷启动
-        if req.package:
-            SESSION.device.force_stop(req.package)
+        with SESSION.device_op() as dev:
+            # 1) 先把上一次的同包进程杀掉，确保冷启动
+            if req.package:
+                dev.force_stop(req.package)
 
-        # 2) 预热 screen_size（如果还没缓存），避免它计入 tap_norm 的执行
-        if SESSION.device._last_size is None:
-            SESSION.device.screen_size()
+            # 2) 预热 screen_size（如果还没缓存），避免它计入 tap_norm 的执行
+            if dev._last_size is None:
+                dev.screen_size()
 
-        # 3) 在 tap/monkey 命令实际发出前一刻记录 wall 时间（仅供诊断/将来用）
-        start_wall = time.time()
+            # 3) 在 tap/monkey 命令实际发出前一刻记录 wall 时间（仅供诊断/将来用）
+            start_wall = time.time()
 
-        if req.mode == "tap":
-            if req.x is None or req.y is None:
-                raise _err(400, "tap 模式需要 x, y 坐标")
-            SESSION.device.tap_norm(req.x, req.y)
-        elif req.mode == "pkg":
-            if not req.package:
-                raise _err(400, "pkg 模式需要 package")
-            SESSION.device.launch_pkg(req.package)
-        else:
-            raise _err(400, f"未知 mode：{req.mode}")
+            if req.mode == "tap":
+                if req.x is None or req.y is None:
+                    raise _err(400, "tap 模式需要 x, y 坐标")
+                dev.tap_norm(req.x, req.y)
+            elif req.mode == "pkg":
+                if not req.package:
+                    raise _err(400, "pkg 模式需要 package")
+                dev.launch_pkg(req.package)
+            else:
+                raise _err(400, f"未知 mode：{req.mode}")
 
         return {
             "ok": True,
