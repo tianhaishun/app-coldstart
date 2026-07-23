@@ -1506,7 +1506,8 @@ let markerPickingMode = false;    // 是否处于"选定模板"模式（下一�
 function autoLog(line, kind = '') {
   const el = $('autoProgress');
   el.classList.remove('hidden');
-  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  // 带「日期 时间」的时间戳（满足卸装安装 log 要日期时间的需求）
+  const ts = new Date().toLocaleString('zh-CN', { hour12: false });
   const cls = kind ? ` style="color: ${kind === 'err' ? 'var(--danger)' : kind === 'ok' ? 'var(--mint)' : 'var(--amber)'}"` : '';
   el.innerHTML += `<div${cls}>[${ts}] ${escapeHtml(line)}</div>`;
   el.scrollTop = el.scrollHeight;
