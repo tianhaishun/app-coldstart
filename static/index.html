@@ -4,54 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>App 冷启测速 · Cold Start Profiler</title>
-<!-- 开发期 Tailwind CDN；定稿后编译成 static.css 离线分发（AGENTS.md §3.3） -->
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        colors: {
-          surface: '#0b1326',
-          'surface-dim': '#0b1326',
-          'surface-bright': '#31394e',
-          'surface-container-lowest': '#060d20',
-          'surface-container-low': '#131b2e',
-          'surface-container': '#171f33',
-          'surface-container-high': '#222a3e',
-          'surface-container-highest': '#2d3449',
-          'on-surface': '#dbe2fd',
-          'on-surface-variant': '#c2c6d6',
-          outline: '#8c909f',
-          'outline-variant': 'rgba(255,255,255,0.1)',
-          primary: '#adc6ff',
-          'on-primary': '#002e6a',
-          'primary-container': '#4d8eff',
-          'on-primary-container': '#00285d',
-          secondary: '#bcc7de',
-          'on-secondary': '#263143',
-          'secondary-container': '#3e495d',
-          'on-secondary-container': '#aeb9d0',
-          tertiary: '#4edea3',
-          'on-tertiary': '#003824',
-          'tertiary-container': '#00a572',
-          'on-tertiary-container': '#00311f',
-          error: '#ffb4ab',
-          'error-red': '#ffb4ab',
-          'connected-green': '#00a572',
-          warning: '#fbbf24',
-          danger: '#f87171',
-        },
-        fontFamily: {
-          sans: ['Microsoft YaHei', '微软雅黑', 'PingFang SC', 'sans-serif'],
-          mono: ['JetBrains Mono', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
-        },
-        borderRadius: { DEFAULT: '0.125rem', lg: '0.25rem', xl: '0.5rem', '2xl': '0.75rem' },
-        animation: { 'pulse-slow': 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' },
-      }
-    }
-  }
-</script>
+<!-- 离线 Tailwind CSS（编译产物，AGENTS.md §3.3）。零网络依赖，可断网运行 -->
+<link rel="stylesheet" href="/static.css">
 <style>
   /* ═══ 设计令牌（Stitch: Nebula Tech Console）═══
      JS 会动态注入下面这些语义类名（.hist-item / .unit / .status / .timer-state 等），
