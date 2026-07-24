@@ -37,10 +37,11 @@
 ### 2.1 计时原理（v1 逻辑，已验证 correct）
 - 前端按 Space → `fetch('/api/cold_start')` → 服务端编排 force_stop + HOME + tap → 响应返回
 - 响应回来后前端直接 `startTs = performance.now()`（单一时钟，不校准）
-- 计时 `elapsed = performance.now() - startTs`
-- **单一 performance.now() 时钟，不做跨进程校准**
+- 墙钟经过：`rawMs = performance.now() - startTs`
+- **自动测速命中停表时**：记入样本 `time = max(0, rawMs - shot_ms)`，其中 `shot_ms` 为**命中那一帧**后端实测的「截图命令→拿到画面」耗时（成功画面在截图开始时已在屏上，传图不应计入冷启）。跳过弹窗帧不停表，不扣。
+- **单一 performance.now() 时钟**；扣的是同一次响应里带回的时长字段，**不是**用手机/服务器墙钟去减起点
 - 服务端 cold_start 仍返回 `start_wall` 字段（记录 tap 发出时刻，供诊断/将来用），但前端计时**不消费它**
-- 不要引入服务端时间戳做前端校准——v2 曾试过 wall 校准，公式 `network_ms = Date.now() - start_wall*1000` 会把 tap 命令执行时间误当网络延迟，导致起跳显示 0.6s（详见 §6 历史教训）
+- 不要引入 `Date.now() - start_wall*1000` 这类 wall 校准——v2 曾试过，会把 tap 命令执行时间误当网络延迟，导致起跳显示 0.6s（详见 §6 历史教训）
 
 ### 2.2 坐标换算
 - 后端 `tap_norm(cx, cy)` → `tap_pixel(int(cx*w), int(cy*h))`，`w/h` 来自 `wm size`
@@ -56,7 +57,7 @@
 - 每组剔除标记在历史列表里实时显示（[首]/[二] 标签 + MAX/MIN 标记）；老的一锅烩剔除标记如果与分组剔除冲突，以分组为准（实色），老的用半透明 + `*` 标注。
 
 ### 2.4 adb 调用
-- 截图优先 `exec-out screencap -p`（直出 PNG bytes），失败回退 `screencap + pull`
+- 自动测速热路径截图优先 `exec-out sh -c 'screencap | gzip -1 -c'`（raw+gzip，免设备 PNG 编码；Pixel 6a 实测快于 `-p`），失败回退 `screencap -p`；落盘/模板仍可用 PNG
 - 所有 adb 调用集中在 `AdbDevice` 类，便于加锁 + 复用
 - Session 的 `_lock` 串行化所有设备 I/O（adb server 不擅长并发）
 - **所有会触发 adb 的端点必须用 `with SESSION.device_op() as dev:` 包住**（审核修复），
@@ -67,8 +68,9 @@
 ### 2.5 模板比对停表（v3 新增，自动测速核心）
 - 用户点画面选定"启动元素"→ 后端以该坐标为中心截 240×120 小区域存为模板（`_cst_marker.png`）
 - 运行时 `check_marker` 截当前屏 + 在模板坐标 ±20px 范围用 `cv2.matchTemplate(TM_CCOEFF_NORMED)` 搜索
-- 置信度 ≥ 0.85 即判定启动成功，前端 `performance.now() - startTs` 停表
-- **matchTemplate 部分 3ms/次**（区域搜索比全图 OCR 快 49 倍）；实际单次耗时瓶颈是 adb 截图（300-800ms）
+- 置信度 ≥ 0.85 且满足上升沿后停表（默认连续 **1** 帧确认；截图贵，2 帧会多等一整轮）
+- **上升沿**：须先见过低于阈值的帧再过阈才停，防桌面残留误停。例外：`cold_start` 在 force_stop 后 `reset_marker_watch(after_force_stop=True)` 直接种 below——刚杀进程不可能还在成功页；否则二次冷启动无 SKIP、首帧已过阈会永远卡住
+- **matchTemplate 部分 3ms/次**；热路径截图优先 `screencap|gzip`（Pixel 6a ~350ms），PNG `-p` 作回退（~580ms）
 - **纯色模板必须拒绝**（灰度标准差 < 15）：TM_CCOEFF_NORMED 对纯色返回 1.0 满置信度会误命中
 - 模板与设备/分辨率绑定，重启后端会清掉（Session._marker_template 是内存变量）
 - **不用 OCR 全图文字匹配做停表**（实测 RapidOCR 全图推理 1373ms/次，精度 ±1-2s 不可接受）

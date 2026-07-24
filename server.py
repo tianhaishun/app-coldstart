@@ -1,7 +1,9 @@
 """App 冷启测速 —— FastAPI 后端。
 
 参考 GameAuto（D:\\work\\GameAuto）的设计哲学：
-  - 截图走 `adb exec-out screencap -p`（直出 PNG bytes，比 screencap+pull 快）
+  - 自动测速热路径截图：`adb exec-out sh -c 'screencap | gzip -1 -c'`（raw+gzip，
+    Pixel 6a 实测 ~350ms，优于 `screencap -p` 的 ~580ms）；失败回退 PNG
+  - 落盘/模板/直播仍可用 `screencap -p` PNG
   - OCR 用 RapidOCR（ONNX，跨平台，归一化坐标输出）
   - 所有 adb 调用集中在 AdbDevice，便于复用 + 加锁
   - 实时画面走截图轮询（不做 scrcpy 流，保持简单可靠）
@@ -19,9 +21,11 @@ from __future__ import annotations
 
 import base64
 from contextlib import asynccontextmanager, contextmanager
+import gzip
 import hashlib
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -29,7 +33,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, Any
 
 # uvicorn 加载本模块时把根目录加进 sys.path，便于 from server import ...
 ROOT = Path(__file__).resolve().parent
@@ -53,7 +57,11 @@ MARKER_SEARCH_PADDING = 20      # 模板坐标周围搜索范围（像素，容�
 MARKER_DEFAULT_W = 240          # 默认模板宽（用户没传 box_w 时用）
 MARKER_DEFAULT_H = 120          # 默认模板高
 # 停表可信：连续 N 帧过阈才算命中（抗动画闪一下）；需先见过低于阈值（上升沿，抗桌面残留）
-MARKER_CONFIRM_FRAMES = 2
+# 2026-07：改为 1——每帧截图 ~0.3–0.6s，2 帧确认会白白多等一轮；上升沿仍保留防误停
+# 上升沿例外：cold_start 在 force_stop 之后 reset_marker_watch(after_force_stop=True)，
+# 直接种 _marker_seen_below=True（刚杀过进程，不可能还停在启动成功页）。
+# 否则二次冷启动无 SKIP 可种 below，首帧就 100% 时会永远卡在「等上升沿」。
+MARKER_CONFIRM_FRAMES = 1
 MARKER_REQUIRE_RISING_EDGE = True
 
 # 跳过弹窗模板（通知权限「允许/不允许」等）：命中后自动点击，不停表
@@ -286,7 +294,10 @@ class AdbDevice:
 
     # ── 截图 ──
     def screenshot(self, target: Optional[Path] = None) -> Path:
-        """优先 exec-out screencap -p 直出 PNG；不支持则回退 screencap + pull。"""
+        """优先 exec-out screencap -p 直出 PNG；不支持则回退 screencap + pull。
+
+        给需要落盘的路径用（设模板 / 直播缓存）。自动测速热路径请用 screenshot_bgr()。
+        """
         if target is None:
             fd, name = tempfile.mkstemp(prefix="_cst_", suffix=".png")
             os.close(fd)
@@ -309,6 +320,44 @@ class AdbDevice:
             if not target.exists():
                 raise AdbError("pull 后截图不存在")
             return target
+
+    def screenshot_bgr(self) -> tuple[Any, str]:
+        """截当前屏为 OpenCV BGR ndarray（自动测速热路径）。
+
+        优先：`screencap | gzip -1`（raw，免设备端 PNG 编码；Pixel 6a 实测快于 -p）。
+        失败回退：`screencap -p` + cv2.imdecode。
+
+        返回 (bgr, via)，via 为 ``raw_gzip`` / ``png``，供日志诊断。
+        """
+        import cv2
+        import numpy as np
+
+        # 1) raw + gzip（热路径）
+        try:
+            gz = self.run_bytes(
+                ["exec-out", "sh", "-c", "screencap | gzip -1 -c"],
+                timeout=15.0,
+            )
+            if len(gz) < 64:
+                raise AdbError("gzip 截图过短")
+            raw = gzip.decompress(gz)
+            bgr = _raw_screencap_to_bgr(raw)
+            return bgr, "raw_gzip"
+        except Exception as e:
+            # 2) PNG 回退（保持旧路径可用）
+            try:
+                data = self.run_bytes(["exec-out", "screencap", "-p"], timeout=15.0)
+                if len(data) < 1024 or not data.startswith(b"\x89PNG"):
+                    raise AdbError("exec-out screencap 返回的不是有效 PNG")
+                arr = np.frombuffer(data, dtype=np.uint8)
+                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if bgr is None:
+                    raise AdbError("PNG imdecode 失败")
+                return bgr, "png"
+            except AdbError:
+                raise
+            except Exception as e2:
+                raise AdbError(f"截图失败（gzip: {e}; png: {e2})") from e2
 
     def screen_size(self) -> tuple[int, int]:
         out = self.run(["shell", "wm", "size"], timeout=5.0)
@@ -418,6 +467,40 @@ class AdbDevice:
         return log
 
 
+def _raw_screencap_to_bgr(raw: bytes):
+    """解析 ``adb screencap``（无 -p）原始缓冲 → BGR uint8。
+
+    头：老设备 12 字节 (w,h,fmt)；新设备（含 Pixel）16 字节多一个 colorspace 字段。
+    fmt：1=RGBA_8888，2=RGBX_8888，5=BGRA_8888。
+    """
+    import numpy as np
+
+    if len(raw) < 12:
+        raise AdbError("raw screencap 过短")
+    w, h, fmt = struct.unpack_from("<III", raw, 0)
+    if w <= 0 or h <= 0 or w > 10000 or h > 10000:
+        raise AdbError(f"raw screencap 尺寸异常：{w}x{h} fmt={fmt}")
+    bpp = 4
+    if fmt not in (1, 2, 5):  # RGBA / RGBX / BGRA
+        raise AdbError(f"不支持的 raw 像素格式 fmt={fmt}")
+    need = w * h * bpp
+    if len(raw) - 12 == need:
+        off = 12
+    elif len(raw) - 16 == need:
+        off = 16
+    else:
+        raise AdbError(
+            f"raw screencap 长度不匹配 len={len(raw)} 期望 {need}+12/16 "
+            f"({w}x{h} fmt={fmt})"
+        )
+    rgba = np.frombuffer(raw, dtype=np.uint8, offset=off).reshape(h, w, 4)
+    if fmt == 5:  # BGRA
+        bgr = np.ascontiguousarray(rgba[:, :, :3])
+    else:  # RGBA / RGBX → BGR
+        bgr = np.ascontiguousarray(rgba[:, :, 2::-1])
+    return bgr
+
+
 # ── 会话（当前选中设备 + OCR 引擎）──────────────────────────────────────
 
 
@@ -447,6 +530,9 @@ class Session:
         # 停表观察状态（每次 cold_start / marker_watch_reset 清零）
         self._marker_hit_streak: int = 0               # 连续过阈帧数
         self._marker_seen_below: bool = False          # 是否已见过低于阈值（上升沿）
+        # 本轮启动已点过的跳过模板 id。点过后本轮不再命中，避免弹窗关掉后
+        # 跳过区仍高置信 → 每 1.5s 又 return skipped，启动模板永远攒不满连续帧
+        self._skip_fired_ids: set = set()
         self.marker_check_total = 0      # check_marker 累计调用次数（诊断用）
         self.marker_check_last_ms = 0.0  # 上次 check 耗时
         self.marker_check_last_conf = 0.0  # 上次置信度
@@ -454,11 +540,19 @@ class Session:
         #   id/path/cx/cy/w/h/img/preview；last_tap_at 用于冷却防连点
         self._skip_templates: list[dict] = []
 
-    def reset_marker_watch(self) -> None:
-        """新一次测速开始前清零连续确认 / 上升沿状态。"""
+    def reset_marker_watch(self, *, after_force_stop: bool = False) -> None:
+        """新一次测速开始前清零连续确认 / 本轮已点跳过。
+
+        after_force_stop=True（cold_start 刚杀过进程）：种子 ``_marker_seen_below=True``。
+        含义见模块常量旁注释 / AGENTS——杀进程后不可能还停在「启动成功」页，
+        若仍从 False 起算，二次冷启动首帧就已过阈时会永远等不到「先低于再升高」。
+        """
         with self._lock:
             self._marker_hit_streak = 0
-            self._marker_seen_below = False
+            # 上升沿：必须先见过低于阈值的帧，再过阈才停表（防桌面残留一上来就误停）。
+            # force_stop 之后视为已经「离开成功态」，等价于见过 below。
+            self._marker_seen_below = bool(after_force_stop)
+            self._skip_fired_ids.clear()
 
     def set_marker_image(self, img) -> None:
         """写入启动模板内存缓存（拷贝，避免后续被改）。img 为 None 则清空。"""
@@ -618,7 +712,7 @@ SESSION = Session()
 
 # ── FastAPI ────────────────────────────────────────────────────────────
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
@@ -1634,86 +1728,104 @@ def clear_skip_templates(req: ClearSkipReq) -> dict:
 
 
 @app.get("/api/check_auto")
-def check_auto() -> dict:
-    """自动测速轮询（一次截图）：先跳过弹窗，再判定启动成功。
+def check_auto(
+    check_skips: bool = Query(
+        True,
+        description="是否匹配跳过弹窗模板。二次冷启动应传 false（首次装后不会再弹允许类弹窗）",
+    ),
+) -> dict:
+    """自动测速轮询（一次截图）：可选先跳过弹窗，再判定启动成功。
 
     返回字段：
       - skipped: 是否刚点击了跳过按钮（命中跳过模板并 tap）
       - skip_id / skip_confidence: 若 skipped
+      - check_skips: 本次是否启用了跳过匹配（回显）
       - hit: 启动成功是否已确认（连续 MARKER_CONFIRM_FRAMES 帧过阈，且满足上升沿）
       - confidence / threshold / streak / confirm_need / rising_ready
       - shot_ms / match_ms / ms：耗时拆分（证明瓶颈在截图）
-    设计：一次 screencap 兼顾两者；模板走内存缓存；停表用连续确认+上升沿抗抖。
+    设计：一次截图兼顾两者（热路径 raw|gzip）；模板走内存缓存；停表用连续确认+上升沿抗抖。
+    二次冷启动请 check_skips=false，只扫启动成功模板，避免空扫跳过模板。
     """
     t0 = time.perf_counter()
+    shot_via = "—"
     try:
         import cv2
 
         with SESSION._lock:
-            # 1) 截当前屏（计时拆分：shot_ms）
+            # 1) 截当前屏（热路径：raw|gzip → BGR，免落盘）
             t_shot0 = time.perf_counter()
-            shot = Path(tempfile.gettempdir()) / f"_cst_auto_chk_{os.getpid()}.png"
             try:
-                SESSION.device.screenshot(shot)
-                scene = cv2.imread(str(shot))
-            finally:
-                try:
-                    shot.unlink()
-                except OSError:
-                    pass
+                scene, shot_via = SESSION.device.screenshot_bgr()
+            except AdbError as e:
+                shot_ms = (time.perf_counter() - t_shot0) * 1000
+                return {
+                    "skipped": False, "hit": False, "confidence": 0.0,
+                    "check_skips": bool(check_skips),
+                    "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
+                    "match_ms": 0.0, "shot_via": shot_via, "error": str(e),
+                }
             shot_ms = (time.perf_counter() - t_shot0) * 1000
             if scene is None:
                 return {
                     "skipped": False, "hit": False, "confidence": 0.0,
+                    "check_skips": bool(check_skips),
                     "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
-                    "match_ms": 0.0, "error": "截图失败",
+                    "match_ms": 0.0, "shot_via": shot_via, "error": "截图失败",
                 }
 
             now = time.time()
             t_match0 = time.perf_counter()
 
-            # 2) 跳过模板：命中且过冷却 → tap；打断 marker 连续帧
-            for t in SESSION._skip_templates:
-                template = t.get("img")
-                if template is None:
-                    path = Path(t["path"])
-                    if path.exists():
-                        template = cv2.imread(str(path))
-                        t["img"] = template
-                if template is None:
-                    continue
-                conf = _match_template_in_scene(
-                    scene, template, t["cx"], t["cy"], SKIP_SEARCH_PADDING
-                )
-                if conf < SKIP_MATCH_THRESHOLD:
-                    continue
-                if now - float(t.get("last_tap_at") or 0) < SKIP_TAP_COOLDOWN_S:
-                    continue
-                SESSION.device.tap_norm(t["cx"], t["cy"])
-                t["last_tap_at"] = now
-                SESSION._marker_hit_streak = 0
-                # 弹窗屏 ≠ 启动成功态：视为已见过「低于成功阈值」，避免点完后
-                # 首页已就绪时上升沿永远充不上能（R5 死锁：conf 一直 100% 等上升沿）
-                SESSION._marker_seen_below = True
-                match_ms = (time.perf_counter() - t_match0) * 1000
-                elapsed_ms = (time.perf_counter() - t0) * 1000
-                print(
-                    f"[skip] 自动点击 #{t['id']} conf={conf:.3f} @({t['cx']:.3f},{t['cy']:.3f})"
-                    f" shot={shot_ms:.0f}ms match={match_ms:.0f}ms",
-                    flush=True,
-                )
-                return {
-                    "skipped": True,
-                    "skip_id": t["id"],
-                    "skip_confidence": round(conf, 4),
-                    "skip_cx": round(float(t["cx"]), 5),
-                    "skip_cy": round(float(t["cy"]), 5),
-                    "hit": False,
-                    "confidence": 0.0,
-                    "ms": round(elapsed_ms, 1),
-                    "shot_ms": round(shot_ms, 1),
-                    "match_ms": round(match_ms, 1),
-                }
+            # 2) 跳过模板（仅 check_skips=true，一般只开在首次冷启动）
+            #    命中且过冷却 → tap；打断 marker 连续帧
+            #    本轮已点过的 skip id 跳过，避免反复 return skipped 堵死启动模板识别
+            if check_skips:
+                for t in SESSION._skip_templates:
+                    if t["id"] in SESSION._skip_fired_ids:
+                        continue
+                    template = t.get("img")
+                    if template is None:
+                        path = Path(t["path"])
+                        if path.exists():
+                            template = cv2.imread(str(path))
+                            t["img"] = template
+                    if template is None:
+                        continue
+                    conf = _match_template_in_scene(
+                        scene, template, t["cx"], t["cy"], SKIP_SEARCH_PADDING
+                    )
+                    if conf < SKIP_MATCH_THRESHOLD:
+                        continue
+                    if now - float(t.get("last_tap_at") or 0) < SKIP_TAP_COOLDOWN_S:
+                        continue
+                    SESSION.device.tap_norm(t["cx"], t["cy"])
+                    t["last_tap_at"] = now
+                    SESSION._skip_fired_ids.add(t["id"])
+                    SESSION._marker_hit_streak = 0
+                    # 弹窗屏 ≠ 启动成功态：视为已见过「低于成功阈值」，避免点完后
+                    # 首页已就绪时上升沿永远充不上能（R5 死锁：conf 一直 100% 等上升沿）
+                    SESSION._marker_seen_below = True
+                    match_ms = (time.perf_counter() - t_match0) * 1000
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+                    print(
+                        f"[skip] 自动点击 #{t['id']} conf={conf:.3f} @({t['cx']:.3f},{t['cy']:.3f})"
+                        f" shot={shot_ms:.0f}ms via={shot_via} match={match_ms:.0f}ms",
+                        flush=True,
+                    )
+                    return {
+                        "skipped": True,
+                        "skip_id": t["id"],
+                        "skip_confidence": round(conf, 4),
+                        "skip_cx": round(float(t["cx"]), 5),
+                        "skip_cy": round(float(t["cy"]), 5),
+                        "check_skips": True,
+                        "hit": False,
+                        "confidence": 0.0,
+                        "ms": round(elapsed_ms, 1),
+                        "shot_ms": round(shot_ms, 1),
+                        "match_ms": round(match_ms, 1),
+                        "shot_via": shot_via,
+                    }
 
             # 3) 启动成功模板（内存缓存 + 连续确认 + 上升沿）
             template = SESSION.ensure_marker_image()
@@ -1722,8 +1834,10 @@ def check_auto() -> dict:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 return {
                     "skipped": False, "hit": False, "confidence": 0.0,
+                    "check_skips": bool(check_skips),
                     "ms": round(elapsed_ms, 1), "shot_ms": round(shot_ms, 1),
-                    "match_ms": round(match_ms, 1), "error": "未设模板",
+                    "match_ms": round(match_ms, 1), "shot_via": shot_via,
+                    "error": "未设模板",
                 }
 
             conf = _match_template_in_scene(
@@ -1763,15 +1877,22 @@ def check_auto() -> dict:
                 "streak": SESSION._marker_hit_streak,
                 "confirm_need": MARKER_CONFIRM_FRAMES,
                 "rising_ready": bool(SESSION._marker_seen_below) or (not MARKER_REQUIRE_RISING_EDGE),
+                "check_skips": bool(check_skips),
                 "ms": round(elapsed_ms, 1),
                 "shot_ms": round(shot_ms, 1),
                 "match_ms": round(match_ms, 1),
+                "shot_via": shot_via,
             }
     except AdbError as e:
-        return {"skipped": False, "hit": False, "confidence": 0.0, "ms": 0.0, "error": str(e)}
+        return {
+            "skipped": False, "hit": False, "confidence": 0.0,
+            "check_skips": bool(check_skips), "shot_via": shot_via,
+            "ms": 0.0, "error": str(e),
+        }
     except Exception as e:
         return {
             "skipped": False, "hit": False, "confidence": 0.0,
+            "check_skips": bool(check_skips), "shot_via": shot_via,
             "ms": 0.0, "error": f"{type(e).__name__}: {e}",
         }
 
@@ -1926,8 +2047,9 @@ def cold_start(req: ColdStartReq) -> dict:
             else:
                 raise _err(400, f"未知 mode：{req.mode}")
 
-        # 新一次启动观察：清零连续确认 / 上升沿（前端起表后开始轮询）
-        SESSION.reset_marker_watch()
+        # 新一次启动观察：清零 streak / 已点跳过；
+        # after_force_stop=True：上面若杀过包（或本就无包可杀），视为已离开成功页，种上升沿
+        SESSION.reset_marker_watch(after_force_stop=True)
 
         return {
             "ok": True,
@@ -1935,6 +2057,7 @@ def cold_start(req: ColdStartReq) -> dict:
             "marker_confirm_frames": MARKER_CONFIRM_FRAMES,
             "marker_rising_edge": MARKER_REQUIRE_RISING_EDGE,
             "marker_threshold": MARKER_MATCH_THRESHOLD,
+            "marker_rising_seeded": True,  # 诊断：本趟上升沿已因 force_stop 预置
         }
     except AdbError as e:
         raise _err(400, str(e))

@@ -161,16 +161,63 @@
   .ocr-box .txt { position: absolute; top: -28px; left: 0; font-size: 10px; background: color-mix(in srgb, var(--sc-lowest) 90%, transparent); color: var(--on); padding: 2px 6px; border-radius: 3px; pointer-events: none; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
   .hi { color: var(--mint); } .mid { color: var(--amber); } .lo { color: var(--danger); }
 
-  /* Studio 式：左预览窄、中工作区主、右属性；日志拉高 */
+  /* Studio 式：左预览窄、中工作区主、右属性；日志锁在视口内滚动 */
   #autoLoopCard.auto-running #autoSetupBlock { display: none; }
-  #autoLoopCard.auto-running #autoProgress {
-    min-height: 320px;
+  /* 中栏 / 卡片：高度锁在 main 内，禁止把日志底边撑出浏览器 */
+  .mid-col {
+    overflow: hidden;
+  }
+  #autoLoopCard {
+    overflow: hidden;
+    min-height: 0;
+  }
+  #autoLoopCard > .card-body {
+    overflow: hidden;
+    min-height: 0;
   }
   #autoProgress {
-    min-height: 220px;
+    /* 吃掉卡片剩余高度；内部滚动；不要用 60vh（会忽略上方平台/按钮占位） */
+    flex: 1 1 0;
+    min-height: 0 !important;
+    max-height: none;
+    height: auto;
     font-size: 0.8rem !important;
-    flex: 1 1 auto;
+    overflow-y: auto;
   }
+  #autoLoopCard.auto-running #autoProgress {
+    min-height: 0 !important;
+  }
+  /* 用户上滚查看历史时，不强制拽回底部（autoLog 会检测 scrollTop 阈值） */
+  #autoProgress.user-scrolled {
+    border-left-color: var(--amber) !important;
+  }
+  #autoProgress.user-scrolled::after {
+    content: ' ↓ 新日志未自动滚动（已手动停留）';
+    display: block;
+    position: sticky; bottom: 0;
+    background: color-mix(in srgb, var(--amber) 18%, transparent);
+    color: var(--amber);
+    font-size: 0.7rem; padding: 2px 6px; border-radius: 2px;
+    pointer-events: none;
+  }
+  /* 进度状态条：当前轮次 / 总轮 / 阶段 / 耗时 */
+  #autoProgressBar {
+    display: none;
+    gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 4px 8px; border-radius: var(--radius);
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
+    font-size: 0.72rem; font-family: var(--font-mono, monospace);
+    color: var(--on-var);
+  }
+  #autoLoopCard.auto-running #autoProgressBar { display: flex; }
+  #autoProgressBar .seg { display: inline-flex; align-items: center; gap: 4px; }
+  #autoProgressBar .seg b { color: var(--on); font-weight: 700; }
+  #autoProgressBar .bar-track {
+    flex: 1 1 auto; min-width: 80px; height: 4px; border-radius: 2px;
+    background: color-mix(in srgb, var(--on-var) 25%, transparent); overflow: hidden;
+  }
+  #autoProgressBar .bar-fill { height: 100%; background: var(--primary); transition: width .3s ease; }
   #autoCheckPanel {
     border: 1px solid var(--outline-var);
     border-radius: var(--radius);
@@ -396,7 +443,7 @@
   <div id="lsplit" class="vsplit" title="拖拽调整预览宽度"></div>
 
   <!-- ═══ 中栏：自动测速 + 审计日志（主工作区）═══ -->
-  <section class="mid-col flex-1 flex flex-col gap-1.5 min-w-[360px] min-h-0">
+  <section class="mid-col flex-1 flex flex-col gap-1.5 min-w-[360px] min-h-0 overflow-hidden">
 
     <!-- 状态条（保留 #display/#state/#mainBtn 给 JS，界面隐藏手动大计时器） -->
     <div id="timerCard" class="hidden" aria-hidden="true">
@@ -432,12 +479,12 @@
     <div id="nextHint" class="hidden"></div>
 
     <!-- 🤖 自动测速（模板比对停表 + 全自动循环）-->
-    <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-tertiary/40 shrink-0 flex-1 flex flex-col min-h-0">
-      <div class="flex items-center justify-between text-on-surface mb-1">
+    <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-tertiary/40 flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div class="flex items-center justify-between text-on-surface mb-1 shrink-0">
         <span class="font-mono text-[11px] font-bold tracking-wider text-tertiary">🤖 自动测速</span>
         <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
       </div>
-      <div class="card-body flex flex-col gap-2 flex-1 min-h-0">
+      <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
         <!-- 准备区：跑测时折叠，把空间让给审计日志 -->
         <div id="autoSetupBlock" class="flex flex-col gap-2 shrink-0">
           <div>
@@ -452,7 +499,7 @@
           </div>
 
           <div class="border-t border-outline-variant/60 pt-2">
-            <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">跳过弹窗模板（可选 · 最多 3 个 · 命中后自动点击，不停表）</label>
+            <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">跳过弹窗模板（可选 · 最多 3 个 · 仅首次冷启动命中后自动点击，不停表）</label>
             <div class="flex gap-1.5 mb-1.5">
               <button id="addSkipBtn" class="flex-1 py-1.5 bg-surface-container-high border border-warning/40 text-warning hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">➕ 添加跳过按钮</button>
               <button id="clearSkipBtn" class="px-2 py-1.5 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono font-bold transition active:scale-95">清除</button>
@@ -497,6 +544,14 @@
         </div>
         <div id="logSplit" class="hsplit" title="上下拖拽：扩展运行审计日志高度"></div>
 
+        <!-- 进度状态条：跑测中显示当前轮次/阶段/耗时 -->
+        <div id="autoProgressBar" class="shrink-0">
+          <span class="seg">轮次 <b id="apbRound">—</b></span>
+          <div class="bar-track"><div id="apbFill" class="bar-fill" style="width:0%"></div></div>
+          <span class="seg">阶段 <b id="apbPhase">—</b></span>
+          <span class="seg">已耗时 <b id="apbElapsed">0.0s</b></span>
+        </div>
+
         <!-- 运行审计日志（常显） -->
         <div class="flex items-center justify-between shrink-0">
           <span class="font-mono text-[10px] font-bold text-on-surface-variant tracking-wider">运行审计日志</span>
@@ -505,7 +560,7 @@
             <button id="autoLogClearBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded hover:text-danger" title="清空日志">清空</button>
           </div>
         </div>
-        <div id="autoProgress" class="bg-surface-container-lowest border-l-2 border-tertiary rounded p-2 font-mono leading-relaxed whitespace-pre-wrap min-h-[220px] overflow-y-auto custom-scrollbar"></div>
+        <div id="autoProgress" class="bg-surface-container-lowest border-l-2 border-tertiary rounded p-2 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar min-h-0 flex-1"></div>
       </div>
     </div>
 
@@ -2066,17 +2121,20 @@ function formatAuditTs(d = new Date()) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
 }
 
-/** level: INFO|STEP|OK|WARN|ERR ；phase: RUN|PRE|R1|MATCH… */
+/** level: INFO|STEP|OK|WARN|ERR ；phase: RUN|PRE|R1|MATCH…
+ *  兼容旧调用 autoLog(kind, msg)（kind=ok/err/warn/info）。
+ *  底部固定最新：用户没主动上滚时新日志自动贴底；上滚查看历史时不打断。 */
 function autoLog(level, phase, msg) {
-  // 兼容旧调用 autoLog(line) / autoLog(line, 'ok'|'err'|'warn')
-  if (arguments.length === 1 || (arguments.length === 2 && typeof phase === 'string' && !msg && ['ok', 'err', 'warn', ''].includes(phase))) {
-    const kind = (arguments.length === 2 ? phase : '') || '';
-    msg = level;
-    phase = '—';
-    level = kind === 'ok' ? 'OK' : kind === 'err' ? 'ERR' : kind === 'warn' ? 'WARN' : 'INFO';
+  // 兼容旧签名 autoLog(kind, msg)
+  if (msg === undefined) {
+    msg = phase; phase = '—';
+    level = { ok: 'OK', err: 'ERR', warn: 'WARN', info: 'INFO' }[String(level || '').toLowerCase()] || level || 'INFO';
   }
   const el = $('autoProgress');
-  if (!el) return;
+  if (!el) {
+    auditLogLines.push(`[?] ${level} ${phase} ${msg}`);
+    return;
+  }
   const lv = String(level || 'INFO').toUpperCase();
   const ph = String(phase || '—').toUpperCase();
   const text = String(msg ?? '');
@@ -2088,7 +2146,60 @@ function autoLog(level, phase, msg) {
   if (color) div.style.color = color;
   div.innerHTML = `<span class="text-on-surface-variant">[${ts}]</span> <span class="alog-phase">${escapeHtml(lv.padEnd(5))} ${escapeHtml(ph.padEnd(8))}</span>${escapeHtml(text)}`;
   el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
+
+  // 底部固定最新：只有当用户没主动上滚查看历史时，才自动贴底
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  if (nearBottom) {
+    el.classList.remove('user-scrolled');
+    // rAF 等 DOM 渲染后再滚，避免 flex 重算高度导致滚不到底
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  } else {
+    el.classList.add('user-scrolled');
+  }
+
+  // 同步进度条阶段
+  setProgressPhase(ph, text);
+}
+
+// 用户手动滚回底部 → 清除「未自动滚动」标记
+(() => {
+  const el = $('autoProgress');
+  if (!el) return;
+  el.addEventListener('scroll', () => {
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    if (nearBottom) el.classList.remove('user-scrolled');
+  });
+})();
+
+// ── 进度条：跟踪当前轮次 / 阶段 / 耗时 ──
+let _progressStartTs = 0;
+let _progressTotalRounds = 0;
+let _progressTimerId = null;
+function startProgressClock(totalRounds) {
+  _progressStartTs = performance.now();
+  _progressTotalRounds = totalRounds || 0;
+  stopProgressClock();
+  _progressTimerId = setInterval(() => {
+    const el = $('apbElapsed');
+    if (!el) return;
+    el.textContent = ((performance.now() - _progressStartTs) / 1000).toFixed(1) + 's';
+  }, 200);
+}
+function stopProgressClock() {
+  if (_progressTimerId) { clearInterval(_progressTimerId); _progressTimerId = null; }
+}
+function setProgressPhase(ph, text) {
+  // 从 phase（如 R3-2ND）和 text 推断进度
+  if ($('apbPhase')) $('apbPhase').textContent = ph === '—' ? '—' : ph;
+  // 解析轮次：R1 / R3-1ST / R3-2ND
+  const m = String(ph).match(/R(\d+)/);
+  if (m && _progressTotalRounds > 0) {
+    const cur = parseInt(m[1]);
+    if ($('apbRound')) $('apbRound').textContent = `${cur}/${_progressTotalRounds}`;
+    const pct = Math.min(100, Math.round((cur - 0.5) / _progressTotalRounds * 100));
+    const fill = $('apbFill');
+    if (fill) fill.style.width = pct + '%';
+  }
 }
 
 function clearAuditLog() {
@@ -2166,11 +2277,15 @@ function applyLogHeight() {
   const el = $('autoProgress');
   if (!el) return;
   const h = layout.logH;
+  // 只设上限，让 flex 在中栏剩余空间内填满；禁止写死 height 撑出视口
   if (h && h >= 160) {
-    el.style.minHeight = h + 'px';
-    el.style.height = h + 'px';
-    el.style.flex = '0 0 auto';
+    el.style.maxHeight = h + 'px';
+  } else {
+    el.style.maxHeight = '';
   }
+  el.style.height = '';
+  el.style.minHeight = '';
+  el.style.flex = '1 1 0';
 }
 
 /** 开跑闸门：缺项禁用开始，清单写明缺什么 */
@@ -2245,11 +2360,16 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
   window.addEventListener('mousemove', e => {
     if (!dragging) return;
     const dy = startY - e.clientY; // 向上为正 → 日志变高
-    const next = Math.max(160, Math.min(Math.floor(window.innerHeight * 0.7), Math.round(startH + dy)));
-    progress.style.minHeight = next + 'px';
-    progress.style.height = next + 'px';
-    progress.style.maxHeight = 'none';
-    progress.style.flex = '0 0 auto';
+    // 上限：不超过中栏剩余可视高度的 90%，避免底边被顶出浏览器
+    const mid = document.querySelector('.mid-col');
+    const midBottom = mid ? mid.getBoundingClientRect().bottom : window.innerHeight;
+    const progTop = progress.getBoundingClientRect().top;
+    const room = Math.max(160, Math.floor(midBottom - progTop - 8));
+    const next = Math.max(160, Math.min(room, Math.round(startH + dy)));
+    progress.style.maxHeight = next + 'px';
+    progress.style.height = '';
+    progress.style.minHeight = '';
+    progress.style.flex = '1 1 0';
     layout.logH = next;
   });
   window.addEventListener('mouseup', () => {
@@ -2260,64 +2380,93 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
     saveLayout();
   });
   split.addEventListener('dblclick', () => {
-    progress.style.minHeight = '280px';
-    progress.style.height = '280px';
-    progress.style.flex = '0 0 auto';
-    layout.logH = 280;
+    progress.style.maxHeight = '';
+    progress.style.height = '';
+    progress.style.minHeight = '';
+    progress.style.flex = '1 1 0';
+    layout.logH = 0;
     saveLayout();
   });
 })();
 
-// ── 自动停表：cold_start 后轮询 /api/check_auto（先跳过弹窗，再判启动模板）──
+// ── 自动停表：cold_start 后轮询 /api/check_auto
+// 首次：先跳过弹窗再判启动模板；二次：不扫跳过（装后不会再弹允许类），只判启动模板
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
 // weirdMs：异常阈值（默认 30s）——只标记，不中止；等模板命中或用户停止
-async function waitForLaunchDone(startTs, weirdMs, gapMs) {
+async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
   let lastLogAt = 0;
   let warnedWeird = false;
+  let pollCount = 0;
+  const doSkips = checkSkips !== false;
+  autoLog('INFO', 'WAIT', doSkips
+    ? '开始轮询识别：优先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
+    : '开始轮询识别：二次冷启动不扫跳过弹窗，只匹配「启动成功」模板；命中且连续确认后停表');
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
     if (!warnedWeird && weirdMs > 0 && elapsed > weirdMs) {
       warnedWeird = true;
-      autoLog('WARN', 'WAIT', `已超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，继续等待模板（不中止）· 命中后将标异常并可补跑`);
+      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后会标「异常」并可补跑`);
     }
     try {
-      const r = await fetch(API + '/api/check_auto');
+      const qs = doSkips ? '' : '?check_skips=false';
+      const r = await fetch(API + '/api/check_auto' + qs);
       if (r.ok) {
         const j = await r.json();
+        pollCount += 1;
         const shotMs = j.shot_ms != null ? `${Math.round(j.shot_ms)}ms` : '—';
         const matchMs = j.match_ms != null ? `${(j.match_ms).toFixed(1)}ms` : '—';
-        const timing = `shot=${shotMs} match=${matchMs}`;
+        const via = j.shot_via ? `/${j.shot_via}` : '';
+        const timing = `截图${shotMs}${via} 匹配${matchMs}`;
         if (j.skipped) {
           const cx = j.skip_cx != null ? Number(j.skip_cx).toFixed(3) : '—';
           const cy = j.skip_cy != null ? Number(j.skip_cy).toFixed(3) : '—';
-          autoLog('WARN', 'SKIP', `#${j.skip_id} conf=${((j.skip_confidence || 0) * 100).toFixed(0)}% · tap (${cx},${cy}) · ${timing}`);
+          autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`);
           if (gapMs > 0) await sleep(Math.max(gapMs, 200));
           continue;
         }
-        if (j.hit) {
-          const total = performance.now() - startTs;
-          const thr = j.threshold != null ? j.threshold : 0.85;
-          const need = j.confirm_need != null ? j.confirm_need : 2;
-          const abnormal = weirdMs > 0 && total >= weirdMs;
-          autoLog('OK', 'MATCH', `conf=${((j.confidence || 0) * 100).toFixed(0)}% thr=${thr} · streak ${j.streak || need}/${need} · ${timing} · 耗时 ${fmt(total)}s` + (abnormal ? ' · 异常(≥阈值)' : ''));
-          return { time: total, abnormal };
+        if (j.error && elapsed - lastLogAt > 2000) {
+          lastLogAt = elapsed;
+          autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`);
         }
-        // 未确认：每 2s 打进度；若已过阈但未满连续帧 / 未上升沿，也写明
+        if (j.hit) {
+          // 终点补偿：成功画面在「截图命令开始」时已在屏上；拿到图之前的 shot_ms 不应计入冷启
+          // 只扣命中这一帧的截图耗时（跳过帧不停表，不扣）；不用手机墙钟做跨进程校准
+          const rawMs = performance.now() - startTs;
+          const shotCost = (typeof j.shot_ms === 'number' && j.shot_ms > 0) ? j.shot_ms : 0;
+          const total = Math.max(0, rawMs - shotCost);
+          const thr = j.threshold != null ? j.threshold : 0.85;
+          const need = j.confirm_need != null ? j.confirm_need : 1;
+          // 异常仍按墙钟等待判断（扣截图前是否已拖太久）
+          const abnormal = weirdMs > 0 && rawMs >= weirdMs;
+          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`);
+          return { time: total, abnormal, raw_ms: rawMs, shot_ms: shotCost };
+        }
+        // 未确认：每 2s 打进度；写清当前在等什么
         if (elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          const conf = (j.confidence != null) ? `${(j.confidence * 100).toFixed(0)}%` : '—';
-          const need = j.confirm_need != null ? j.confirm_need : 2;
+          const confPct = (j.confidence != null) ? `${(j.confidence * 100).toFixed(0)}%` : '—';
+          const need = j.confirm_need != null ? j.confirm_need : 1;
           const streak = j.streak != null ? j.streak : 0;
-          let extra = '';
-          if (j.error) extra += ` · ${j.error}`;
-          else if (j.above && !j.rising_ready) extra += ' · 等待上升沿（先低于阈值）';
-          else if (j.above) extra += ` · 连续确认 ${streak}/${need}`;
-          autoLog('INFO', 'WAIT', `${(elapsed / 1000).toFixed(1)}s · conf=${conf}${extra} · ${timing}`);
+          let reason = '画面上尚未稳定匹配到启动成功模板';
+          if (j.error) reason = j.error;
+          else if (j.above && !j.rising_ready) reason = `启动模板已过阈值（${confPct}），但还在等上升沿：需要先出现「低于阈值」的一帧，再升上来（防桌面残留误停）`;
+          else if (j.above) reason = `启动模板已过阈值（${confPct}），连续确认中 ${streak}/${need} 帧`;
+          else reason = `启动模板置信度 ${confPct}（未过阈值）· 继续截屏比对`;
+          autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`);
+        }
+      } else {
+        if (elapsed - lastLogAt > 2000) {
+          lastLogAt = elapsed;
+          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`);
         }
       }
     } catch (e) {
       console.warn('自动检测轮询失败（将继续重试）:', e.message);
+      if (elapsed - lastLogAt > 2000) {
+        lastLogAt = elapsed;
+        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`);
+      }
     }
     if (gapMs > 0) await sleep(gapMs);
   }
@@ -2329,7 +2478,8 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  *  任一步失败必须抛错中止——否则可能测到温启动，污染冷启样本。
  */
 async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
-  autoLog('STEP', phase, 'am kill-all（清后台）…');
+  autoLog('STEP', phase, '准备冷启动环境：先清后台进程 (am kill-all)，再强制停止目标包 (force-stop)');
+  autoLog('STEP', phase, '执行 am kill-all（清后台，腾内存）…');
   const kr = await fetch(API + '/api/kill_all', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
@@ -2338,23 +2488,23 @@ async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   if (!kr.ok || !kj.ok) {
     throw new Error(`kill-all 失败：${apiDetail(kj, `HTTP ${kr.status}`)}`);
   }
-  autoLog('OK', phase, `kill-all ${kj.log || 'ok'}`);
+  autoLog('OK', phase, `am kill-all 完成 · ${kj.log || 'ok'}`);
 
-  autoLog('STEP', phase, 'force_stop 目标包…');
+  autoLog('STEP', phase, `执行 force-stop 目标包 ${pkg}（确保进程被杀干净，才算冷启动）…`);
   const fr = await fetch(API + '/api/force_stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ package: pkg })
   });
   const fj = await fr.json().catch(() => ({}));
   if (!fr.ok || fj.ok === false) {
-    // /api/force_stop 成功时返回 {ok:true}；失败为 HTTP 400 + detail
     throw new Error(`force_stop 失败：${apiDetail(fj, `HTTP ${fr.status}`)}`);
   }
-  autoLog('OK', phase, `force_stop ${pkg}`);
+  autoLog('OK', phase, `force-stop 完成 · 包 ${pkg} 已停止`);
 
   if (killCoolMs > 0) {
-    autoLog('INFO', phase, `清进程后冷却 ${(killCoolMs / 1000).toFixed(1)}s`);
+    autoLog('INFO', phase, `清进程后冷却 ${(killCoolMs / 1000).toFixed(1)}s（减少二次启动抖动）…`);
     await sleep(killCoolMs);
+    autoLog('OK', phase, '冷却结束，可以启动');
   }
 }
 
@@ -2401,6 +2551,9 @@ async function runAutoLoop() {
     return;
   }
 
+  let targetRounds = rounds;
+  let extraGranted = 0;
+
   autoRunning = true;
   autoAbortFlag = false;
   $('autoStartBtn').disabled = true;
@@ -2408,6 +2561,7 @@ async function runAutoLoop() {
   setAutoRunLayout(true);
   clearAuditLog();
   $('cardReport').classList.add('hidden');
+  startProgressClock(targetRounds);
 
   autoLiveWasOn = !!liveTimer;
   if (liveTimer) stopLive();
@@ -2422,14 +2576,11 @@ async function runAutoLoop() {
 
   autoLog('INFO', 'RUN', `项目=${projName}`);
   autoLog('INFO', 'RUN', `设备=${deviceLabel}`);
-  autoLog('INFO', 'RUN', `包名=${pkg} · ${modeLabel} · ${rounds} 轮 · 异常阈值 ${weirdMs / 1000}s（不中止）· 轮询 ${gapMs}ms · 清进程冷却 ${killCoolMs / 1000}s`);
+  autoLog('INFO', 'RUN', `包名=${pkg} · ${modeLabel} · 计划 ${rounds} 轮 · 异常阈值 ${weirdMs / 1000}s（超时不中止，只标记）· 轮询间隔 ${gapMs}ms · 清进程冷却 ${killCoolMs / 1000}s`);
   autoLog('INFO', 'RUN', `APK=${apkName}` + (preflight?.apk_size_mb != null ? ` ${preflight.apk_size_mb}MB` : ''));
-  autoLog('INFO', 'RUN', '计时=performance.now（cold_start 响应后起表）· 停表=match≥0.85 连续2帧 + 上升沿 · 测前 am kill-all');
-  autoLog('INFO', 'PRE', `自检通过 · device=${preflight?.device || '—'} · marker=${markerTemplateReady ? 'ready' : 'no'} · skip×${skipTemplateCount}`);
-  autoLog('INFO', 'RUN', '已关闭直播，adb 专供本轮自动循环 · 轮询 gap=0 时仍受截图耗时限制');
-
-  let targetRounds = rounds;
-  let extraGranted = 0;
+  autoLog('INFO', 'RUN', '计时：cold_start 返回后起表；停表：启动成功模板连续 1 帧≥0.85；命中帧扣掉当次截图耗时；上升沿在 force_stop 后已预置；跳过仅首次；每轮启动前清进程');
+  autoLog('INFO', 'PRE', `开跑自检通过 · 设备=${preflight?.device || '—'} · 启动模板=${markerTemplateReady ? '已就绪' : '未设'} · 跳过弹窗模板×${skipTemplateCount}`);
+  autoLog('INFO', 'RUN', '已关闭直播截图，adb 专供本轮自动循环');
 
   try {
     for (let round = 1; round <= targetRounds; round++) {
@@ -2437,7 +2588,7 @@ async function runAutoLoop() {
       const phase = `R${round}`;
       let roundAbnormal = false;
 
-      autoLog('STEP', phase, `卸装重装…`);
+      autoLog('STEP', phase, `第 ${round} 轮：开始卸装重装（保证首次冷启动是干净安装）…`);
       const tRe = performance.now();
       const reinstallResp = await fetch(API + '/api/reinstall', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2451,35 +2602,36 @@ async function runAutoLoop() {
       }
       const reMs = performance.now() - tRe;
       if (reinstallData.log && reinstallData.log.length) {
-        reinstallData.log.forEach(line => autoLog('INFO', 'ADB', String(line).trim()));
+        reinstallData.log.forEach(line => autoLog('INFO', 'ADB', `adb 原始输出：${String(line).trim()}`));
       }
       if (!reinstallData.ok) {
         throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
       }
-      autoLog('OK', phase, `reinstall ${(reMs / 1000).toFixed(1)}s · Success`);
+      autoLog('OK', phase, `卸装重装成功 · 耗时 ${(reMs / 1000).toFixed(1)}s`);
 
       if (autoAbortFlag) throw new Error('用户中断');
-      autoLog('STEP', `${phase}-1st`, `测首次冷启动（${modeLabel}）…`);
+      autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`);
       await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`);
       const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round);
       if (first.abnormal) roundAbnormal = true;
       records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal });
       saveRecords(); renderHistory(); renderStats();
-      autoLog('OK', 'RECORD', `#${String(records.length).padStart(2, '0')} 首次 = ${fmt(first.time)}s · round ${round}` + (first.abnormal ? ' · 异常' : ''));
+      autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 首次冷启动 = ${fmt(first.time)}s · 第 ${round} 轮` + (first.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
 
       if (autoAbortFlag) throw new Error('用户中断');
-      autoLog('STEP', `${phase}-2nd`, `测二次冷启动（${modeLabel}）…`);
+      autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`);
       await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`);
       const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round);
       if (second.abnormal) roundAbnormal = true;
       records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal });
       saveRecords(); renderHistory(); renderStats();
-      autoLog('OK', 'RECORD', `#${String(records.length).padStart(2, '0')} 二次 = ${fmt(second.time)}s · round ${round}` + (second.abnormal ? ' · 异常' : ''));
+      autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 二次冷启动 = ${fmt(second.time)}s · 第 ${round} 轮` + (second.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
 
       if (roundAbnormal && extraGranted < MAX_EXTRA_ROUNDS) {
         extraGranted += 1;
         targetRounds += 1;
-        autoLog('WARN', 'RUN', `本轮有异常样本(≥${weirdMs / 1000}s)，补跑第 ${targetRounds} 轮（已补 ${extraGranted}/${MAX_EXTRA_ROUNDS}）`);
+        _progressTotalRounds = targetRounds;
+        autoLog('WARN', 'RUN', `本轮出现异常样本（≥${weirdMs / 1000}s），自动补跑第 ${targetRounds} 轮（已补 ${extraGranted}/${MAX_EXTRA_ROUNDS}）`);
       }
     }
 
@@ -2510,6 +2662,7 @@ async function runAutoLoop() {
     lastRunAuditLog = auditLogLines.slice();
     renderAutoReport({ success: false, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, error: e.message, runStartIndex, launchMode });
   } finally {
+    stopProgressClock();
     autoRunning = false;
     autoAbortFlag = false;
     $('autoStopBtn').disabled = true;
@@ -2524,8 +2677,10 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   if (autoAbortFlag) throw new Error('用户中断');
   const body = { mode: launchMode, package: pkg };
   if (launchMode === 'tap') { body.x = x; body.y = y; }
-  const phase = `R${round}-${label === '首次' ? '1st' : '2nd'}`;
-  autoLog('STEP', phase, `cold_start mode=${launchMode}…`);
+  const isFirst = label === '首次';
+  const checkSkips = isFirst;  // 仅首次扫允许/通知类跳过弹窗；二次不再扫
+  const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
+  autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…');
   const r = await fetch(API + '/api/cold_start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -2540,10 +2695,11 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   }
   // §2.1：响应回来后直接打点。直播已在整段循环关闭，此处不必再 stopLive。
   const startTs = performance.now();
-  const confNeed = j.marker_confirm_frames != null ? j.marker_confirm_frames : 2;
+  const confNeed = j.marker_confirm_frames != null ? j.marker_confirm_frames : 1;
   const rising = j.marker_rising_edge !== false;
-  autoLog('OK', phase, `已启动 · 起表 · 等待模板（连续${confNeed}帧≥阈` + (rising ? ' + 上升沿' : '') + ` · 异常阈值 ${weirdMs / 1000}s）`);
-  return await waitForLaunchDone(startTs, weirdMs, gapMs);
+  const risingSeeded = j.marker_rising_seeded === true;
+  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 本趟不扫跳过弹窗'));
+  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips);
 }
 
 // ── 报告生成（页面内 + 可复制）──
@@ -2651,7 +2807,7 @@ function renderAutoReport(ctx) {
   L.push('');
   L.push('说明：');
   L.push('· 计时：单一 performance.now() 时钟，起点=服务端 cold_start 返回后，终点=模板连续确认命中');
-  L.push('· 终点：cv2.matchTemplate≥0.85，连续 2 帧确认，且需上升沿（先低于阈值再高于）；SKIP 弹窗后视为已见非成功态');
+  L.push('· 终点：认出启动成功画面；记入耗时 = 墙钟 − 命中帧截图耗时；SKIP 仅首次');
   L.push('· 测前：am kill-all 清后台 + force_stop 目标包 + 冷却，再 cold_start');
   L.push('· 异常阈值：默认 30s，只标记不中止；出现异常可补跑（最多 +2 轮）；是否删除异常样本由你决定');
   L.push('· 单次检测耗时主要在 adb 截图（shot_ms），匹配本身通常 <10ms（见运行审计日志）');
@@ -2818,7 +2974,7 @@ function renderSkipList(items) {
       }
     });
   });
-  $('skipStatus').textContent = `已设 ${skipTemplateCount} 个 · 自动测速时命中会点击（不停表）`;
+  $('skipStatus').textContent = `已设 ${skipTemplateCount} 个 · 仅首次冷启动会匹配并点击（二次不扫）`;
   refreshAutoChecklist();
 }
 
