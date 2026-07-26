@@ -178,14 +178,17 @@
   #autoProgress {
     /* 吃掉卡片剩余高度；内部滚动；不要用 60vh（会忽略上方平台/按钮占位） */
     flex: 1 1 0;
-    min-height: 0 !important;
+    /* 保底 150px：桌面客户端窗口高度可能只有 600px，上方 shrink-0 元素
+       吃光空间后日志仍需可见。原 min-height:0 会导致日志区完全消失。 */
+    min-height: 150px !important;
     max-height: none;
     height: auto;
     font-size: 0.8rem !important;
     overflow-y: auto;
   }
   #autoLoopCard.auto-running #autoProgress {
-    min-height: 0 !important;
+    /* 跑测时保底更高：日志是主信息来源 */
+    min-height: 180px !important;
   }
   /* 用户上滚查看历史时，不强制拽回底部（autoLog 会检测 scrollTop 阈值） */
   #autoProgress.user-scrolled {
@@ -275,8 +278,8 @@
   .ui-pref button:hover { background: var(--sc-highest); color: var(--primary); }
   .ui-pref button.active { background: color-mix(in srgb, var(--primary) 20%, transparent); color: var(--primary); }
 
-  #devicePanel { width: 280px; min-width: 220px; max-width: 42vw; }
-  #controlPanel { width: 360px; min-width: 300px; }
+  #devicePanel { width: 260px; min-width: 200px; max-width: 38vw; }
+  #controlPanel { width: 340px; min-width: 280px; }
   .stage-wrap {
     background:
       linear-gradient(color-mix(in srgb, var(--on) 4%, transparent) 1px, transparent 1px) 0 0 / 16px 16px,
@@ -284,11 +287,19 @@
       var(--sc-lowest);
   }
 
-  @media (max-width: 1023px) {
+  /* 桌面客户端窗口可能较小：1100px 以下切换为列布局（原 1023px 在 Electron
+     最小窗口 1000px 时刚好触不到，导致三栏挤压） */
+  @media (max-width: 1099px) {
     .main-grid { flex-direction: column !important; overflow-y: auto !important; }
     .left-col, .mid-col, .right-col { width: 100% !important; min-width: 0 !important; max-width: none !important; flex: none !important; }
     .left-col { min-height: 48vh; }
     .vsplit { display: none !important; }
+  }
+  /* 矮窗口（如笔记本竖屏 / 小尺寸桌面窗口）：紧凑化 setup block 释放日志空间 */
+  @media (max-height: 760px) {
+    #autoSetupBlock { gap: 0.375rem; }
+    #autoSetupBlock .border-t { padding-top: 0.375rem; }
+    .mid-col .glass-panel.p-2 { padding: 0.375rem; }
   }
 </style>
 </head>
@@ -498,15 +509,15 @@
             <div id="markerStatus" class="mt-1 text-[10px] font-mono text-on-surface-variant">未设模板 · 请先手动启动 App 到首页，再点上面按钮选定元素</div>
           </div>
 
-          <div class="border-t border-outline-variant/60 pt-2">
-            <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">跳过弹窗模板（可选 · 最多 3 个 · 仅首次冷启动命中后自动点击，不停表）</label>
-            <div class="flex gap-1.5 mb-1.5">
+          <details class="border-t border-outline-variant/60 pt-1.5">
+            <summary class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1 cursor-pointer hover:text-primary select-none">跳过弹窗模板（可选 · 最多 3 个）▶</summary>
+            <div class="flex gap-1.5 mb-1.5 mt-1.5">
               <button id="addSkipBtn" class="flex-1 py-1.5 bg-surface-container-high border border-warning/40 text-warning hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">➕ 添加跳过按钮</button>
               <button id="clearSkipBtn" class="px-2 py-1.5 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono font-bold transition active:scale-95">清除</button>
             </div>
             <div id="skipList" class="flex flex-wrap gap-1.5 mb-1"></div>
             <div id="skipStatus" class="text-[10px] font-mono text-on-surface-variant">未设 · 首次安装弹出「通知权限」时，点添加后点「不允许/允许」按钮</div>
-          </div>
+          </details>
         </div>
 
         <!-- 参数行：超时 / 轮询 / 轮数 / 杀进程后冷却 -->
@@ -721,6 +732,36 @@ let zoomMode = layout.zoomMode || 'fit';   // 'fit' | 'manual'
 let zoomPct = layout.zoomPct || 100;        // manual 模式下的百分比
 
 const $ = id => document.getElementById(id);
+
+// ── Electron 原生 API 兼容层 ─────────────────────────────────
+// 检测是否运行在 Electron 桌面客户端中。若是，用原生 dialog 替代浏览器 alert/confirm；
+// 若否（浏览器访问），回退到浏览器原生行为。前端代码统一调 uiAlert/uiConfirm，
+// 不关心当前运行环境（AGENTS.md §3.3：原生 JS，不引框架）。
+const isElectron = !!(window.electronAPI && window.electronAPI.isElectron);
+
+/**
+ * 信息提示框。Electron 下走原生 dialog（无域名前缀、系统外观）；浏览器下走 alert。
+ * 注意：Electron 版本是异步的（返回 Promise），但 alert 是同步的。
+ * 调用方无需 await（fire-and-forget 语义即可）。仅在需要等用户确认后再执行的场景才 await。
+ */
+function uiAlert(message, detail, type) {
+  if (isElectron && window.electronAPI.showAlert) {
+    return window.electronAPI.showAlert(message, detail, type);
+  }
+  alert(detail ? `${message}\n\n${detail}` : message);
+}
+
+/**
+ * 确认对话框。Electron 下走原生 dialog；浏览器下走 confirm。
+ * ⚠️ 返回 Promise<boolean>！调用方必须 await。
+ * 对于非 await 的调用点（如 if (!confirm(...)) return），改为 if (!await uiConfirm(...)) return。
+ */
+function uiConfirm(message, detail, type) {
+  if (isElectron && window.electronAPI.showConfirm) {
+    return window.electronAPI.showConfirm(message, detail, type);
+  }
+  return Promise.resolve(confirm(detail ? `${message}\n\n${detail}` : message));
+}
 
 // ── 外观：OC-2 明暗 / 字体 / 字号（色源见 static/themes/oc-2.json）──
 function saveUiPrefs() {
@@ -1030,7 +1071,7 @@ async function loadProjectById(pid, { clearApk = true } = {}) {
 async function saveCurrentProject() {
   const pid = $('projectSel').value || currentProjectId;
   if (!pid) {
-    alert('请先选择或新建项目，再点保存');
+    uiAlert('请先选择或新建项目，再点保存');
     return;
   }
   const nameOpt = ($('projectSel').selectedOptions[0]?.textContent || '').split(' · ')[0];
@@ -1058,7 +1099,7 @@ async function saveCurrentProject() {
   clearProjectDirty();
   refreshAutoChecklist();
   setState('ok', `项目已保存：${j.name}（模板 ${j.has_marker ? '有' : '无'} · 跳过 ${j.skip_count}）`);
-  alert(`已保存到项目「${j.name}」\n启动模板：${j.has_marker ? '已存' : '未设'}\n跳过模板：${j.skip_count} 个\n\n注意：APK 未复制进项目，下次测试请重新上传。`);
+  uiAlert(`已保存到项目「${j.name}」`, `启动模板：${j.has_marker ? '已存' : '未设'}\n跳过模板：${j.skip_count} 个\n\n注意：APK 未复制进项目，下次测试请重新上传。`);
 }
 
 $('projectNewBtn').addEventListener('click', async () => {
@@ -1073,9 +1114,9 @@ $('projectNewBtn').addEventListener('click', async () => {
     if (!r.ok || !j.ok) throw new Error(apiDetail(j, '新建失败'));
     await refreshProjectList(j.id);
     await loadProjectById(j.id, { clearApk: true });
-    alert(`已新建项目「${j.name}」\n请设好启动/跳过模板后点「保存」；测首次冷启动前记得上传 APK。`);
+    uiAlert(`已新建项目「${j.name}」`, '请设好启动/跳过模板后点「保存」；测首次冷启动前记得上传 APK。');
   } catch (e) {
-    alert('新建项目失败：' + e.message);
+    uiAlert('新建项目失败', e.message, 'error');
   }
 });
 
@@ -1083,15 +1124,15 @@ $('projectSaveBtn').addEventListener('click', async () => {
   try {
     await saveCurrentProject();
   } catch (e) {
-    alert('保存失败：' + e.message);
+    uiAlert('保存失败', e.message, 'error');
   }
 });
 
 $('projectDelBtn').addEventListener('click', async () => {
   const pid = $('projectSel').value || currentProjectId;
-  if (!pid) { alert('未选择项目'); return; }
+  if (!pid) { uiAlert('未选择项目'); return; }
   const label = $('projectSel').selectedOptions[0]?.textContent || pid;
-  if (!confirm(`删除项目「${label}」？\n会删掉已保存的模板图；浏览器里该项目的测速历史也会清掉。`)) return;
+  if (!await uiConfirm(`删除项目「${label}」？`, '会删掉已保存的模板图；浏览器里该项目的测速历史也会清掉。', 'warning')) return;
   try {
     const r = await fetch(API + '/api/projects/' + encodeURIComponent(pid), { method: 'DELETE' });
     const j = await r.json().catch(() => ({}));
@@ -1109,7 +1150,7 @@ $('projectDelBtn').addEventListener('click', async () => {
     renderHistory(); renderStats();
     setState('', '项目已删除');
   } catch (e) {
-    alert('删除失败：' + e.message);
+    uiAlert('删除失败', e.message, 'error');
   }
 });
 
@@ -1123,14 +1164,14 @@ $('projectSel').addEventListener('change', async () => {
     renderHistory(); renderStats();
     return;
   }
-  if (!confirm('切换项目会加载该项目的模板与配置。\n未点「保存」的当前模板改动会丢失。\n并请重新上传 APK。\n\n继续？')) {
+  if (!await uiConfirm('切换项目会加载该项目的模板与配置。', '未点「保存」的当前模板改动会丢失。\n并请重新上传 APK。\n\n继续？', 'question')) {
     $('projectSel').value = currentProjectId || '';
     return;
   }
   try {
     await loadProjectById(pid, { clearApk: true });
   } catch (e) {
-    alert('加载项目失败：' + e.message);
+    uiAlert('加载项目失败', e.message, 'error');
     $('projectSel').value = currentProjectId || '';
   }
 });
@@ -1178,7 +1219,7 @@ $('refreshAppsBtn').addEventListener('click', refreshAppList);
 // 同时把 APK 信息（原始名/大小）显示在 apkInfo 行，让用户确认传对了文件。
 async function uploadApkFile(file) {
   if (!file.name.toLowerCase().endsWith('.apk')) {
-    alert('请选择 .apk 文件');
+    uiAlert('请选择 .apk 文件', '', 'warning');
     return;
   }
   $('apkPath').value = '上传中...';
@@ -1197,12 +1238,12 @@ async function uploadApkFile(file) {
       showApkUploaded(orig, sizeMb);
       refreshAutoChecklist();
     } else {
-      alert('上传失败：' + (j.detail || '未知错误'));
+      uiAlert('上传失败', j.detail || '未知错误', 'error');
       $('apkPath').value = '';
       showApkReminder(currentApkHint);
     }
   } catch(e) {
-    alert('上传失败：' + e.message);
+    uiAlert('上传失败', e.message, 'error');
     $('apkPath').value = '';
     showApkReminder(currentApkHint);
   } finally {
@@ -1227,8 +1268,31 @@ dropZone.addEventListener('drop', e => {
   if (file) uploadApkFile(file);
 });
 
-// 浏览按钮
-$('browseApkBtn').addEventListener('click', () => $('apkFileInput').click());
+// 浏览按钮：Electron 下走原生文件对话框，浏览器下走 <input type=file>
+$('browseApkBtn').addEventListener('click', async () => {
+  if (isElectron && window.electronAPI.openFileDialog) {
+    const result = await window.electronAPI.openFileDialog({
+      title: '选择 APK 安装包',
+      filters: [
+        { name: 'Android 安装包', extensions: ['apk'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return;
+    // 用 fetch 上传到后端（与拖拽上传同一套逻辑）
+    try {
+      const fileResp = await fetch(result.filePath);
+      const blob = await fileResp.blob();
+      const file = new File([blob], result.filePath.split(/[/\\]/).pop());
+      uploadApkFile(file);
+    } catch(e) {
+      // Electron 下 fetch('C:\\...') 可能被 webSecurity 拦截；回退到 input[type=file]
+      $('apkFileInput').click();
+    }
+  } else {
+    $('apkFileInput').click();
+  }
+});
 $('apkFileInput').addEventListener('change', e => {
   const file = e.target.files[0];
   if (file) uploadApkFile(file);
@@ -1844,9 +1908,9 @@ function renderHistory() {
   }));
 }
 function removeLast() { if (!records.length) return; records.pop(); saveRecords(); renderHistory(); renderStats(); }
-function clearAll() {
+async function clearAll() {
   if (!records.length) return;
-  if (!confirm(`清空全部 ${records.length} 条？`)) return;
+  if (!await uiConfirm(`清空全部 ${records.length} 条？`, '', 'warning')) return;
   records = []; saveRecords(); renderHistory(); renderStats();
   setState('', '已清空');
 }
@@ -1862,7 +1926,7 @@ async function reinstall() {
     log.textContent = '⚠ 请先填 APK 包名，并上传 APK（首次冷启动前必须上传；项目不保存安装包）';
     return;
   }
-  if (!confirm(`确认卸载并重装？\n包名：${pkg}\nAPK：${apkPath}`)) return;
+  if (!await uiConfirm('确认卸载并重装？', `包名：${pkg}\nAPK：${apkPath}`, 'question')) return;
   const btn = $('reinstallBtn');
   btn.disabled = true; btn.textContent = '处理中...';
   log.className = 'install-log show'; log.textContent = '正在卸载旧版本...';
@@ -2057,6 +2121,20 @@ document.addEventListener('keydown', e => {
   else if (e.key.toLowerCase() === 'f') { e.preventDefault(); zoomMode='fit'; layout.zoomMode='fit'; saveLayout(); relayoutStage(); }
 });
 
+// ── 菜单命令（Electron 桌面客户端：菜单栏点击 → IPC → 前端触发操作）──
+// 浏览器模式下 onMenuCommand 不存在，跳过注册。
+if (isElectron && window.electronAPI.onMenuCommand) {
+  window.electronAPI.onMenuCommand((cmd) => {
+    switch (cmd) {
+      case 'manual-shot': $('manualShotBtn').click(); break;
+      case 'reinstall': reinstall(); break;
+      case 'force-stop': forceStop(); break;
+      case 'go-home': pressKey(3); break;
+      case 'upload-apk': $('browseApkBtn').click(); break;
+    }
+  });
+}
+
 // ── 启动 ──
 applyLayout();
 // 方案1：自动测速是主流程，强制展开；调试/快捷键默认折叠
@@ -2214,19 +2292,19 @@ function getAuditLogText() {
 
 $('autoLogCopyBtn').addEventListener('click', async () => {
   const text = getAuditLogText();
-  if (!text) { alert('暂无日志'); return; }
+  if (!text) { uiAlert('暂无日志'); return; }
   try {
     await navigator.clipboard.writeText(text);
     $('autoLogCopyBtn').textContent = '✓';
     setTimeout(() => { $('autoLogCopyBtn').textContent = '复制'; }, 1200);
   } catch {
-    alert('复制失败，请手动选择日志区');
+    uiAlert('复制失败，请手动选择日志区', '', 'error');
   }
 });
-$('autoLogClearBtn').addEventListener('click', () => {
-  if (autoRunning) { alert('跑测中不能清空'); return; }
+$('autoLogClearBtn').addEventListener('click', async () => {
+  if (autoRunning) { uiAlert('跑测中不能清空', '', 'warning'); return; }
   if (!auditLogLines.length) return;
-  if (!confirm('清空运行审计日志？')) return;
+  if (!await uiConfirm('清空运行审计日志？', '', 'question')) return;
   clearAuditLog();
 });
 
@@ -2284,7 +2362,8 @@ function applyLogHeight() {
     el.style.maxHeight = '';
   }
   el.style.height = '';
-  el.style.minHeight = '';
+  // 不清除 minHeight：CSS 里设了 150px 保底，JS 不能把它抹掉
+  // （原 el.style.minHeight = '' 会让日志区在矮窗口下被压到零）
   el.style.flex = '1 1 0';
 }
 
@@ -2525,7 +2604,7 @@ async function runAutoLoop() {
 
   if (!autoGateReady) {
     setState('err', '开跑检查未通过');
-    alert('请先补齐开跑检查中的必选项（红色 ✗）');
+    uiAlert('请先补齐开跑检查中的必选项（红色 ✗）', '', 'warning');
     return;
   }
 
@@ -2540,14 +2619,14 @@ async function runAutoLoop() {
     if (!preflight.ok) {
       const msg = (preflight.errors || ['自检失败']).join('\n· ');
       setState('err', '自动循环自检未通过');
-      alert('无法开始自动循环：\n· ' + msg);
+      uiAlert('无法开始自动循环', '· ' + msg, 'error');
       if (!preflight.marker_ready) markerTemplateReady = false;
       refreshAutoChecklist();
       return;
     }
     markerTemplateReady = !!preflight.marker_ready;
   } catch (e) {
-    alert('自检请求失败：' + e.message + '\n请确认后端已启动');
+    uiAlert('自检请求失败', e.message + '\n请确认后端已启动', 'error');
     return;
   }
 
@@ -2845,13 +2924,13 @@ $('reportCopyBtn').addEventListener('click', async () => {
     range.selectNode($('autoReport'));
     getSelection().removeAllRanges();
     getSelection().addRange(range);
-    alert('请按 Ctrl+C 复制');
+    uiAlert('请按 Ctrl+C 复制');
   }
 });
 $('reportCsvBtn').addEventListener('click', () => {
   // 只导出最近一次 run_id 的记录（审核高5：不混入历史批次）
   const autoAll = records.filter(r => r.source === 'auto' && r.run_id);
-  if (!autoAll.length) { alert('无自动测速数据'); return; }
+  if (!autoAll.length) { uiAlert('无自动测速数据'); return; }
   const latestRunId = autoAll[autoAll.length - 1].run_id;
   const runRecords = autoAll.filter(r => r.run_id === latestRunId);
   const rows = [['type', 'round', 'time_ms', 'time_s', 'date']];
@@ -2869,10 +2948,10 @@ $('reportCsvBtn').addEventListener('click', () => {
 // ── 启停按钮绑定 ──
 $('autoStartBtn').addEventListener('click', () => {
   if (autoRunning) {
-    alert('自动循环已在运行中，请先点「停止」或等本轮结束');
+    uiAlert('自动循环已在运行中', '请先点「停止」或等本轮结束', 'warning');
     return;
   }
-  if (running) { alert('手动计时正在运行，请先停止'); return; }
+  if (running) { uiAlert('手动计时正在运行，请先停止', '', 'warning'); return; }
   runAutoLoop();
 });
 $('autoStopBtn').addEventListener('click', () => {
@@ -2884,7 +2963,7 @@ $('autoStopBtn').addEventListener('click', () => {
 
 // ── 模板选定流程：点「点画面选定」→ 进入选定模式 → 用户点画面 → 调 set_marker_template ──
 $('setMarkerBtn').addEventListener('click', () => {
-  if (!deviceReady) { alert('请先连接设备并让画面显示出来'); return; }
+  if (!deviceReady) { uiAlert('请先连接设备并让画面显示出来', '', 'warning'); return; }
   skipPickingMode = false;
   markerPickingMode = true;
   $('setMarkerBtn').textContent = '◉ 请在画面上点击启动元素...';
@@ -2970,7 +3049,7 @@ function renderSkipList(items) {
         markProjectDirty();
         await refreshSkipList();
       } catch (e) {
-        alert('删除跳过模板失败：' + e.message);
+        uiAlert('删除跳过模板失败', e.message, 'error');
       }
     });
   });
@@ -2989,8 +3068,8 @@ async function refreshSkipList() {
 }
 
 $('addSkipBtn').addEventListener('click', () => {
-  if (!deviceReady) { alert('请先连接设备并让画面显示出来'); return; }
-  if (skipTemplateCount >= 3) { alert('跳过模板最多 3 个，请先清除再添加'); return; }
+  if (!deviceReady) { uiAlert('请先连接设备并让画面显示出来', '', 'warning'); return; }
+  if (skipTemplateCount >= 3) { uiAlert('跳过模板最多 3 个', '请先清除再添加', 'warning'); return; }
   markerPickingMode = false;
   skipPickingMode = true;
   $('setMarkerBtn').classList.remove('animate-pulse');
@@ -3002,7 +3081,7 @@ $('addSkipBtn').addEventListener('click', () => {
 
 $('clearSkipBtn').addEventListener('click', async () => {
   if (!skipTemplateCount) return;
-  if (!confirm('清除全部跳过弹窗模板？')) return;
+  if (!await uiConfirm('清除全部跳过弹窗模板？', '', 'question')) return;
   try {
     const r = await fetch(API + '/api/clear_skip_templates', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3014,7 +3093,7 @@ $('clearSkipBtn').addEventListener('click', async () => {
     markProjectDirty();
     setState('ok', '已清除全部跳过模板');
   } catch (e) {
-    alert('清除失败：' + e.message);
+    uiAlert('清除失败', e.message, 'error');
   }
 });
 

@@ -22,5 +22,11 @@ projects/
 stitch_adaptive_responsive_shortcut_layout/
 chk.html
 
-# 本地 npm 依赖（若有前端工具链，不入版本库）
+# 本地 npm 依赖（Electron / electron-builder）
 node_modules/
+
+# Electron 打包产物（electron-builder 输出）
+release/
+
+# Electron 运行时缓存
+dist-electron/
