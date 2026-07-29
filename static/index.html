@@ -61,6 +61,8 @@
   .bg-primary-container { background-color: var(--primary-c) !important; }
   .text-on-primary-container { color: var(--on-primary-c) !important; }
   .bg-primary { background-color: var(--primary) !important; }
+  .bg-primary\/20 { background-color: color-mix(in srgb, var(--primary) 20%, transparent) !important; }
+  .text-on-primary { color: var(--palette-neutral) !important; }
   .bg-tertiary { background-color: var(--mint) !important; }
   .text-on-tertiary { color: var(--palette-ink) !important; }
   .bg-outline-variant { background-color: var(--outline-var) !important; }
@@ -70,8 +72,8 @@
   .text-\[10px\] { font-size: 0.78rem !important; }
   .text-\[11px\] { font-size: 0.84rem !important; }
 
-  .glass-panel { background: var(--glass); backdrop-filter: blur(8px); border: 1px solid var(--outline-var); border-radius: var(--radius); }
-  .glass-dim { background: color-mix(in srgb, var(--sc-lowest) 75%, transparent); backdrop-filter: blur(6px); }
+  .glass-panel { background: var(--glass); border: 1px solid var(--outline-var); border-radius: var(--radius); }
+  .glass-dim { background: var(--sc-lowest); }
 
   .custom-scrollbar::-webkit-scrollbar { width: 7px; }
   .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
@@ -88,7 +90,6 @@
   #shot { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
   #overlay { position: absolute; inset: 0; pointer-events: none; }
   #overlay > * { pointer-events: auto; }
-  #zoomFit.on, #zoom100.on { background: var(--primary-c); border-color: var(--primary-c); color: var(--palette-ink); }
 
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem;
     padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--outline-var); color: var(--on-var); background: var(--sc-high); }
@@ -98,14 +99,6 @@
   .status.err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 12%, transparent); }
   .status.err .dot { background: var(--danger); }
   @keyframes dot-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
-
-  .shot-monitor { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem;
-    padding: 4px 8px; border-radius: var(--radius); border: 1px solid var(--outline-var); background: var(--sc-high);
-    color: var(--on-var); min-width: 110px; justify-content: center; }
-  .shot-monitor .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--on-var); flex-shrink: 0; }
-  .shot-monitor.wait .pip { background: var(--amber); animation: dot-pulse 1s infinite; }
-  .shot-monitor.ok { border-color: color-mix(in srgb, var(--mint) 35%, transparent); } .shot-monitor.ok .pip { background: var(--mint); }
-  .shot-monitor.err { border-color: color-mix(in srgb, var(--danger) 40%, transparent); color: var(--danger); } .shot-monitor.err .pip { background: var(--danger); }
 
   .timer-glow { text-shadow: none; }
   .unit { font-size: .32em; font-weight: 400; color: var(--on-var); margin-left: .12em; letter-spacing: 0; }
@@ -129,7 +122,7 @@
     color: var(--on-var); cursor: pointer; border-radius: var(--radius); flex-shrink: 0; font-size: 0.8rem; opacity: .5; transition: .15s; }
   .hist-item .del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); opacity: 1; }
   .tag-type { font-size: 0.75rem; padding: 1px 6px; border-radius: var(--radius); flex-shrink: 0; font-weight: 700; }
-  .tag-first { color: var(--primary-c); background: color-mix(in srgb, var(--primary) 15%, transparent); }
+  .tag-first { color: var(--primary); background: color-mix(in srgb, var(--primary) 15%, transparent); }
   .tag-second { color: var(--amber); background: color-mix(in srgb, var(--amber) 15%, transparent); }
   .tag { font-size: 0.75rem; font-weight: 700; padding: 1px 6px; border-radius: var(--radius); flex-shrink: 0; }
   .tag.max { color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent); }
@@ -262,6 +255,10 @@
   @keyframes marker-pop { from { transform: scale(0); } to { transform: scale(1); } }
 
   /* 外观控件 */
+  /* 全局 select：原生下拉弹窗需要实色背景，否则暗色模式下选项文字与背景融为一体 */
+  select { background-color: var(--sc); color: var(--on); }
+  select option { background-color: var(--sc); color: var(--on); }
+
   .ui-pref {
     display: inline-flex; align-items: center; gap: 4px;
     background: var(--sc-high); border: 1px solid var(--outline-var); border-radius: var(--radius);
@@ -275,15 +272,15 @@
     background: transparent; border: none; color: var(--on); font-size: 0.75rem;
     padding: 2px 6px; border-radius: var(--radius); cursor: pointer;
   }
-  .ui-pref button:hover { background: var(--sc-highest); color: var(--primary); }
+  .ui-pref button:hover { background: var(--sc-highest); color: var(--on); }
   .ui-pref button.active { background: color-mix(in srgb, var(--primary) 20%, transparent); color: var(--primary); }
 
   #devicePanel { width: 260px; min-width: 200px; max-width: 38vw; }
   #controlPanel { width: 340px; min-width: 280px; }
   .stage-wrap {
     background:
-      linear-gradient(color-mix(in srgb, var(--on) 4%, transparent) 1px, transparent 1px) 0 0 / 16px 16px,
-      linear-gradient(90deg, color-mix(in srgb, var(--on) 4%, transparent) 1px, transparent 1px) 0 0 / 16px 16px,
+      linear-gradient(color-mix(in srgb, var(--on) 2.5%, transparent) 1px, transparent 1px) 0 0 / 16px 16px,
+      linear-gradient(90deg, color-mix(in srgb, var(--on) 2.5%, transparent) 1px, transparent 1px) 0 0 / 16px 16px,
       var(--sc-lowest);
   }
 
@@ -308,8 +305,6 @@
 <!-- ── 顶栏 ── -->
 <header class="bg-surface-container docked full-width top-0 border-b border-outline-variant flex justify-between items-center w-full px-4 h-14 shrink-0 z-50">
   <div class="flex items-center gap-3 flex-wrap">
-    <span class="font-mono font-bold text-primary tracking-tight text-lg">⚡ App 冷启测速</span>
-    <div class="h-6 w-px bg-outline-variant"></div>
     <div class="flex items-center gap-2 bg-surface-container-high px-2 py-1 rounded border border-outline-variant">
       <span class="text-on-surface-variant text-sm">📱</span>
       <select id="deviceSel" class="bg-transparent border-none text-xs font-mono focus:ring-0 py-0 pl-1 pr-4 cursor-pointer text-on-surface max-w-[280px]">
@@ -323,8 +318,8 @@
       <select id="projectSel" class="bg-transparent border-none text-xs font-mono focus:ring-0 py-0 pl-1 pr-2 cursor-pointer text-on-surface max-w-[160px]">
         <option value="">未选择</option>
       </select>
-      <button id="projectNewBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded hover:text-primary" title="新建项目">新建</button>
-      <button id="projectSaveBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-tertiary/40 text-tertiary rounded hover:bg-tertiary/10" title="把当前模板与配置保存到所选项目（不含 APK）">保存</button>
+      <button id="projectNewBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant text-on-surface-variant rounded hover:bg-surface-container-highest" title="新建项目">新建</button>
+      <button id="projectSaveBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant text-on-surface-variant rounded hover:bg-surface-container-highest" title="把当前模板与配置保存到所选项目（不含 APK）">保存</button>
       <button id="projectDelBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant text-on-surface-variant rounded hover:text-danger hover:border-danger/40" title="删除项目">删</button>
     </div>
   </div>
@@ -353,6 +348,18 @@
         <option value="xl">更大</option>
       </select>
     </div>
+    <div class="ui-pref" title="画面直播轮询（截图回显到左侧画面；scrcpy 镜像是独立的，不受此开关影响）">
+      <label class="flex items-center gap-1 cursor-pointer">
+        <input id="liveToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary focus:ring-primary"> 直播
+      </label>
+      <select id="liveGap" title="画面刷新间隔（越小越快，越占 adb）">
+        <option value="150">极速+</option>
+        <option value="300" selected>极速</option>
+        <option value="600">流畅</option>
+        <option value="1200">省流</option>
+        <option value="2500">节能</option>
+      </select>
+    </div>
     <div id="statusBadge" class="status"><span class="dot"></span><span id="statusText">检测中...</span></div>
   </div>
 </header>
@@ -363,21 +370,13 @@
   <!-- ═══ 左栏：设备画面（工具窗口，默认窄）═══ -->
   <section id="devicePanel" class="left-col flex flex-col gap-1.5 shrink-0">
 
-    <!-- 画面工具栏：截图 + 直播刷新速率（常显，便于调流畅度） -->
+    <!-- 画面工具栏：截图 + 镜像/录屏（高频操作）；直播开关已移至顶部工具栏 -->
     <div class="glass-panel p-1.5 rounded flex items-center justify-between shrink-0 flex-wrap gap-1">
       <div class="flex items-center gap-2 flex-wrap">
         <button id="manualShotBtn" class="flex items-center gap-1 px-2.5 py-1 bg-primary-container text-on-primary-container rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95">📸 截图</button>
-        <span id="shotMonitor" class="text-xs font-mono text-on-surface-variant px-2 py-1 bg-surface-container-high border border-outline-variant rounded min-w-[110px] text-center">⏱ --</span>
-        <label class="flex items-center gap-1 text-xs font-mono cursor-pointer hover:text-primary" title="开启后按下方间隔持续刷新画面；自动测速跑测时会临时关闭">
-          <input id="liveToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary focus:ring-primary"> 直播
-        </label>
-        <select id="liveGap" class="bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-0.5" title="画面刷新间隔（越小越快，越占 adb）">
-          <option value="150">极速+</option>
-          <option value="300" selected>极速</option>
-          <option value="600">流畅</option>
-          <option value="1200">省流</option>
-          <option value="2500">节能</option>
-        </select>
+        <!-- scrcpy 镜像/录屏（仅 Electron 桌面客户端，浏览器模式隐藏） -->
+        <button id="scrcpyMirrorBtn" class="hidden px-2 py-1 bg-surface-container-high border border-outline-variant text-on-surface rounded font-mono text-xs font-bold hover:bg-surface-container-highest transition active:scale-95" title="实时镜像（独立置顶窗口，30fps，不抢 adb）">📱 镜像</button>
+        <button id="scrcpyRecordBtn" class="hidden px-2 py-1 bg-surface-container-high border border-outline-variant text-on-surface rounded font-mono text-xs font-bold hover:bg-surface-container-highest transition active:scale-95" disabled title="需先开启镜像">⏺ 录屏</button>
       </div>
       <div class="flex items-center gap-2 ml-auto">
         <span id="stageInfo" class="text-xs font-mono text-on-surface-variant truncate max-w-[220px]">点画面设启动/跳过模板</span>
@@ -419,18 +418,6 @@
             <div>初始化中...</div>
             <div class="text-[10px]">正在检测设备</div>
           </div>
-        </div>
-      </div>
-      <!-- 缩放控件 -->
-      <div class="absolute right-3 bottom-3 glass-dim border border-outline-variant rounded p-1.5 flex flex-col gap-1 opacity-50 hover:opacity-100 transition z-10">
-        <div class="flex items-center gap-1">
-          <button id="zoomOut" class="w-6 h-5 bg-surface-container-high border border-outline-variant rounded text-xs">−</button>
-          <span id="zoomPct" class="font-mono text-xs text-on-surface-variant min-w-[44px] text-center">适配</span>
-          <button id="zoomIn" class="w-6 h-5 bg-surface-container-high border border-outline-variant rounded text-xs">＋</button>
-        </div>
-        <div class="flex items-center gap-1">
-          <button id="zoomFit" class="on flex-1 px-2 py-0.5 bg-primary text-on-primary border border-primary rounded text-[10px]">适配</button>
-          <button id="zoom100" class="flex-1 px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded text-[10px]">1:1</button>
         </div>
       </div>
     </div>
@@ -480,8 +467,8 @@
         </select>
       </div>
       <div class="grid grid-cols-3 gap-1.5">
-        <button id="reinstallBtn" class="py-1.5 bg-surface-container-high border border-warning/30 text-warning hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">卸载重装</button>
-        <button id="forceStopBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs font-mono font-bold transition active:scale-95">杀进程</button>
+        <button id="reinstallBtn" class="py-1.5 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">卸载重装</button>
+        <button id="forceStopBtn" class="py-1.5 bg-surface-container-high border border-danger/20 text-on-surface hover:bg-danger/10 rounded text-xs font-mono font-bold transition active:scale-95">杀进程</button>
         <button id="backHomeBtn" class="py-1.5 bg-surface-container-high border border-outline-variant text-on-surface hover:bg-surface-container-highest rounded text-xs font-mono font-bold transition active:scale-95">回主页</button>
       </div>
     </div>
@@ -492,7 +479,7 @@
     <!-- 🤖 自动测速（模板比对停表 + 全自动循环）-->
     <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-tertiary/40 flex-1 flex flex-col min-h-0 overflow-hidden">
       <div class="flex items-center justify-between text-on-surface mb-1 shrink-0">
-        <span class="font-mono text-[11px] font-bold tracking-wider text-tertiary">🤖 自动测速</span>
+        <span class="font-mono text-[11px] font-bold tracking-wider text-on-surface-variant">🤖 自动测速</span>
         <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
       </div>
       <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
@@ -502,7 +489,7 @@
             <div class="flex gap-1.5 items-end">
               <div class="flex-1">
                 <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动元素模板（识别到此区域即停表）</label>
-                <button id="setMarkerBtn" class="w-full py-1.5 bg-surface-container-high border border-tertiary/40 text-tertiary hover:bg-tertiary/10 rounded text-xs font-mono font-bold transition active:scale-95">📍 点画面选定启动元素</button>
+                <button id="setMarkerBtn" class="w-full py-1.5 bg-surface-container-high border border-outline-variant text-on-surface hover:bg-surface-container-highest rounded text-xs font-mono font-bold transition active:scale-95">📍 点画面选定启动元素</button>
               </div>
               <div id="markerPreviewWrap" class="hidden w-[72px] h-[44px] bg-surface-container-lowest border border-outline-variant rounded overflow-hidden flex items-center justify-center text-[9px] text-on-surface-variant">无</div>
             </div>
@@ -512,7 +499,7 @@
           <details class="border-t border-outline-variant/60 pt-1.5">
             <summary class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1 cursor-pointer hover:text-primary select-none">跳过弹窗模板（可选 · 最多 3 个）▶</summary>
             <div class="flex gap-1.5 mb-1.5 mt-1.5">
-              <button id="addSkipBtn" class="flex-1 py-1.5 bg-surface-container-high border border-warning/40 text-warning hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">➕ 添加跳过按钮</button>
+              <button id="addSkipBtn" class="flex-1 py-1.5 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">➕ 添加跳过按钮</button>
               <button id="clearSkipBtn" class="px-2 py-1.5 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono font-bold transition active:scale-95">清除</button>
             </div>
             <div id="skipList" class="flex flex-wrap gap-1.5 mb-1"></div>
@@ -542,7 +529,7 @@
         <div id="autoLaunchHint" class="text-[10px] font-mono text-on-surface-variant leading-relaxed shrink-0"></div>
         <div class="grid grid-cols-2 gap-1.5 shrink-0">
           <button id="autoStartBtn" class="py-2 bg-tertiary text-on-tertiary rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">▶ 开始自动循环</button>
-          <button id="autoStopBtn" class="py-2 bg-surface-container-high border border-danger/40 text-danger rounded font-mono text-xs font-bold hover:bg-danger/10 transition active:scale-95" disabled>■ 停止</button>
+          <button id="autoStopBtn" class="py-2 bg-surface-container-high border border-danger/20 text-on-surface rounded font-mono text-xs font-bold hover:bg-danger/10 transition active:scale-95" disabled>■ 停止</button>
         </div>
 
         <!-- 开跑检查：可折叠；与下方日志交界可拖高日志 -->
@@ -585,7 +572,6 @@
         <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">Q</kbd> 卸载重装</div>
         <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">W</kbd> 杀进程</div>
         <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">B/H</kbd> 返回/主页</div>
-        <div class="flex items-center gap-1"><kbd class="px-1.5 py-0.5 bg-surface-container-high border border-outline-variant rounded text-on-surface">F</kbd> 画面适配</div>
       </div>
     </div>
   </section>
@@ -619,7 +605,7 @@
             <input id="apkFileInput" type="file" accept=".apk" class="hidden">
           </div>
           <!-- 未上传时提醒；上传成功后显示原始名/大小 -->
-          <div id="apkInfo" class="mt-1 text-[10px] font-mono text-warning leading-relaxed">⚠ 首次冷启动测试前请上传 APK（项目只记文件名提示，不复制安装包）</div>
+          <div id="apkInfo" class="mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed">⚠ 首次冷启动测试前请上传 APK（项目只记文件名提示，不复制安装包）</div>
         </div>
         <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[220px] overflow-y-auto hidden"></div>
       </div>
@@ -647,16 +633,16 @@
         </div>
         <!-- 老的一锅烩统计 -->
         <div class="grid grid-cols-4 gap-1.5 mt-1">
-          <div class="col-span-2 bg-gradient-to-br from-primary/30 to-primary/10 border border-primary/40 p-2 rounded">
+          <div class="col-span-2 bg-surface-container border border-outline-variant p-2 rounded">
             <div class="text-[9px] font-mono text-on-surface-variant uppercase">全部均值（去极值）</div>
-            <div id="statAvg" class="text-lg font-mono font-bold text-white">—<span class="text-xs text-on-surface-variant ml-1 font-normal">s</span></div>
+            <div id="statAvg" class="text-lg font-mono font-bold text-on-surface">—<span class="text-xs text-on-surface-variant ml-1 font-normal">s</span></div>
           </div>
-          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最大</div><div id="statMax" class="text-sm font-mono font-bold text-danger">—</div></div>
-          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最小</div><div id="statMin" class="text-sm font-mono font-bold text-tertiary">—</div></div>
+          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最大</div><div id="statMax" class="text-sm font-mono font-bold text-on-surface">—</div></div>
+          <div class="bg-surface-container-high p-2 rounded text-center"><div class="text-[9px] text-on-surface-variant">最小</div><div id="statMin" class="text-sm font-mono font-bold text-on-surface">—</div></div>
         </div>
         <div class="bg-surface-container-high px-2 py-1 rounded flex justify-between items-center">
           <span class="text-[10px] font-mono text-on-surface-variant">总次数</span>
-          <span id="statCount" class="font-mono font-bold text-sm text-primary">0</span>
+          <span id="statCount" class="font-mono font-bold text-sm text-on-surface">0</span>
         </div>
       </div>
     </div>
@@ -726,10 +712,6 @@ let startTs = 0;
 let rafId = null;
 let startingLock = false;
 let markers = [];
-
-// 画面缩放状态
-let zoomMode = layout.zoomMode || 'fit';   // 'fit' | 'manual'
-let zoomPct = layout.zoomPct || 100;        // manual 模式下的百分比
 
 const $ = id => document.getElementById(id);
 
@@ -982,7 +964,7 @@ function setMarkerPreviewFromProject(j) {
   if (j.marker_ready && j.marker_preview_base64) {
     wrap.classList.remove('hidden');
     wrap.innerHTML = `<img src="data:${j.marker_preview_mime || 'image/jpeg'};base64,${j.marker_preview_base64}" style="width:100%;height:100%;object-fit:contain">`;
-    $('markerStatus').innerHTML = `✓ 已从项目加载 · <b class="text-tertiary">${j.marker_width}×${j.marker_height}</b> px · 中心 (${Number(j.marker_center_x).toFixed(3)}, ${Number(j.marker_center_y).toFixed(3)})`;
+    $('markerStatus').innerHTML = `✓ 已从项目加载 · <b class="text-on-surface">${j.marker_width}×${j.marker_height}</b> px · 中心 (${Number(j.marker_center_x).toFixed(3)}, ${Number(j.marker_center_y).toFixed(3)})`;
   } else {
     wrap.classList.add('hidden');
     wrap.textContent = '无';
@@ -1203,7 +1185,7 @@ async function refreshAppList() {
     const r = await fetch(API + '/api/apps');
     const j = await r.json();
     const pkgs = j.apps || [];
-    $('pkgList').innerHTML = pkgs.map(p => `<option value="${p}">`).join('');
+    $('pkgList').innerHTML = pkgs.map(p => `<option value="${escapeHtml(p)}">`).join('');
     btn.textContent = '↻';
     btn.title = `${pkgs.length} 个第三方应用`;
   } catch(e) {
@@ -1304,7 +1286,6 @@ function fitStage() {
   const stage = $('stage');
   const wrap = $('stageWrap');
   if (!stage || stage.classList.contains('empty')) return;
-  if (zoomMode !== 'fit') return;
   const wrapRect = wrap.getBoundingClientRect();
   const pad = 24;
   const maxW = wrapRect.width - pad;
@@ -1315,28 +1296,9 @@ function fitStage() {
   if (h > maxH) { h = maxH; w = h * ratio; }
   stage.style.width = Math.max(100, w) + 'px';
   stage.style.height = Math.max(100, h) + 'px';
-  $('zoomPct').textContent = '适配';
-  $('zoomFit').classList.add('on');
-  $('zoom100').classList.remove('on');
-}
-function applyManualZoom() {
-  const stage = $('stage');
-  if (!stage || stage.classList.contains('empty')) return;
-  const ratio = ocrResult ? (ocrResult.width / ocrResult.height) : (9/19.5);
-  // 以高度为基准（手机是竖屏）：填满高度，宽度按比例
-  const wrap = $('stageWrap');
-  const wrapRect = wrap.getBoundingClientRect();
-  const h = wrapRect.height - 24;
-  const w = h * ratio;
-  const factor = zoomPct / 100;
-  stage.style.width = (w * factor) + 'px';
-  stage.style.height = (h * factor) + 'px';
-  $('zoomPct').textContent = zoomPct + '%';
-  $('zoomFit').classList.remove('on');
-  $('zoom100').classList.toggle('on', zoomPct === 100);
 }
 function relayoutStage() {
-  if (zoomMode === 'fit') fitStage(); else applyManualZoom();
+  fitStage();
 }
 let resizeTimer = null;
 function scheduleStageResize() {
@@ -1345,42 +1307,27 @@ function scheduleStageResize() {
 }
 window.addEventListener('resize', scheduleStageResize);
 
-$('zoomIn').addEventListener('click', () => { setZoom(zoomPct + 10); });
-$('zoomOut').addEventListener('click', () => { setZoom(zoomPct - 10); });
-$('zoomFit').addEventListener('click', () => { zoomMode = 'fit'; layout.zoomMode = 'fit'; saveLayout(); relayoutStage(); });
-$('zoom100').addEventListener('click', () => { setZoom(100); });
-function setZoom(p) {
-  zoomMode = 'manual';
-  zoomPct = Math.max(30, Math.min(300, p));
-  layout.zoomMode = 'manual';
-  layout.zoomPct = zoomPct;
-  saveLayout();
-  relayoutStage();
-}
-// 滚轮缩放
-$('stageWrap').addEventListener('wheel', e => {
-  if (!deviceReady) return;
-  e.preventDefault();
-  const delta = e.deltaY > 0 ? -10 : 10;
-  if (zoomMode === 'fit') { setZoom(100 + delta); return; }
-  setZoom(zoomPct + delta);
-}, { passive: false });
-
 // ── 设备 ──
+// 最近一次设备列表（含 platform 字段，供 selectDevice 查找平台）
+let lastDeviceList = [];
+let currentPlatform = 'android';
+
 async function refreshDevices() {
   try {
     const r = await fetch(API + '/api/devices');
     const j = await r.json();
     const sel = $('deviceSel');
     const devs = j.devices || [];
+    lastDeviceList = devs;
     const cur = sel.value;
     if (!devs.length) {
       sel.innerHTML = '<option value="">（无设备）</option>';
     } else {
       sel.innerHTML = devs.map(d => {
-        const label = d.model ? `${d.model} · ${d.serial}` : `${d.serial}`;
+        const icon = d.platform === 'ios' ? '🍎 ' : '🤖 ';
+        const label = d.model ? `${icon}${escapeHtml(d.model)}` : `${icon}${escapeHtml(d.serial)}`;
         const ok = d.state === 'device';
-        return `<option value="${d.serial}" ${ok?'':'disabled'}>${label}${ok?'':' ['+d.state+']'}</option>`;
+        return `<option value="${escapeHtml(d.serial)}" ${ok?'':'disabled'}>${label}${ok?'':' ['+escapeHtml(d.state)+']'}</option>`;
       }).join('');
       if (cur && devs.find(d => d.serial === cur)) sel.value = cur;
       else if (config.serial && devs.find(d => d.serial === config.serial)) sel.value = config.serial;
@@ -1393,9 +1340,13 @@ async function refreshDevices() {
 }
 async function selectDevice(serial) {
   if (!serial) return;
+  // 从设备列表查找平台（Android vs iOS）
+  const dev = lastDeviceList.find(d => d.serial === serial);
+  currentPlatform = dev?.platform || 'android';
   try {
     await fetch(API + '/api/device/select', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({serial})
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({serial, platform: currentPlatform})
     });
     config.serial = serial;
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
@@ -1403,8 +1354,6 @@ async function selectDevice(serial) {
     renderStage();
     relayoutStage();
     // 立即打一次诊断截图（手动模式跳缓存），让用户立刻看到画面 + 验证 adb 通路
-    // 这解决了"显示未连接设备但其实连了"——其实是连上了但截图没刷过来
-    updateShotMonitor('wait', '首次截图中…');
     await fetchShotOnce(true);
     refreshOcr();
     refreshAppList();  // 拉一次已装应用列表（包名下拉用）
@@ -1413,7 +1362,6 @@ async function selectDevice(serial) {
     refreshAutoChecklist();
   } catch(e) {
     console.error(e);
-    updateShotMonitor('err', '连接失败：' + e.message);
     refreshAutoChecklist();
   }
 }
@@ -1439,56 +1387,44 @@ async function checkHealth() {
 // 旧版用 setInterval 盲发，浏览器会取消未完成的请求 → adb 截图白做 → 永远看不到新画面
 let liveTimer = null;
 let liveBusy = false;        // 当前是否正在等截图响应（防止重入）
-let shotStats = { ok: 0, err: 0, lastMs: 0, avgMs: 0, cacheHits: 0, total: 0 };
+// 截图请求超时（毫秒）。后端 adb 截图 timeout=15s，对齐。
+// 防止后端进程崩溃 + TCP 半开时 onload/onerror 长时间不触发，
+// 导致 liveBusy 卡死、直播链静默断裂。
+const SHOT_TIMEOUT_MS = 15000;
 
-function updateShotMonitor(state, text) {
-  const el = $('shotMonitor');
-  el.className = 'shot-monitor' + (state ? ' ' + state : '');
-  el.innerHTML = '<span class="pip"></span>' + text;
-}
-
-function fmtShotStats() {
-  const s = shotStats;
-  if (s.total === 0 && s.err === 0) return '等待中…';
-  const avg = s.avgMs ? `均${s.avgMs.toFixed(0)}ms` : '';
-  const last = s.lastMs ? `近${s.lastMs.toFixed(0)}ms` : '';
-  const okerr = `<span style="color:var(--mint)">✓${s.ok}</span>/<span style="color:var(--danger)">✗${s.err}</span>`;
-  const cache = s.cacheHits ? `·cache×${s.cacheHits}` : '';
-  return `${last} ${avg} ${okerr} ${cache}`.trim();
-}
-
-// 核心：发起一次截图请求，统计耗时和成败，更新诊断面板
+// 核心：发起一次截图请求
 async function fetchShotOnce(manual = false) {
   if (liveBusy && !manual) return;  // 自动轮询重入保护；手动截图允许并发
   liveBusy = true;
-  if (manual) updateShotMonitor('wait', '截图中…（手动）');
-  // 自动轮询不显示"加载中"（跳动膈应）：wait 阶段不动监视器，由成功/失败回调静默刷新统计行
   const t0 = performance.now();
   // 手动截图带 ?manual=1 跳过后端缓存，确保拿最新画面
   // 每次带唯一 token 防止浏览器任何层级缓存
   const url = `${API}/api/screenshot?_=${Date.now()}_${tick}${manual ? '&manual=1' : ''}`;
   return new Promise(resolve => {
+    let settled = false;
     const img = new Image();
+    // 超时兜底：后端崩溃/半开连接时 onload/onerror 可能迟迟不触发，
+    // 超时后走 error 路径，释放 liveBusy，避免直播链静默断裂
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      liveBusy = false;
+      resolve(false);
+    }, SHOT_TIMEOUT_MS);
     img.onload = () => {
-      const ms = performance.now() - t0;
-      shotStats.ok++;
-      shotStats.total++;
-      // 优先用后端响应头里的真实 adb 耗时（不含网络传输），更准
-      // 因为 Image 不直接暴露响应头，这里用前端总耗时近似（含网络，对本地 127.0.0.1 误差小）
-      shotStats.lastMs = ms;
-      const w = Math.min(shotStats.total, 20);
-      shotStats.avgMs = shotStats.avgMs * (1 - 1/w) + ms / w;
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       // 把图刷到画面上
       const stageImg = document.getElementById('shot');
       if (stageImg) stageImg.src = img.src;
-      updateShotMonitor('ok', fmtShotStats());
       liveBusy = false;
       resolve(true);
     };
     img.onerror = () => {
-      shotStats.err++;
-      shotStats.lastMs = performance.now() - t0;
-      updateShotMonitor('err', `失败 ✗${shotStats.err} · 点「截图」重试`);
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       liveBusy = false;
       resolve(false);
     };
@@ -1510,7 +1446,6 @@ function startLive() {
     liveTimer = setTimeout(loop, gap);
   };
   liveTimer = setTimeout(loop, 100);  // 立即开始第一次
-  updateShotMonitor('', '已启动轮询');
 }
 function stopLive() {
   if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
@@ -1736,7 +1671,7 @@ function showApkReminder(hint) {
   } else {
     info.textContent = '⚠ 首次冷启动测试前请上传 APK（项目只记文件名提示，不复制安装包）';
   }
-  info.className = 'mt-1 text-[10px] font-mono text-warning leading-relaxed';
+  info.className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed';
 }
 
 function showApkUploaded(orig, sizeMb) {
@@ -1861,10 +1796,10 @@ function renderStats() {
   const hintEl = $('nextHint');
   if (nextIsFirst) {
     hintEl.className = 'next-hint first';
-    hintEl.innerHTML = '<span class="tag-first">首次</span> 下一条应是 <b style="color:var(--primary)">首次冷启动</b> · 请先卸载重装，再按 Space';
+    hintEl.innerHTML = '<span class="tag-first">首次</span> 下一条应是 <b>首次冷启动</b> · 请先卸载重装，再按 Space';
   } else {
     hintEl.className = 'next-hint second';
-    hintEl.innerHTML = '<span class="tag-second">二次</span> 下一条应是 <b style="color:var(--amber)">二次冷启动</b> · 杀进程后按 Space（不要卸载）';
+    hintEl.innerHTML = '<span class="tag-second">二次</span> 下一条应是 <b>二次冷启动</b> · 杀进程后按 Space（不要卸载）';
   }
 }
 function renderHistory() {
@@ -2118,7 +2053,6 @@ document.addEventListener('keydown', e => {
   else if (e.key.toLowerCase() === 'b') { e.preventDefault(); pressKey(4); }
   else if (e.key.toLowerCase() === 'h') { e.preventDefault(); pressKey(3); }
   else if (e.key.toLowerCase() === 'o') { e.preventDefault(); refreshOcr(); }
-  else if (e.key.toLowerCase() === 'f') { e.preventDefault(); zoomMode='fit'; layout.zoomMode='fit'; saveLayout(); relayoutStage(); }
 });
 
 // ── 菜单命令（Electron 桌面客户端：菜单栏点击 → IPC → 前端触发操作）──
@@ -2131,7 +2065,86 @@ if (isElectron && window.electronAPI.onMenuCommand) {
       case 'force-stop': forceStop(); break;
       case 'go-home': pressKey(3); break;
       case 'upload-apk': $('browseApkBtn').click(); break;
+      case 'scrcpy-mirror': $('scrcpyMirrorBtn').click(); break;
+      case 'scrcpy-record': $('scrcpyRecordBtn').click(); break;
     }
+  });
+}
+
+// ── scrcpy 镜像 / 录屏（仅 Electron，借鉴 XYLog Viewer）──
+// 镜像走独立 SDL 窗口（置顶），不抢 adb 命令锁，与截图轮询/模板比对并存。
+async function initScrcpy() {
+  if (!isElectron || !window.electronAPI.getScrcpyStatus) return;
+  const status = await window.electronAPI.getScrcpyStatus();
+  if (!status.available) return;  // scrcpy 二进制不存在，隐藏按钮
+  $('scrcpyMirrorBtn').classList.remove('hidden');
+  $('scrcpyRecordBtn').classList.remove('hidden');
+  updateScrcpyButtons(status);
+}
+function updateScrcpyButtons(status) {
+  const mb = $('scrcpyMirrorBtn');
+  const rb = $('scrcpyRecordBtn');
+  if (status.mirroring) {
+    mb.textContent = '⏹ 停止镜像';
+    mb.classList.add('text-danger', 'border-danger/20');
+    rb.disabled = false;
+  } else {
+    mb.textContent = '📱 镜像';
+    mb.classList.remove('text-danger', 'border-danger/20');
+    rb.disabled = true;
+  }
+  if (status.recording) {
+    rb.textContent = '⏹ 停止录屏';
+    rb.classList.add('text-danger', 'border-danger/20');
+  } else {
+    rb.textContent = '⏺ 录屏';
+    rb.classList.remove('text-danger', 'border-danger/20');
+  }
+}
+$('scrcpyMirrorBtn')?.addEventListener('click', async () => {
+  if (!deviceReady) { uiAlert('请先连接设备', '', 'warning'); return; }
+  const serial = $('deviceSel').value;
+  const model = $('deviceSel').selectedOptions[0]?.text || serial;
+  const status = await window.electronAPI.getScrcpyStatus();
+  if (status.mirroring) {
+    await window.electronAPI.stopMirror();
+  } else {
+    const r = await window.electronAPI.startMirror(serial, model);
+    if (!r.ok) uiAlert('镜像启动失败', r.error, 'error');
+  }
+});
+$('scrcpyRecordBtn')?.addEventListener('click', async () => {
+  const serial = $('deviceSel').value;
+  const status = await window.electronAPI.getScrcpyStatus();
+  if (status.recording) {
+    const r = await window.electronAPI.stopRecord();
+    if (r.ok && r.recordPath) {
+      // 提示用户录屏文件位置
+      uiAlert('录屏已保存', `文件：${r.recordPath}`, 'info');
+    }
+  } else {
+    const r = await window.electronAPI.startRecord(serial);
+    if (!r.ok) uiAlert('录屏启动失败', r.error, 'error');
+  }
+});
+// 主进程 scrcpy 状态变化 → 更新按钮
+if (isElectron && window.electronAPI.onScrcpyStatus) {
+  window.electronAPI.onScrcpyStatus((status) => updateScrcpyButtons(status));
+}
+
+// ── 后端状态感知（Electron：后端意外退出时展示 overlay，恢复后随页面重载消失）──
+if (isElectron && window.electronAPI.onBackendStatus) {
+  window.electronAPI.onBackendStatus((status) => {
+    let ov = document.getElementById('backendOfflineOverlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'backendOfflineOverlay';
+      // fixed 全屏遮罩 + 居中卡片；背景用 OC-2 令牌 var(--bg)，外层透明黑属允许例外
+      ov.style.cssText = 'display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;';
+      ov.innerHTML = '<div style="background:var(--bg,#1a1a2e);padding:32px 48px;border-radius:12px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);"><div style="font-size:18px;font-weight:600;margin-bottom:8px;">后端已断开</div><div style="font-size:14px;opacity:0.7;">Python 后端意外退出，正在等待恢复…</div></div>';
+      document.body.appendChild(ov);
+    }
+    ov.style.display = (status === 'offline') ? 'flex' : 'none';
   });
 }
 
@@ -3002,7 +3015,7 @@ async function setMarkerFromPoint(cx, cy) {
     const wrap = $('markerPreviewWrap');
     wrap.classList.remove('hidden');
     wrap.innerHTML = `<img src="data:${j.preview_mime || 'image/jpeg'};base64,${j.preview_base64}" style="width:100%;height:100%;object-fit:contain">`;
-    $('markerStatus').innerHTML = `✓ 模板已设 · <b class="text-tertiary">${j.width}×${j.height}</b> px · 中心 (${j.center_x.toFixed(3)}, ${j.center_y.toFixed(3)})`;
+    $('markerStatus').innerHTML = `✓ 模板已设 · <b class="text-on-surface">${j.width}×${j.height}</b> px · 中心 (${j.center_x.toFixed(3)}, ${j.center_y.toFixed(3)})`;
     $('setMarkerBtn').textContent = '📍 点画面选定启动元素';
     setState('ok', `启动元素模板已设定（${j.width}×${j.height}）`);
     markProjectDirty();
@@ -3157,6 +3170,8 @@ async function setSkipFromPoint(cx, cy) {
     ocr: null,
   };
   pollers.health = setInterval(checkHealth, 5000);
+  // 设备轮询降速到 15s（Electron 下 adb track-devices 提供即时热插拔感知，
+  // 轮询仅作兜底；浏览器模式下仍能工作，只是延迟从 5s 变 15s）
   pollers.devices = setInterval(async () => {
     const before = deviceReady ? $('deviceSel').value : null;
     const list = await refreshDevices();
@@ -3171,7 +3186,7 @@ async function setSkipFromPoint(cx, cy) {
         }
       }
     }
-  }, 5000);
+  }, 15000);
   pollers.ocr = setInterval(() => { if (deviceReady && $('liveToggle').checked) refreshOcr(); }, 3000);
 
   // 标签页隐藏时暂停所有轮询（避免后台空转烧 CPU）；切回前台时恢复
@@ -3202,7 +3217,7 @@ async function setSkipFromPoint(cx, cy) {
               }
             }
           }
-        }, 5000);
+        }, 15000);
         pollers.ocr = setInterval(() => { if (deviceReady && $('liveToggle').checked) refreshOcr(); }, 3000);
       }
       if (wasLiveOn && !liveTimer) startLive();
@@ -3210,12 +3225,32 @@ async function setSkipFromPoint(cx, cy) {
     }
   });
 
+  // Electron 设备热插拔即时通知（adb track-devices 检测到变化 → 立即刷新设备列表）
+  if (isElectron && window.electronAPI.onDevicesChanged) {
+    window.electronAPI.onDevicesChanged(async () => {
+      const before = deviceReady ? $('deviceSel').value : null;
+      const list = await refreshDevices();
+      const currentOk = list.find(d => d.serial === before && d.state === 'device');
+      if (!currentOk) {
+        const ready2 = list.filter(d => d.state === 'device');
+        if (ready2.length > 0 && (!deviceReady || !currentOk)) {
+          const newTarget = ready2[0].serial;
+          if (newTarget !== before) {
+            $('deviceSel').value = newTarget;
+            await selectDevice(newTarget);
+          }
+        }
+      }
+    });
+  }
+
   // 默认不自动开直播（方案1：调试里手动开，避免抢 adb）
   if ($('liveToggle').checked) startLive();
   else fetchShotOnce(true);
   relayoutStage();
   refreshSkipList();  // 同步后端跳过模板列表（重启后端后会是空的；有项目时 initProjects 会覆盖）
   syncMarkerReadyFromServer();  // 同步启动模板就绪状态
+  initScrcpy();  // Electron 桌面客户端：检测 scrcpy 可用性，显示镜像/录屏按钮
   await initProjects();  // 恢复上次项目（模板写入 Session + 历史按项目分桶）
   refreshAutoChecklist();
   // DOM 布局稳定后再校准一次画面尺寸（首次 fit 模式下 wrap 尺寸刚算出来）

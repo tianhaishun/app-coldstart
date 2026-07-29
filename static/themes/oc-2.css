@@ -53,17 +53,17 @@ html[data-theme="oc-2"][data-color-scheme="light"] {
   --on: var(--text-strong);
   --on-var: var(--text-base);
   --outline-var: var(--border-weak-base);
-  --primary: var(--palette-interactive);
-  --primary-c: var(--palette-interactive);
+  --primary: var(--palette-primary);
+  --primary-c: color-mix(in srgb, var(--palette-primary) 14%, var(--surface-raised-base));
   --primary-brand: var(--palette-primary);
-  --on-primary-c: var(--palette-ink);
+  --on-primary-c: var(--text-strong);
   --mint: var(--palette-success);
   --green: var(--icon-success-base, var(--palette-success));
   --amber: var(--palette-warning);
   --danger: var(--palette-error);
-  --primary-soft: color-mix(in srgb, var(--palette-interactive) 18%, transparent);
-  --glass: color-mix(in srgb, var(--surface-raised-base) 88%, transparent);
-  --radius: 4px;
+  --primary-soft: color-mix(in srgb, var(--palette-primary) 15%, transparent);
+  --glass: var(--surface-raised-base);
+  --radius: 3px;
 }
 
 html[data-theme="oc-2"][data-color-scheme="dark"] {
@@ -113,15 +113,15 @@ html[data-theme="oc-2"][data-color-scheme="dark"] {
   --on: var(--text-strong);
   --on-var: var(--text-base);
   --outline-var: var(--border-weak-base);
-  --primary: var(--palette-interactive);
-  --primary-c: var(--palette-interactive);
+  --primary: var(--palette-primary);
+  --primary-c: color-mix(in srgb, var(--palette-primary) 14%, var(--surface-raised-base));
   --primary-brand: var(--palette-primary);
-  --on-primary-c: var(--palette-ink);
+  --on-primary-c: var(--text-strong);
   --mint: var(--palette-success);
   --green: var(--icon-success-base, var(--palette-success));
   --amber: var(--palette-warning);
   --danger: var(--palette-error);
-  --primary-soft: color-mix(in srgb, var(--palette-interactive) 18%, transparent);
-  --glass: color-mix(in srgb, var(--surface-raised-base) 88%, transparent);
-  --radius: 4px;
+  --primary-soft: color-mix(in srgb, var(--palette-primary) 15%, transparent);
+  --glass: var(--surface-raised-base);
+  --radius: 3px;
 }

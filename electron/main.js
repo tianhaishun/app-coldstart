@@ -21,9 +21,11 @@
 'use strict';
 
 const { app, BrowserWindow, shell, Menu, dialog, ipcMain, nativeImage } = require('electron');
+const { execFileSync, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { PythonManager, HOST, PORT } = require('./python-manager');
+const { ScrcpyManager } = require('./scrcpy-manager');
 
 // ── 全局状态 ────────────────────────────────────────────────
 
@@ -34,6 +36,26 @@ let mainWindow = null;
 
 /** Python 后端管理器 */
 const pyManager = new PythonManager();
+
+/** scrcpy 镜像/录屏管理器 */
+const scrcpyManager = new ScrcpyManager((eventName, payload) => {
+  mainWindow?.webContents.send(eventName, payload);
+});
+
+// ── 全局异常兜底（借鉴 XYLog Viewer logMainFault）──
+// 未捕获的异常不能让 Electron 静默崩溃——写入 userData/main-error.log，
+// 用户报 bug 时有日志可查。放在 app.whenReady() 之前以捕获最早期错误。
+process.on('uncaughtException', (err) => logMainFault('uncaughtException', err));
+process.on('unhandledRejection', (reason) => logMainFault('unhandledRejection', reason));
+
+function logMainFault(kind, err) {
+  const msg = `[${new Date().toISOString()}] ${kind}: ${err?.stack || err?.message || err}\n`;
+  try { process.stderr.write(msg); } catch {}
+  try {
+    const logDir = app.getPath('userData');
+    fs.appendFileSync(path.join(logDir, 'main-error.log'), msg);
+  } catch {}
+}
 
 /** 启动日志（错误窗口展示用） */
 const startupLogs = [];
@@ -195,12 +217,12 @@ function buildAppMenu() {
         { type: 'separator' },
         {
           label: '卸载重装 APK',
-          accelerator: 'CmdOrCtrl+Q',
+          accelerator: 'CmdOrCtrl+Shift+U',
           click: () => sendMenuCommand('reinstall'),
         },
         {
           label: '杀进程',
-          accelerator: 'CmdOrCtrl+W',
+          accelerator: 'CmdOrCtrl+Shift+K',
           click: () => sendMenuCommand('force-stop'),
         },
         {
@@ -212,6 +234,15 @@ function buildAppMenu() {
         {
           label: '上传 APK…',
           click: () => sendMenuCommand('upload-apk'),
+        },
+        { type: 'separator' },
+        {
+          label: '📱 实时镜像 (scrcpy)',
+          click: () => sendMenuCommand('scrcpy-mirror'),
+        },
+        {
+          label: '⏺ 录屏',
+          click: () => sendMenuCommand('scrcpy-record'),
         },
       ],
     },
@@ -294,7 +325,7 @@ function showAboutDialog() {
       'Python FastAPI + RapidOCR + OpenCV',
       'Electron 桌面客户端',
       '',
-      '作者: EDY',
+      '作者: 田海顺',
     ].join('\n'),
     buttons: ['确定'],
     icon: appIcon,
@@ -316,6 +347,13 @@ function createErrorWindow(title, detail) {
     resizable: true,
     title: title,
     show: true,
+    // 安全配置与主窗口对齐：错误窗口只加载 data URL，
+    // 但仍显式禁用 Node 集成 + 开启沙箱，避免配置漂移被未来误改
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
   });
 
   // 转义 HTML 特殊字符，防止日志中的 < > & 导致渲染异常
@@ -378,6 +416,96 @@ function createErrorWindow(title, detail) {
   });
 }
 
+// ── 设备热插拔监听（adb track-devices，借鉴 XYLog Viewer）──
+// track-devices 是流式命令：先输出当前设备列表，之后设备插拔时实时输出变化。
+// 我们只把它当"有变化"的触发器——不做复杂解析，检测到变化就 IPC 通知前端刷新。
+// 前端收到通知后调 /api/devices 拉取最新列表（复用现有逻辑）。
+let deviceTrackerProc = null;
+
+function startDeviceTracker() {
+  const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
+  if (!fs.existsSync(adbPath)) return;
+
+  let initialized = false;
+  let buffer = '';
+
+  try {
+    deviceTrackerProc = spawn(adbPath, ['track-devices'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } catch {
+    return;  // 启动失败不影响主流程，前端轮询兜底
+  }
+
+  deviceTrackerProc.stdout?.on('data', (chunk) => {
+    buffer += chunk.toString('utf8');
+    // track-devices 输出以空行分隔快照
+    const snapshots = buffer.split('\n\n');
+    buffer = snapshots.pop();  // 最后一段可能不完整，留在 buffer
+    for (const _snap of snapshots) {
+      if (!initialized) {
+        initialized = true;  // 首次输出是初始列表，不需要通知
+        continue;
+      }
+      // 后续输出 = 设备变化（插入/拔出/状态改变）
+      mainWindow?.webContents.send('devices:changed');
+    }
+  });
+
+  deviceTrackerProc.on('exit', () => {
+    deviceTrackerProc = null;
+    // adb server 被 kill-server 关闭时 track-devices 会退出，不自动重启
+    // 前端的轮询兜底会继续工作
+  });
+
+  deviceTrackerProc.on('error', () => {
+    deviceTrackerProc = null;
+  });
+}
+
+function disposeDeviceTracker() {
+  if (deviceTrackerProc) {
+    try { deviceTrackerProc.kill(); } catch {}
+    deviceTrackerProc = null;
+  }
+}
+
+/**
+ * 后端意外退出处理：弹窗让用户选择重启后端或退出应用。
+ * @param {string} reason - 退出原因（code=... / signal=...）
+ */
+async function handleBackendCrash(reason) {
+  if (!mainWindow) {
+    app.quit();
+    return;
+  }
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'error',
+    title: '后端已断开',
+    message: 'Python 后端已意外退出，应用功能将不可用。',
+    detail: `退出原因：${reason}\n\n是否重启后端？`,
+    buttons: ['重启后端', '退出应用'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    icon: appIcon,
+  });
+  if (result.response === 0) {
+    log('info', '用户选择重启后端...');
+    const started = await pyManager.start(log);
+    if (started) {
+      log('info', '后端重启成功，重载前端。');
+      mainWindow?.webContents.reload();
+    } else {
+      log('error', '后端重启失败，退出应用。');
+      app.quit();
+    }
+  } else {
+    app.quit();
+  }
+}
+
 // ── 应用生命周期 ────────────────────────────────────────────
 
 // 单实例锁定：防止多开（第二次打开时聚焦已有窗口）
@@ -413,20 +541,34 @@ if (!gotLock) {
     }
 
     log('info', '后端就绪，创建应用窗口。');
+
+    // 后端意外退出时：先通知前端展示 overlay，再弹窗恢复（见 handleBackendCrash）
+    pyManager.onUnexpectedExit = (reason) => {
+      mainWindow?.webContents.send('backend-status', 'offline');
+      handleBackendCrash(reason);
+    };
+
     buildAppMenu();
     createMainWindow();
+
+    // 后端就绪后启动设备热插拔监听（adb track-devices 流式命令）
+    startDeviceTracker();
   });
 
   // 所有窗口关闭时退出（macOS 除外，但本工具不适合常驻菜单栏）
   app.on('window-all-closed', () => {
-    log('info', '所有窗口已关闭，正在关闭后端并退出...');
-    pyManager.stop();
     app.quit();
   });
 
-  // 应用即将退出时确保 Python 进程被清理
+  // 应用即将退出时清理 Python 后端（统一在此清理，避免与 window-all-closed 重复调用）
   app.on('before-quit', () => {
+    disposeDeviceTracker();
+    scrcpyManager.dispose();
     pyManager.stop();
+    // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
+    // 借鉴 XYLog Viewer AdbManager._killServerSync，防止 adb.exe 残留导致升级文件锁）
+    const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
+    try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
   });
 }
 
@@ -440,10 +582,30 @@ if (!gotLock) {
  */
 ipcMain.handle('dialog:openFile', async (event, options) => {
   if (!mainWindow) return { canceled: true };
+
+  // 安全校验：options 来自渲染进程（contextIsolation 已隔离 Node，
+  // 但若前端被 XSS 仍可构造请求）。在此做白名单收敛：
+  //   - title 强制 String + 截断，防超长/异常类型
+  //   - filters 校验结构（数组 + 每项 {name, extensions[]}），extensions
+  //     元素仅允许字母/数字/星号，否则回退默认
+  //   - defaultPath 不透传：消除路径探测面（前端当前未使用，
+  //     系统会自动记住上次打开目录）
+  const safeTitle = typeof options?.title === 'string'
+    ? options.title.slice(0, 100)
+    : '选择文件';
+  let safeFilters = [{ name: '所有文件', extensions: ['*'] }];
+  if (Array.isArray(options?.filters)) {
+    const valid = options.filters.filter(f =>
+      f && typeof f.name === 'string' &&
+      Array.isArray(f.extensions) &&
+      f.extensions.every(e => typeof e === 'string' && /^[a-z0-9*]+$/i.test(e))
+    );
+    if (valid.length > 0) safeFilters = valid;
+  }
+
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: options.title || '选择文件',
-    defaultPath: options.defaultPath,
-    filters: options.filters || [{ name: '所有文件', extensions: ['*'] }],
+    title: safeTitle,
+    filters: safeFilters,
     properties: ['openFile'],
   });
   if (result.canceled || result.filePaths.length === 0) {
@@ -472,4 +634,26 @@ ipcMain.handle('dialog:showMessage', async (event, options) => {
     noLink: true,
   });
   return { response: result.response, checkboxChecked: result.checkboxChecked };
+});
+
+// ── scrcpy 镜像 / 录屏 IPC ──────────────────────────────────
+
+ipcMain.handle('scrcpy:mirror:start', async (event, { serial, model }) => {
+  return scrcpyManager.startMirror(serial, model);
+});
+
+ipcMain.handle('scrcpy:mirror:stop', async () => {
+  return scrcpyManager.stopMirror();
+});
+
+ipcMain.handle('scrcpy:record:start', async (event, { serial }) => {
+  return scrcpyManager.startRecord(serial);
+});
+
+ipcMain.handle('scrcpy:record:stop', async () => {
+  return scrcpyManager.stopRecord();
+});
+
+ipcMain.handle('scrcpy:getStatus', async () => {
+  return scrcpyManager.getStatus();
 });

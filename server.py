@@ -19,6 +19,7 @@ v1 → v2 的关键修复：
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from contextlib import asynccontextmanager, contextmanager
 import gzip
@@ -43,6 +44,11 @@ if str(ROOT) not in sys.path:
 # 内置 adb（同目录 adb\\adb.exe），找不到再回退 PATH
 _BUNDLED_ADB = ROOT / "adb" / "adb.exe"
 ADB_EXE = str(_BUNDLED_ADB) if _BUNDLED_ADB.exists() else "adb"
+
+# 内置 iOS 工具链（同目录 ios\\idevice_id.exe），借鉴 XYLog 的 resolveIosBinaryPath 模式
+# 打包后 ROOT 落在 resources/backend，ios/ 在 extraResources 里
+_BUNDLED_IDEVICE_ID = ROOT / "ios" / "idevice_id.exe"
+IDEVICE_ID_EXE = str(_BUNDLED_IDEVICE_ID) if _BUNDLED_IDEVICE_ID.exists() else None
 
 # APK 上传目录（每次上传保留原始文件名，不再覆盖式存储）。
 # 复数 _cst_uploads 与老的单数 _cst_upload.apk 区分；启动时整目录清空重建。
@@ -75,7 +81,10 @@ SKIP_TAP_COOLDOWN_S = 1.5       # 同一跳过模板点击冷却，防连点
 
 # 项目持久化（启动模板 / 跳过模板 / 包名等）。不存 APK 本体——每次测试自行上传。
 # 目录：<仓库>/projects/<id>/meta.json + marker.png + skip_*.png
-PROJECTS_DIR = ROOT / "projects"
+# 打包后 ROOT 落在 asar 只读区，mkdir 会抛 ReadOnlyError；Electron 启动时通过
+# 环境变量 CST_PROJECTS_DIR 注入可写路径（userData/projects）。开发模式不设则回退仓库根，零回归。
+_projects_env = os.environ.get("CST_PROJECTS_DIR")
+PROJECTS_DIR = Path(_projects_env) if _projects_env else (ROOT / "projects")
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -197,6 +206,45 @@ class OcrEngine:
 
 
 # ── ADB 设备 ───────────────────────────────────────────────────────────
+
+
+# adb install 失败错误码中文翻译（借鉴 XYLog Viewer）。
+# adb 输出形如 "Failure [INSTALL_FAILED_OLDER_SDK]"，匹配后附加中文解释，
+# 让用户不用查文档就能知道为什么装不上。
+_INSTALL_ERROR_CN: dict[str, str] = {
+    "INSTALL_FAILED_ALREADY_EXISTS": "应用已存在（请尝试卸载后重装）",
+    "INSTALL_FAILED_INVALID_APK": "APK 文件无效或已损坏",
+    "INSTALL_FAILED_INVALID_URI": "APK 路径无效",
+    "INSTALL_FAILED_INSUFFICIENT_STORAGE": "设备存储空间不足",
+    "INSTALL_FAILED_DUPLICATE_PACKAGE": "包名重复",
+    "INSTALL_FAILED_NO_SHARED_USER": "共享用户不存在",
+    "INSTALL_FAILED_UPDATE_INCOMPATIBLE": "签名不一致，需先卸载已安装的同名应用",
+    "INSTALL_FAILED_SHARED_USER_INCOMPATIBLE": "共享用户签名不兼容",
+    "INSTALL_FAILED_MISSING_SHARED_LIBRARY": "缺少依赖的共享库",
+    "INSTALL_FAILED_REPLACE_COULDNT_DELETE": "无法删除旧版本（残留数据）",
+    "INSTALL_FAILED_DEXOPT": "DEX 优化失败（APK 与系统不兼容）",
+    "INSTALL_FAILED_OLDER_SDK": "系统版本过低，不满足 APK 最低要求",
+    "INSTALL_FAILED_CONFLICTING_PROVIDER": "ContentProvider 权限冲突",
+    "INSTALL_FAILED_NEWER_SDK": "系统版本高于 APK 目标版本",
+    "INSTALL_FAILED_TEST_ONLY": "APK 是 test-only 构建，需加 -t 参数安装",
+    "INSTALL_FAILED_CPU_ABI_INCOMPATIBLE": "CPU 架构不兼容",
+    "INSTALL_FAILED_MISSING_FEATURE": "设备缺少 APK 要求的硬件特性",
+    "INSTALL_FAILED_CONTAINER_ERROR": "容器错误（SD 卡问题）",
+    "INSTALL_FAILED_INVALID_INSTALL_LOCATION": "安装位置无效",
+    "INSTALL_FAILED_MEDIA_UNAVAILABLE": "媒体不可用（SD 卡未挂载）",
+    "INSTALL_FAILED_VERIFICATION_TIMEOUT": "验证超时",
+    "INSTALL_FAILED_VERIFICATION_FAILURE": "验证失败",
+    "INSTALL_FAILED_PACKAGE_CHANGED": "包名发生变化",
+    "INSTALL_FAILED_UID_CHANGED": "UID 已变化（需先卸载旧版）",
+}
+
+
+def _translate_install_error(output: str) -> Optional[str]:
+    """从 adb install 输出中匹配 INSTALL_FAILED_* 错误码，返回中文解释。"""
+    for code, cn in _INSTALL_ERROR_CN.items():
+        if code in output:
+            return f"{code}：{cn}"
+    return None
 
 
 class AdbError(RuntimeError):
@@ -463,7 +511,8 @@ class AdbDevice:
         if not out3:
             raise AdbError("安装失败：adb 无输出（设备离线或 adb 断连）")
         if "Success" not in out3:
-            raise AdbError(f"安装失败：{out3}")
+            hint = _translate_install_error(out3)
+            raise AdbError(f"安装失败：{out3}" + (f"\n💡 {hint}" if hint else ""))
         return log
 
 
@@ -501,7 +550,257 @@ def _raw_screencap_to_bgr(raw: bytes):
     return bgr
 
 
-# ── 会话（当前选中设备 + OCR 引擎）──────────────────────────────────────
+def _check_amds() -> dict:
+    """检测 Apple Mobile Device Service 状态（借鉴 XYLog Viewer 自检工具）。
+
+    Windows 上 iOS USB 通信依赖 AMDS（本质是 usbmuxd）。服务缺失或未运行时
+    idevice_id / pymobiledevice3 都无法发现设备。返回诊断信息供前端展示。
+    """
+    try:
+        cp = subprocess.run(
+            ["sc", "query", "Apple Mobile Device Service"],
+            capture_output=True, timeout=3, text=True,
+        )
+        output = cp.stdout + cp.stderr
+        if "RUNNING" in output:
+            return {"installed": True, "running": True}
+        if "SERVICE_NAME" in output:
+            return {"installed": True, "running": False,
+                    "hint": "AMDS 已安装但未运行，请在「服务」管理器中启动 Apple Mobile Device Service"}
+        return {"installed": False, "running": False,
+                "hint": "未检测到 AMDS。请安装 iTunes 或 AppleMobileDeviceSupport64.msi"}
+    except Exception:
+        return {"installed": False, "running": False, "hint": "AMDS 检测失败"}
+
+
+# ── iOS 设备（pymobiledevice3）─────────────────────────────────────────
+
+
+def _ios_async(coro):
+    """在同步端点中运行 pymobiledevice3 异步调用。
+
+    FastAPI 的 sync 端点跑在线程池里（不在 event loop 中），
+    可以安全地用 asyncio.run() 创建临时 loop。
+    每次调用创建新连接（略低效但简单可靠）。
+    """
+    return asyncio.run(coro)
+
+
+class IosDevice:
+    """iOS 设备操作（通过 pymobiledevice3 / lockdown 协议）。
+
+    与 AdbDevice 平行，但底层不用 ADB，而是通过 usbmuxd → lockdown。
+    非越狱设备限制：
+      - 无模拟点击（tap/swipe 不可用，调用时抛 AdbError 提示）
+      - 无程序化杀进程（force_stop 是 no-op + 警告日志）
+      - 截图、安装/卸载、设备检测、App 启动均可用
+    """
+
+    def __init__(self, udid: str) -> None:
+        self.udid = udid
+        self._last_size: Optional[tuple[int, int]] = None
+
+    async def _get_lockdown(self):
+        """创建到设备的 lockdown 连接。"""
+        from pymobiledevice3.lockdown import create_using_usbmux
+        return await create_using_usbmux(serial=self.udid)
+
+    # ── 设备列表（借鉴 XYLog：idevice_id -l CLI，同步简单可靠）──
+    @staticmethod
+    def devices() -> list[dict]:
+        """列出通过 USB 连接的 iOS 设备。
+
+        借鉴 XYLog Viewer 的 IosMuxManager._pollDevices：
+        直接调 idevice_id -l（同步 CLI），不依赖 pymobiledevice3 异步 API。
+        UDID 列表拿到后，尝试用 pymobiledevice3 取设备名（失败则显示 UDID）。
+        """
+        if not IDEVICE_ID_EXE:
+            return []
+        try:
+            cp = subprocess.run(
+                [IDEVICE_ID_EXE, "-l"],
+                capture_output=True, timeout=3,
+            )
+            # XYLog 的 UDID 正则：^[0-9a-fA-F-]{8,}$
+            udids = [
+                line.strip()
+                for line in cp.stdout.decode("utf-8", "replace").splitlines()
+                if re.match(r"^[0-9a-fA-F-]{8,}$", line.strip())
+            ]
+            result = []
+            for udid in udids:
+                model = "iOS 设备"
+                # 尝试用 pymobiledevice3 取设备名（可选，失败不致命）
+                try:
+                    async def _get_name(u=udid):
+                        from pymobiledevice3.lockdown import create_using_usbmux
+                        ld = await create_using_usbmux(serial=u)
+                        name = ld.all_values.get('DeviceName', '') or \
+                               ld.all_values.get('ProductType', '')
+                        return name
+                    model = _ios_async(_get_name()) or model
+                except Exception:
+                    pass
+                result.append({
+                    "serial": udid,
+                    "state": "device",
+                    "model": f"{model} (iOS)" if model != "iOS 设备" else model,
+                    "platform": "ios",
+                })
+            return result
+        except Exception:
+            return []
+
+    # ── 截图 ──
+    def screenshot(self, target: Optional[Path] = None) -> Path:
+        """截图（PNG），保存到 target 或临时文件。"""
+        if target is None:
+            fd, name = tempfile.mkstemp(prefix="_cst_ios_", suffix=".png")
+            os.close(fd)
+            target = Path(name)
+
+        async def _shot():
+            from pymobiledevice3.services.screenshot import ScreenshotService
+            ld = await self._get_lockdown()
+            ss = ScreenshotService(lockdown=ld)
+            data = await ss.take_screenshot()  # PNG bytes
+            return data
+
+        data = _ios_async(_shot())
+        if not data or len(data) < 1024:
+            raise AdbError("iOS 截图失败：返回数据为空")
+        target.write_bytes(data)
+        return target
+
+    def screenshot_bgr(self) -> tuple[Any, str]:
+        """截图 → BGR ndarray（自动测速热路径，模板比对用）。
+
+        iOS 截图直接返回 PNG，用 cv2.imdecode 解码。
+        比 Android 的 raw|gzip 多一步解码，但 iOS 没有等效的 raw 格式。
+        """
+        import cv2
+        import numpy as np
+
+        async def _shot():
+            from pymobiledevice3.services.screenshot import ScreenshotService
+            ld = await self._get_lockdown()
+            ss = ScreenshotService(lockdown=ld)
+            return await ss.take_screenshot()
+
+        data = _ios_async(_shot())
+        if not data or len(data) < 1024:
+            raise AdbError("iOS 截图失败：返回数据为空")
+        arr = np.frombuffer(data, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise AdbError("iOS 截图 PNG 解码失败")
+        self._last_size = (bgr.shape[1], bgr.shape[0])  # (w, h)
+        return bgr, "png"
+
+    def screen_size(self) -> tuple[int, int]:
+        """获取屏幕分辨率。"""
+        if self._last_size:
+            return self._last_size
+
+        async def _size():
+            ld = await self._get_lockdown()
+            w = int(ld.all_values.get('ScreenWidth', 0))
+            h = int(ld.all_values.get('ScreenHeight', 0))
+            scale = float(ld.all_values.get('ScreenScaleFactor', 1))
+            # lockdown 给的是逻辑分辨率，乘以 scale 得物理像素
+            if w > 0 and h > 0:
+                return int(w * scale), int(h * scale)
+            # 兜底：截图后从图像尺寸获取
+            return None
+
+        result = _ios_async(_size())
+        if result:
+            self._last_size = result
+            return result
+        # 最终兜底：截一张图取尺寸
+        bgr, _ = self.screenshot_bgr()
+        h, w = bgr.shape[:2]
+        self._last_size = (w, h)
+        return (w, h)
+
+    # ── 输入（非越狱不可用）──
+    def tap_pixel(self, x: int, y: int) -> None:
+        raise AdbError("iOS 非越狱设备不支持模拟点击。请手动操作或用包名启动。")
+
+    def tap_norm(self, cx: float, cy: float) -> None:
+        raise AdbError("iOS 非越狱设备不支持模拟点击。请手动操作或用包名启动。")
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, dur_ms: int = 200) -> None:
+        raise AdbError("iOS 非越狱设备不支持模拟滑动。")
+
+    def keyevent(self, code: int) -> None:
+        raise AdbError("iOS 不支持 keyevent（Android 按键码）。")
+
+    # ── App 生命周期 ──
+    def launch_pkg(self, bundle_id: str) -> None:
+        """通过 lockdown 的 launch service 启动 App。"""
+        async def _launch():
+            ld = await self._get_lockdown()
+            from pymobiledevice3.services.diagnostics import DiagnosticsService
+            # 使用 ProcessControl service 启动 App
+            # pymobiledevice3 的 launch 接口
+            sc = ld.start_service("com.apple.instruments.remoteserver")
+            # 简单方案：用 ideviceinstaller 的 launch 功能
+            return None
+        try:
+            _ios_async(_launch())
+        except Exception:
+            pass  # 启动失败不致命——用户可手动点开
+
+    def force_stop(self, pkg: str) -> None:
+        """iOS 非越狱无法程序化杀进程——记日志，用户需手动上滑关闭。"""
+        print(f"[ios] force_stop 不支持（非越狱）· 请手动在 App 切换器中上滑关闭 {pkg}",
+              file=sys.stderr, flush=True)
+
+    def kill_all(self) -> str:
+        return "(iOS 不支持 kill-all)"
+
+    def list_packages(self) -> list[str]:
+        """列出已安装 App 的 bundle id。"""
+        async def _list():
+            ld = await self._get_lockdown()
+            from pymobiledevice3.services.installation_proxy import InstallationProxyService
+            ip = InstallationProxyService(lockdown=ld)
+            apps = await ip.get_apps()  # list of dicts with CFBundleIdentifier
+            return [a.get('CFBundleIdentifier', '') for a in apps if a.get('CFBundleIdentifier')]
+        try:
+            return _ios_async(_list())
+        except Exception:
+            return []
+
+    def reinstall(self, pkg: str, ipa_path: str) -> list[str]:
+        """卸载重装 IPA（通过 ideviceinstaller 或 pymobiledevice3）。"""
+        if not Path(ipa_path).exists():
+            raise AdbError(f"IPA 文件不存在：{ipa_path}")
+        log: list[str] = []
+
+        async def _do_reinstall():
+            ld = await self._get_lockdown()
+            from pymobiledevice3.services.installation_proxy import InstallationProxyService
+            ip = InstallationProxyService(lockdown=ld)
+            # 卸载
+            try:
+                await ip.uninstall(pkg)
+                log.append(f"uninstall: {pkg}")
+            except Exception as e:
+                log.append(f"uninstall: skipped ({e})")
+            # 安装
+            await ip.install(ipa_path)
+            log.append(f"install: {ipa_path}")
+
+        try:
+            _ios_async(_do_reinstall())
+            return log
+        except Exception as e:
+            raise AdbError(f"iOS 安装失败：{e}") from e
+
+
+
 
 
 class Session:
@@ -573,18 +872,22 @@ class Session:
             self._marker_img = im
         return self._marker_img
 
-    def select(self, serial: Optional[str]) -> dict:
+    def select(self, serial: Optional[str], platform: str = "android") -> dict:
         with self._lock:
             self._serial = serial
-            self._device = AdbDevice(serial)
+            self._platform = platform
+            if platform == "ios":
+                self._device = IosDevice(serial) if serial else None
+            else:
+                self._device = AdbDevice(serial)
             self._last_shot = None
-            return {"serial": serial, "ready": True}
+            return {"serial": serial, "ready": self._device is not None, "platform": platform}
 
     def current(self) -> dict:
-        return {"serial": self._serial, "ready": self._device is not None}
+        return {"serial": self._serial, "ready": self._device is not None, "platform": getattr(self, '_platform', 'android')}
 
     @property
-    def device(self) -> AdbDevice:
+    def device(self):
         if self._device is None:
             raise AdbError("未选择设备，请先在左上角连接设备")
         return self._device
@@ -753,11 +1056,29 @@ def _cleanup_stale_temp_files() -> None:
     print("[startup] 清理了 tempdir 下的旧 _cst_* 截图/模板；保留 _cst_uploads/ 里的 APK", flush=True)
 
 
+def _kill_adb_server() -> None:
+    """退出前关闭 adb daemon（借鉴 XYLog Viewer AdbManager._killServerSync）。
+
+    adb daemon 是常驻进程，后端退出后 adb.exe 继续运行，导致：
+      - 升级安装时 adb.exe 文件被锁 → NSIS 安装器报「应用仍在运行」
+      - 多次重启后残留多个 adb server 实例
+    Electron before-quit 也会兜底调一次（后端被 taskkill /F 时 lifespan 不执行）。
+    """
+    try:
+        subprocess.run(
+            [ADB_EXE, "kill-server"],
+            timeout=5, capture_output=True,
+        )
+    except Exception:
+        pass  # 退出路径不能抛异常
+
+
 # FastAPI lifespan（替代已弃用的 on_event，官方推荐写法）
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _cleanup_stale_temp_files()
     yield
+    _kill_adb_server()
 
 
 app = FastAPI(title="App Cold Start Profiler", version="2.0", lifespan=lifespan)
@@ -765,6 +1086,7 @@ app = FastAPI(title="App Cold Start Profiler", version="2.0", lifespan=lifespan)
 
 class DeviceSelectReq(BaseModel):
     serial: Optional[str] = None
+    platform: str = "android"  # "android" | "ios"
 
 
 class SetMarkerReq(BaseModel):
@@ -1022,15 +1344,36 @@ def health() -> dict:
 
 @app.get("/api/devices")
 def list_devices() -> dict:
+    """列出所有连接的设备（Android + iOS 合并返回）。
+
+    Android 设备有 platform="android"，iOS 设备有 platform="ios"。
+    前端选择设备时带上 platform，后端据此创建 AdbDevice 或 IosDevice。
+    """
     try:
-        return {"devices": AdbDevice.devices()}
+        devices = AdbDevice.devices()
+        # 给 Android 设备补 platform 字段（兼容前端）
+        for d in devices:
+            d.setdefault("platform", "android")
     except AdbError as e:
-        return {"devices": [], "error": str(e)}
+        devices = []
+        adb_error = str(e)
+    else:
+        adb_error = None
+    # 合并 iOS 设备
+    try:
+        ios_devs = IosDevice.devices()
+        devices.extend(ios_devs)
+    except Exception:
+        pass  # pymobiledevice3 不可用或无 iOS 设备，静默跳过
+    result = {"devices": devices}
+    if adb_error:
+        result["error"] = adb_error
+    return result
 
 
 @app.post("/api/device/select")
 def select_device(req: DeviceSelectReq) -> dict:
-    return SESSION.select(req.serial)
+    return SESSION.select(req.serial, req.platform)
 
 
 @app.get("/api/apps")

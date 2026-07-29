@@ -39,17 +39,21 @@ def block(scheme: str, variant: dict) -> str:
         "  --on: var(--text-strong);",
         "  --on-var: var(--text-base);",
         "  --outline-var: var(--border-weak-base);",
-        "  --primary: var(--palette-interactive);",
-        "  --primary-c: var(--palette-interactive);",
+        # 主色用 palette-primary（暖桃 #fab283 暗色 / #dcde8d 亮色），
+        # 不再用 palette-interactive（蓝 #034cff）——蓝色在 OpenCode 里只给真正的
+        # 交互链接用，不是万能强调色。暖桃才是 OC-2 的品牌视觉身份。
+        "  --primary: var(--palette-primary);",
+        "  --primary-c: color-mix(in srgb, var(--palette-primary) 14%, var(--surface-raised-base));",
         "  --primary-brand: var(--palette-primary);",
-        "  --on-primary-c: var(--palette-ink);",
+        "  --on-primary-c: var(--text-strong);",
         "  --mint: var(--palette-success);",
         "  --green: var(--icon-success-base, var(--palette-success));",
         "  --amber: var(--palette-warning);",
         "  --danger: var(--palette-error);",
-        "  --primary-soft: color-mix(in srgb, var(--palette-interactive) 18%, transparent);",
-        "  --glass: color-mix(in srgb, var(--surface-raised-base) 88%, transparent);",
-        "  --radius: 4px;",
+        "  --primary-soft: color-mix(in srgb, var(--palette-primary) 15%, transparent);",
+        # 纯平面底色——OpenCode 不用毛玻璃（backdrop-filter），面板就是实色 + 极淡边框
+        "  --glass: var(--surface-raised-base);",
+        "  --radius: 3px;",
         "}",
     ]
     return "\n".join(lines)

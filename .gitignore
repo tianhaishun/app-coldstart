@@ -30,3 +30,12 @@ release/
 
 # Electron 运行时缓存
 dist-electron/
+
+# pytest 缓存
+.pytest_cache/
+
+# scrcpy 二进制（32MB，从官方 release 下载放入，不入版本库）
+scrcpy/
+
+# iOS 工具链（libimobiledevice，19MB，从 XYLog / libimobiledevice-win32 复制，不入版本库）
+ios/

@@ -60,8 +60,9 @@
 - 自动测速热路径截图优先 `exec-out sh -c 'screencap | gzip -1 -c'`（raw+gzip，免设备 PNG 编码；Pixel 6a 实测快于 `-p`），失败回退 `screencap -p`；落盘/模板仍可用 PNG
 - 所有 adb 调用集中在 `AdbDevice` 类，便于加锁 + 复用
 - Session 的 `_lock` 串行化所有设备 I/O（adb server 不擅长并发）
-- **所有会触发 adb 的端点必须用 `with SESSION.device_op() as dev:` 包住**（审核修复），
-  不能裸访问 `SESSION.device`。device_op 是统一加锁入口。
+- **所有会触发 adb 的端点必须在持锁状态下访问设备**（审核修复）。
+  统一入口是 ``with SESSION.device_op() as dev:``；等效写法是 ``with SESSION._lock:`` + ``SESSION.device.xxx()``
+  （两者持同一把 RLock，功能完全等价）。不能在**不持锁**的情况下裸访问 ``SESSION.device``。
 - `run(check=False)` 会吞掉非零退出码，只用于"失败可接受"场景（force_stop 杀不存在的进程）。
   关键操作（uninstall/install）必须验证输出含 Success/Failure，空输出（device offline）要抛错。
 

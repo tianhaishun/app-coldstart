@@ -12,8 +12,8 @@
  *   Windows: .venv\Scripts\python.exe
  *   macOS:   .venv/bin/python
  *
- * server.py 零改动：它通过 ROOT / __file__ 自动定位 adb/ 和 static/，
- * 我们只需把 cwd 设为项目根目录、--app-dir 指向项目根即可。
+ * server.py 零改动：它通过 ROOT / __file__ 自动定位 adb/ 和 static/。
+ * cwd 与 --app-dir 指向 backendRoot（开发=项目根，打包=resources/backend）。
  */
 
 'use strict';
@@ -23,6 +23,8 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+// app.getPath('userData') 用于注入后端可写持久化目录（打包后 asar 只读）
+const { app } = require('electron');
 
 // 项目根目录（electron/ 的上一级）
 const ROOT = path.resolve(__dirname, '..');
@@ -46,13 +48,29 @@ class PythonManager {
     this.process = null;
     this.isWin = process.platform === 'win32';
     this.isMac = process.platform === 'darwin';
+    /** 主动停止标记：stop() 设 true，exit 事件据此区分意外退出 */
+    this._stopping = false;
+    /** 意外退出回调（主进程注册，用于弹窗恢复或退出） */
+    this.onUnexpectedExit = null;
   }
 
   // ── 路径计算 ──────────────────────────────────────────────
 
+  /**
+   * 后端根目录。
+   * 开发模式：项目根（electron/ 上一级），server.py/adb/static 都在源码树。
+   * 打包模式：resources/backend（extraResources 解包目标），asar 外可读可写。
+   * server.py 内部 ROOT = __file__ 所在目录，与此一致，无需改动。
+   */
+  get backendRoot() {
+    return app.isPackaged
+      ? path.join(process.resourcesPath, 'backend')
+      : ROOT;
+  }
+
   /** .venv 目录绝对路径 */
   get venvDir() {
-    return path.join(ROOT, '.venv');
+    return path.join(this.backendRoot, '.venv');
   }
 
   /** .venv 内的 python 可执行文件路径 */
@@ -74,7 +92,7 @@ class PythonManager {
 
   /** requirements.txt 路径 */
   get requirementsPath() {
-    return path.join(ROOT, 'requirements.txt');
+    return path.join(this.backendRoot, 'requirements.txt');
   }
 
   // ── 环境检测 ──────────────────────────────────────────────
@@ -178,6 +196,8 @@ class PythonManager {
    * @returns {Promise<boolean>} 后端就绪返回 true
    */
   async start(onLog) {
+    // 重置主动停止标记（新一轮启动，exit 视为意外）
+    this._stopping = false;
     // 1. 确保环境就绪
     const envOk = await this.ensureEnvironment(onLog);
     if (!envOk) return false;
@@ -186,6 +206,7 @@ class PythonManager {
     onLog('info', '检查后端是否已运行...');
     if (await this.checkHealth()) {
       onLog('info', '后端已运行（检测到 /api/health 响应），直接复用。');
+      onLog('warn', '注意：复用的后端可能由 Start.bat 启动（监听 0.0.0.0，局域网可访问）。如需仅本机访问，请先关闭 Start.bat 后端再启动本应用。');
       return true;
     }
 
@@ -195,18 +216,25 @@ class PythonManager {
       '-m', 'uvicorn', 'server:app',
       '--host', HOST,
       '--port', String(PORT),
-      '--app-dir', ROOT,
+      '--app-dir', this.backendRoot,
     ];
 
     onLog('info', `启动后端: ${pyExe} ${args.join(' ')}`);
 
+    // 打包后 ROOT 落在 asar 只读区，projects/ 无法 mkdir；
+    // 通过 CST_PROJECTS_DIR 注入 userData/projects（server.py 优先读它）。
+    // 开发模式不注入 → server.py 回退 ROOT/projects（仓库根，零回归）。
+    const projectsDir = app.isPackaged
+      ? path.join(app.getPath('userData'), 'projects')
+      : null;
+
     try {
       this.process = spawn(pyExe, args, {
-        cwd: ROOT,
+        cwd: this.backendRoot,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         // 确保子进程继承正确的 PATH（ADB 可能需要）
-        env: { ...process.env },
+        env: { ...process.env, ...(projectsDir ? { CST_PROJECTS_DIR: projectsDir } : {}) },
       });
     } catch (e) {
       onLog('error', `后端启动失败：${e.message}`);
@@ -232,6 +260,10 @@ class PythonManager {
       const reason = signal ? `signal=${signal}` : `code=${code}`;
       onLog('info', `后端进程已退出 (${reason})`);
       this.process = null;
+      // 非主动停止 → 意外退出，通知主进程（弹窗恢复或退出）
+      if (!this._stopping && this.onUnexpectedExit) {
+        this.onUnexpectedExit(reason);
+      }
     });
 
     this.process.on('error', (err) => {
@@ -301,8 +333,8 @@ class PythonManager {
         lastProgressAt = now;
       }
 
-      // 如果子进程意外退出，不用再等了
-      if (this.process === null && i > 2) {
+      // 如果子进程意外退出，不用再等了（i>0：首轮之后即可判定，避免前 3 秒白等）
+      if (this.process === null && i > 0) {
         onLog('error', '后端进程已退出，停止等待。');
         return false;
       }
@@ -318,10 +350,13 @@ class PythonManager {
    * 优雅关闭 Python 后端。
    *
    * Windows: uvicorn 会 spawn 子进程（reloader），必须用 taskkill /T 杀整棵树。
-   * macOS:   SIGTERM 足够；3 秒后仍不退出则 SIGKILL。
+   * Unix:    SIGTERM 优雅关闭，同步轮询 2 秒后 SIGKILL 兑底（不用 setTimeout，
+   *          避免 app.quit 后事件循环已停导致僵尸进程）。
    */
   stop() {
     if (!this.process) return;
+    // 标记主动停止，exit 事件据此不触发意外退出回调
+    this._stopping = true;
 
     const pid = this.process.pid;
 
@@ -333,24 +368,33 @@ class PythonManager {
         // 进程可能已退出，忽略
       }
     } else {
-      // Unix: 先 SIGTERM，给 uvicorn 优雅关闭的机会
+      // Unix: SIGTERM 优雅关闭，同步轮询最多 2 秒后 SIGKILL 兑底。
+      // 不用 setTimeout：app.quit() 后事件循环可能已停，回调不执行会留僵尸进程。
       try {
         this.process.kill('SIGTERM');
       } catch {
         // 忽略
       }
-
-      // 3 秒后仍存活则 SIGKILL
-      const proc = this.process;
-      setTimeout(() => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
         try {
-          if (!proc.killed) {
-            proc.kill('SIGKILL');
-          }
+          process.kill(pid, 0);  // 採测进程是否存活（不发信号）
         } catch {
-          // 忽略
+          break;  // 已退出
         }
-      }, 3_000);
+        // 同步短睡 100ms 降 CPU（sleep 命令 Unix 通用；Windows 走上面 if 分支不会到这）
+        try {
+          spawnSync('sleep', ['0.1'], { stdio: 'ignore', timeout: 200 });
+        } catch {
+          break;
+        }
+      }
+      // 超时仍未退出则 SIGKILL
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // 忽略（已退出）
+      }
     }
 
     this.process = null;

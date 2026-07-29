@@ -14,6 +14,7 @@
  *   window.electronAPI.showAlert       — 原生信息提示框（替代 alert）
  *   window.electronAPI.showConfirm     — 原生确认对话框（替代 confirm）
  *   window.electronAPI.onMenuCommand   — 注册菜单命令回调
+ *   window.electronAPI.onBackendStatus — 监听后端状态变化（online/offline）
  */
 
 'use strict';
@@ -73,6 +74,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * @param {Function} callback - 接收命令字符串的回调
    */
   onMenuCommand: (callback) => {
+    // 去重：多次调用只保留最后一个监听器（避免热重载/重复注册导致回调多次触发）
+    ipcRenderer.removeAllListeners('menu-command');
     ipcRenderer.on('menu-command', (event, cmd) => callback(cmd));
+  },
+
+  /**
+   * 监听后端状态变化（online/offline）。
+   * 主进程在后端意外退出时 send('backend-status','offline')，前端展示 overlay。
+   * @param {Function} callback - 接收 'online' | 'offline'
+   */
+  onBackendStatus: (callback) => {
+    ipcRenderer.removeAllListeners('backend-status');
+    ipcRenderer.on('backend-status', (event, status) => callback(status));
+  },
+
+  // ── scrcpy 镜像 / 录屏 ──
+  startMirror: (serial, model) => ipcRenderer.invoke('scrcpy:mirror:start', { serial, model }),
+  stopMirror: () => ipcRenderer.invoke('scrcpy:mirror:stop'),
+  startRecord: (serial) => ipcRenderer.invoke('scrcpy:record:start', { serial }),
+  stopRecord: () => ipcRenderer.invoke('scrcpy:record:stop'),
+  getScrcpyStatus: () => ipcRenderer.invoke('scrcpy:getStatus'),
+  onScrcpyStatus: (callback) => {
+    ipcRenderer.removeAllListeners('scrcpy:status');
+    ipcRenderer.on('scrcpy:status', (event, status) => callback(status));
+  },
+
+  // 设备热插拔即时通知（adb track-devices 检测到变化时触发）
+  onDevicesChanged: (callback) => {
+    ipcRenderer.removeAllListeners('devices:changed');
+    ipcRenderer.on('devices:changed', () => callback());
   },
 });

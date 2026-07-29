@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "App 冷启测速桌面版 — Electron 客户端",
   "main": "electron/main.js",
-  "author": "EDY",
+  "author": "田海顺",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -23,11 +23,15 @@
       "buildResources": "build"
     },
     "files": [
-      "electron/**/*",
-      "static/**/*",
-      "server.py",
-      "requirements.txt",
-      "adb/**/*"
+      "electron/**/*"
+    ],
+    "extraResources": [
+      { "from": "server.py", "to": "backend/server.py" },
+      { "from": "requirements.txt", "to": "backend/requirements.txt" },
+      { "from": "adb/", "to": "backend/adb/" },
+      { "from": "ios/", "to": "backend/ios/" },
+      { "from": "static/", "to": "backend/static/" },
+      { "from": "scrcpy/", "to": "scrcpy/" }
     ],
     "win": {
       "target": [
@@ -39,7 +43,8 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   }
 }

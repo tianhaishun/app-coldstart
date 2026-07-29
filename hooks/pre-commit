@@ -28,6 +28,8 @@ FORBIDDEN_PREFIXES=(
     'node_modules/'
     'release/'
     'dist-electron/'
+    'scrcpy/'
+    'ios/'
 )
 # 通配规则：用 bash 内置 [[ ]] 的 extglob 通配
 # *.pyc / _cst_*.png / _cst_*.apk 等

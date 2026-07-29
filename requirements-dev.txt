@@ -1,0 +1,4 @@
+# 开发依赖（不随产品打包，仅本地测试用）
+# 安装：.venv\Scripts\pip install -r requirements-dev.txt
+
+pytest>=8.0,<10.0
