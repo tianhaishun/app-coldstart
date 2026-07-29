@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-07-29 · scrcpy 镜像 + iOS 支持 + OC-2 主题 + 工程加固（`867b33a`）
+
+### scrcpy 实时镜像 / 录屏（借鉴 XYLog Viewer）
+- 新增 `electron/scrcpy-manager.js`：独立置顶窗口镜像 + 后台录屏（720p/30fps）
+- 环境变量 `ADB` + `SCRCPY_SERVER_PATH` 复用后端同一 adb-server，不抢命令锁
+- UI 左栏加镜像/录屏按钮，菜单栏加入口
+- Windows 录屏用 MKV（截断鲁棒），Mac 用 MP4
+
+### iOS 冷启动测试支持
+- `server.py` 新增 `IosDevice` 类（pymobiledevice3 截图 + idevice_id CLI 设备检测）
+- `/api/devices` 合并返回 Android + iOS 双平台设备（`platform` 字段）
+- Session 平台感知路由（AdbDevice / IosDevice 鸭子类型）
+- 前端设备下拉框区分平台（🤖 Android / 🍎 iOS 图标）
+- AMDS 服务检测（`sc query`，借鉴 XYLog 自检工具）
+
+### OC-2 主题精简化
+- 主色从蓝 `#034cff` 改为暖桃 `#fab283`，对齐 OpenCode 品牌视觉
+- 去毛玻璃（backdrop-filter）、去渐变、文字灰度化
+- 圆角统一 3px，hover 状态一致化
+- 下拉框原生弹窗修复（实色背景 + 可读文字）
+
+### UI 布局优化
+- 左栏精简：直播开关移至顶栏，删除截图诊断条和缩放控件
+- 删除标题栏 Logo 文字（被工具栏遮挡）
+
+### 工程加固（借鉴 XYLog Viewer）
+- `adb kill-server` 退出清理（防 adb.exe 残留文件锁）
+- 全局异常兜底 `uncaughtException` / `unhandledRejection` + `main-error.log`
+- `adb track-devices` 设备热插拔即时感知（替代 5s 轮询，降为 15s 兜底）
+- NSIS 安装器预清理脚本（`build/installer.nsh`，taskkill 残留进程）
+- `INSTALL_FAILED` 错误码中文翻译（24 条）
+- `fetchShotOnce` 15s 超时兜底（防 liveBusy 锁死）
+- `innerHTML` XSS 防御（escapeHtml 补全）
+- `requirements.txt` 版本上界（防破坏性更新）
+- 后端纯函数 pytest 测试（29 项：`_safe_apk_filename` / `_safe_project_id` / `_raw_screencap_to_bgr`）
+
+---
+
 ## 2026-07-23 · 安全与可靠性加固（第三方审核修复）
 
 依据 GPT 5.6 SOL 代码审核意见，修复 6 个高危 + 5 个次要问题。每项均实测验证。

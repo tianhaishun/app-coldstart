@@ -1,51 +1,104 @@
-# 📱 App 冷启测速 · 使用说明
+# 📱 App 冷启测速 · Cold Start Profiler
 
-> Python + FastAPI + RapidOCR 重写版。**实时画面 + OCR 文字框 + 点选坐标**，告别 v1 的 getevent 等待。
+> Electron 桌面客户端 + Python FastAPI 后端。Android（ADB）+ iOS（libimobiledevice）双平台冷启动测速，scrcpy 实时镜像，模板比对自动停表。
 
 ---
 
-## ✨ v2 相比 v1 的改进
+## ✨ 核心能力
 
-| 维度 | v1.5（旧） | v2（新） |
-|---|---|---|
-| 定位坐标 | getevent 监听 12 秒超时 | **点画面一下即得**，所见即所得 |
-| 画面 | 无 | **左侧实时画面**（截图轮询，可调速度） |
-| OCR | 无 | **RapidOCR 文字框叠加**，点文字框也能定位 |
-| 计时精度 | 含 HTTP+adb fork 延迟（100-400ms 抖动） | **单一 performance.now() 时钟**，OCR/模板自动停表消除终点人工误差 |
-| 前端 | 单 HTML，无反馈 | **左右分屏**，深色 UI，OCR 调试面板 |
-| 错误处理 | adb 卡死会让 fetch 挂起 | **所有 adb 调用有超时**，错误即时返回 |
-| 依赖 | 零安装 | 需要 Python 3.10+（首次自动建 venv） |
+| 能力 | 说明 |
+|---|---|
+| **自动测速** | 卸装→测首次→杀进程→测二次，全自动循环；模板比对毫秒级停表 |
+| **scrcpy 实时镜像** | 独立置顶窗口 30fps 镜像（不抢 adb 锁），支持后台录屏 |
+| **iOS 支持** | USB 连接 iPhone，截图 + 模板比对 + 冷启动计时 |
+| **OC-2 主题** | OpenCode 风格暖灰极简设计，明暗切换 |
+| **项目持久化** | 启动模板 / 跳过模板 / 包名按项目分开存储 |
+| **计时精度** | 单一 `performance.now()` 时钟，不校准；详见「数据精度」 |
 
 ---
 
 ## 🚀 快速开始
 
-### 1. 准备
+### 方式一：Electron 桌面客户端（推荐）
 
-- **Python 3.10+**（[下载](https://www.python.org/downloads/)，安装时勾「Add to PATH」）
-- **手机开启 USB 调试**（设置 → 关于手机 → 点 7 次版本号 → 开发者选项 → USB 调试）
-- **数据线连接**（必须是数据线，不能是纯充电线）
+1. 安装 **Python 3.10+**（[下载](https://www.python.org/downloads/)，勾「Add to PATH」）
+2. 安装 **Node.js 18+**
+3. 克隆仓库后：
+   ```bash
+   npm install          # 安装 Electron 依赖
+   npm start            # 启动桌面客户端
+   ```
+4. 首次启动自动创建 `.venv` + 安装 Python 依赖（约 1-3 分钟）
+5. 将 scrcpy 二进制放入 `scrcpy/` 目录（从 [scrcpy releases](https://github.com/Genymobile/scrcpy/releases) 下载 win64 包）
+6. iOS 测试需将 libimobiledevice 工具放入 `ios/` 目录
 
-### 2. 启动
+### 方式二：浏览器模式（Start.bat）
 
-**双击 `Start.bat`** —— 首次启动会自动：
-1. 检测 Python
-2. 创建 `.venv` 虚拟环境
-3. 安装依赖（FastAPI / uvicorn / RapidOCR / opencv，约 1-3 分钟，RapidOCR 模型 ~20MB）
-4. 启动后端并打开浏览器
+双击 `Start.bat` —— 首次自动建 venv + 装依赖，启动后端并打开浏览器。
 
-之后每次启动都很快（几秒）。
+> ⚠️ 浏览器模式无 scrcpy 镜像 / 录屏 / iOS 支持，仅 Android 截图轮询。
 
-### 3. 界面使用
+---
 
-1. **顶部选择设备**（自动列出已连接的手机）
-2. **左侧看画面**：直播开关 / OCR 框 / 置信度阈值
-3. **点画面图标位置** → 自动填入坐标 + 自动点一下手机验证
-4. **填包名 / APK 路径**（可选，用于重装、杀进程、包名启动）
-5. **按 Space 启动** → 服务端杀进程 + 点图标，开始精确计时
-6. **再按 Space 停止** → 自动记录
-7. **采集节奏**：按"卸装→测首次→测二次→卸装→..."交替采集，工具会按奇偶序号自动分组
-8. **看统计卡片**：首次冷启动 / 二次冷启动 各自独立去极值均值，底部保留"一锅烩"作对照
+## 🎯 计时原理
+
+```
+POST /api/cold_start
+  ↓
+服务端 force_stop(pkg)           ← 确保冷启动（iOS 需手动上滑关闭）
+服务端 tap / monkey 启动          ← 点击图标或包名启动
+返回 { ok, start_wall }           ← start_wall 仅供诊断
+  ↓
+前端 startTs = performance.now()  ← 响应回来后直接打点
+前端轮询 /api/check_auto          ← 截图 + cv2.matchTemplate 模板比对
+模板连续命中 → 停表               ← 终点客观化，消除人工反应误差
+```
+
+单一 `performance.now()` 时钟，不做跨进程校准。计时起点 = tap 命令执行完、响应返回之后；终点 = 启动成功模板连续确认命中。
+
+### ⚠️ 数据精度（重要）
+
+- **起点误差**：漏掉 adb input tap 工具链执行时间（约 150-250ms，每次都漏，横向对比不受影响）
+- **终点误差（自动测速）**：模板比对命中帧 − 当次截图耗时，精度 ±50ms
+- **终点误差（手动模式）**：人工按键停止，反应时间约 250-400ms（系统性正偏）
+
+**结论**：同设备同 APK 横向对比有效；绝对值仅供参考；差异 < ~0.3s 视为噪声。
+
+### 📊 分组统计
+
+工具按显示序号奇偶自动分组：
+- 奇数序号 = **首次冷启动**（卸装后第一次启动）
+- 偶数序号 = **二次冷启动**（杀进程后启动，不卸装）
+
+每组独立去极值平均（n≥3 剔 1 max + 1 min）。iOS 首次冷启动最终均值 **-1 秒**（剔除 TestFlight 测试弹窗时间）。
+
+---
+
+## 📱 iOS 测试说明
+
+iOS 冷启动测试依赖 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) + libimobiledevice 工具链：
+
+| 能力 | Android | iOS（非越狱） |
+|---|---|---|
+| 设备检测 | ✅ adb devices | ✅ idevice_id -l |
+| 截图 | ✅ screencap raw+gzip | ✅ ScreenshotService PNG |
+| 模板比对停表 | ✅ | ✅ |
+| App 启动 | ✅ monkey -p | ⚠️ pymobiledevice3 launch |
+| 模拟点击 | ✅ input tap | ❌ 非越狱不支持 |
+| 杀进程 | ✅ am force-stop | ❌ 需手动上滑关闭 |
+| 安装/卸载 | ✅ adb install | ✅ InstallationProxyService |
+
+**前置条件**：Windows 需安装 [Apple Mobile Device Service](https://support.apple.com/itunes)（随 iTunes 安装，或单独装 AMDS 驱动包）。
+
+---
+
+## 🖥️ scrcpy 镜像 / 录屏
+
+基于 [scrcpy](https://github.com/Genymobile/scrcpy)（Android only）：
+
+- **镜像**：点击「📱 镜像」弹出独立置顶窗口，30fps 实时画面，不抢 adb 命令锁
+- **录屏**：镜像运行中点「⏺ 录屏」后台录制（720p/30fps），停止后保存到临时目录
+- **环境变量复用**：scrcpy 通过 `ADB` + `SCRCPY_SERVER_PATH` 环境变量复用后端同一 adb-server
 
 ---
 
@@ -53,9 +106,8 @@
 
 | 键 | 功能 |
 |---|---|
-| **Space** | 启动 App + 开始计时 / 停止并记录 |
-| **Q** | 卸载重装 APK（首启动测试） |
-| **W** | 杀 App 进程（冷启动测试） |
+| **Q** | 卸载重装 APK |
+| **W** | 杀进程 |
 | **R** | 清空历史 |
 | **Del** | 删除最后一条 |
 | **B** | 返回键 |
@@ -64,116 +116,71 @@
 
 ---
 
-## 🎯 计时原理（v2 核心改进）
-
-v1 的计时包含 **HTTP 往返 + adb 进程 fork** 延迟，100-400ms 抖动直接污染冷启动数据。
-
-v2 的 `/api/cold_start` 端点编排了「杀进程 → 点击图标/包名启动」一气呵成；计时用 v1 验证过的纯前端 `performance.now()` 方案：
+## 🛠️ 文件结构
 
 ```
-POST /api/cold_start
-  ↓
-服务端 force_stop(pkg)          ← 确保冷启动
-服务端 adb shell input tap X Y  ← 点击图标（或 monkey -p 包名启动）
-返回 { ok, start_wall }          ← start_wall 仅供诊断，前端计时用 performance.now() 不消费
-  ↓
-前端 startTs = performance.now()  ← 响应回来后直接打点
-前端 loop() elapsed = performance.now() - startTs
+app-coldstart-qoder/
+├── electron/                ← Electron 桌面客户端
+│   ├── main.js              ← 主进程（窗口/菜单/IPC/全局异常兜底）
+│   ├── preload.js           ← contextBridge 安全 IPC 桥
+│   ├── python-manager.js    ← Python 后端生命周期（venv/pip/uvicorn/健康检查）
+│   └── scrcpy-manager.js    ← scrcpy 镜像/录屏管理器
+├── server.py                ← FastAPI 后端（ADB + iOS + OCR + 模板比对）
+├── static/
+│   ├── index.html           ← 前端单文件（HTML+CSS+JS 内嵌）
+│   ├── static.css           ← 离线 Tailwind CSS（编译产物）
+│   └── themes/
+│       ├── oc-2.json        ← OpenCode OC-2 色源（锁定上游）
+│       ├── oc-2.css         ← 烘焙产物（_bake_oc2.py 生成）
+│       └── _bake_oc2.py     ← JSON → CSS 烘焙脚本
+├── scrcpy/                  ← scrcpy 二进制（不入版本库，~32MB）
+├── ios/                     ← libimobiledevice 工具链（不入版本库，~19MB）
+├── adb/                     ← 内置 ADB
+├── build/
+│   ├── icon.ico / icon.png  ← 应用图标
+│   └── installer.nsh        ← NSIS 安装器预清理脚本
+├── hooks/pre-commit         ← Git 钩子（防误提交 + ast 语法检查）
+├── tests/                   ← pytest 后端纯函数测试
+├── Start.bat                ← 浏览器模式启动器
+├── requirements.txt         ← Python 生产依赖
+├── requirements-dev.txt     ← Python 开发依赖（pytest）
+├── package.json             ← Electron + electron-builder 配置
+├── AGENTS.md                ← 项目硬规范（任何协作者必读）
+├── CHANGELOG.md             ← 版本变更记录
+└── README.md                ← 本文档
 ```
-
-单一 `performance.now()` 时钟，不做跨进程校准 —— 简单到一眼能看懂，不会有混时钟的 bug。计时起点 = tap 命令执行完、响应返回之后；漏掉了 tap 工具链执行时间（~200ms，每次都漏，横向对比不受影响）。
-
-计时仍有下述固有误差，**使用数据前必须读「数据精度」段**。
-
-### ⚠️ 数据精度（重要）
-
-工具的测量数据有两层固有误差，使用前必须了解：
-
-- **起点误差**：计时从"服务端 tap 命令执行完、网络响应返回之后"开始，**漏掉**了 adb `input tap` 的工具链执行时间（adb fork + input ART 进程启动 + InputManager 注入，约 150-250ms）。这让测出来的值**偏小**，但每次都偏同样方向，横向对比有效。
-- **终点误差**：人工按键停止，反应时间约 250-400ms。这是**系统性正偏** —— 你永远是"看到关卡按钮之后"才按，不可能提前，所以每个绝对值都被抬高约 0.3s。"认出关卡按钮"是识别任务，比简单反应更慢。去极值均值能压噪声，压不掉这个偏置。
-
-**两个误差方向相反（起点偏小 ~0.2s、终点偏大 ~0.3s），部分抵消，但抵消量每次不同，所以不能指望它们刚好抹平。**
-
-**结论**：
-- ✅ **横向对比有效**：同设备、同 APK，测两次比较差异，可信
-- ⚠️ **绝对值仅供参考**：直接拿去当"App 冷启动 X ms"不准
-- ⚠️ **差异 < ~0.3s 视为噪声**：> 0.5s 才值得当作真实差异
-
-### 📊 分组统计（首次 / 二次冷启动）
-
-工具按**显示序号奇偶**自动分组：
-- 奇数序号（#01、#03、#05...）= **首次冷启动**
-- 偶数序号（#02、#04、#06...）= **二次冷启动**
-
-这依赖你的操作节奏：必须按「卸装 → 测首次 → 测二次 → 卸装 → ...」交替采集。统计卡片会显示「下一条应是首次/二次」的提示，帮你保持节奏。
-
-每组独立做去极值平均（剔 1 个最大 + 1 个最小，剩余取均）。
-
-**平台调整**：
-- **GP（安卓）**：不调整
-- **iOS**：首次冷启动最终均值 **-1 秒**（剔除 TestFlight 测试弹窗时间）；二次冷启动不减
-
-底部保留「全部一锅烩」的老统计作对照参考。
-
----
-
-## 📊 OCR 调试面板（参考 GameAuto webui）
-
-左侧工具栏：
-
-- **OCR 框**：绿（conf≥0.8）/ 黄（≥0.6）/ 红（<0.6 闪烁）
-- **conf 复选框**：在每个框上叠加置信度数字
-- **阈值滑块**：实时过滤低质量识别
-- **底部统计**：`OCR conf: 均 87% · ≥80% ×12 · 60-80% ×3 · <60% ×1`
-
-点击 OCR 框 = 用该文字位置作为图标坐标（适合带文字的 App）。
 
 ---
 
 ## 🔒 数据安全
 
 - 工具**不上传任何数据**
-- 测试记录保存在浏览器 `localStorage`
-- 后端默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，把 `Start.bat` 里 `HOST=0.0.0.0` 改成 `127.0.0.1`
-- 内置 adb（`adb/adb.exe`），不污染系统 PATH
-
-> ⚠️ **多人访问须知**：本服务无认证。同网段任何人都能操作这台机器上 USB 连接的手机（卸装/点击/截图/上传 APK）。
-> adb 设备是本机物理连接——别人浏览器只是远程操作界面，所有实际动作都走你这台机器。同一时刻只能一人使用（adb 串行锁）。
-> **切勿暴露到公网**。仅在可信内网使用。
-
-### 防火墙（首次开放访问需加，管理员 PowerShell 执行一次）
-
-```powershell
-New-NetFirewallRule -DisplayName "App Cold Start 8766" -Direction Inbound -Protocol TCP -LocalPort 8766 -Action Allow -Profile Private
-```
-
-改回安全（仅本机）后，删规则：
-
-```powershell
-Remove-NetFirewallRule -DisplayName "App Cold Start 8766"
-```
+- 测试记录保存在浏览器 `localStorage`（按项目分桶）
+- Electron 模式后端绑 `127.0.0.1`（仅本机）
+- `Start.bat` 默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，改 `HOST=127.0.0.1`
+- 内置 adb + scrcpy + iOS 工具链，不污染系统 PATH
 
 ---
 
-## 🛠 文件结构
+## 🔧 开发
 
-```
-app-coldstart/
-├── Start.bat              ← 双击启动（自动建 venv + 装依赖）
-├── server.py              ← FastAPI 后端（单文件，含 OCR/ADB/模板比对）
-├── static/index.html      ← 前端单文件（HTML+CSS+JS 内嵌）
-├── requirements.txt       ← Python 依赖
-├── adb/                   ← 内置 ADB（不污染系统 PATH）
-│   ├── adb.exe
-│   ├── AdbWinApi.dll
-│   └── AdbWinUsbApi.dll
-├── hooks/                 ← Git pre-commit 钩子（防误提交 + ast 语法检查）
-│   ├── pre-commit
-│   └── install.{sh,bat}   ← 安装脚本（拷贝到 .git/hooks/）
-├── AGENTS.md              ← 项目硬规范（任何 agent/协作者必读）
-├── README.md              ← 本文档
-├── .gitignore / .gitattributes  ← Git 配置
-└── .venv/                 ← 首次启动后自动创建（不入版本控制）
+```bash
+# 安装依赖
+npm install
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements-dev.txt
+
+# 开发模式（自动开 DevTools）
+npm run dev
+
+# 运行测试
+.venv\Scripts\python.exe -m pytest tests/ -v
+
+# 打包 Windows 安装包
+npm run build:win
+
+# 重新生成 OC-2 主题 CSS
+.venv\Scripts\python.exe static/themes/_bake_oc2.py
 ```
 
 ---
@@ -182,55 +189,27 @@ app-coldstart/
 
 ### Q1：首次启动很慢
 
-A：第一次会下载 RapidOCR 的 ONNX 模型（~20MB）+ opencv + numpy，总共约 200MB 装到 `.venv`。**之后启动只需几秒**。
+A：第一次会下载 RapidOCR ONNX 模型（~20MB）+ pymobiledevice3 依赖，总共约 200MB 装到 `.venv`。之后启动只需几秒。
 
-### Q2：浏览器显示"后端未启动"
+### Q2：scrcpy 镜像按钮不显示
 
-A：看后端黑窗口的报错。常见：
-- `ModuleNotFoundError: No module named 'fastapi'` → 重跑 `Start.bat`，或手动 `%USERPROFILE%\.venv\Scripts\pip install -r requirements.txt`
-- `[Errno 13] error while attempting to bind on address ... 8766` → 端口被占。Win 的 Hyper-V/WSL 会保留某些端口范围（`netsh interface ipv4 show excludedportrange protocol=tcp` 可查）。改 `Start.bat` 里的 `set PORT=8766` 到其它值（如 8000/9000）
-- `adb: No such file` → 检查 `adb/adb.exe` 是否存在
+A：`scrcpy/` 目录缺少二进制。从 [scrcpy releases](https://github.com/Genymobile/scrcpy/releases) 下载 Windows win64 包，解压到 `scrcpy/` 目录（需包含 `scrcpy.exe` + `scrcpy-server` + DLLs）。
 
-### Q3：OCR 识别不准
+### Q3：iOS 设备不显示
 
-A：调左侧**阈值滑块**到 60%，过滤掉低质量识别；或点 **OCR** 按钮重抓一次（首屏 OCR 模型加载完会更准）。
+A：1) 确认已安装 iTunes 或 AMDS 驱动；2) iPhone 解锁并点「信任此电脑」；3) 用数据线（非充电线）。`ios/` 目录需有 `idevice_id.exe` 及依赖 DLLs。
 
-### Q4：点画面坐标不准
+### Q4：浏览器显示"后端未启动"
 
-A：v2 用的是**归一化坐标**（0~1），跨分辨率通用。直接点画面图标中心即可，不需要校准。
+A：看后端窗口的报错。常见：端口 8766 被占（Hyper-V/WSL 保留），改 `Start.bat` 里的 `PORT`。
 
-### Q5：怎么测首次冷启动 + 二次冷启动？
+### Q5：怎么测 iOS 冷启动？
 
-A：标准流程是 5 轮，每轮一对数据：
-1. 填包名 + APK 路径
-2. 按 **Q** 卸载重装
-3. 按 **Space** 测首次冷启动（#01、#03、#05...奇数序号）
-4. 杀进程（不要卸装），按 **Space** 测二次冷启动（#02、#04、#06...偶数序号）
-5. 回到第 2 步，重复 5 轮（共 10 条）
-6. 统计卡片自动分别显示首次/二次的去极值均值
-
-### Q6：怎么用包名启动（绕过触摸，三星等用）？
-
-A：右侧"启动方式"下拉切换到「包名启动」。
-
----
-
-## 📝 v1 → v2 迁移说明
-
-旧版文件已备份为 `*.v1.*.bak`，可安全删除。如需回滚 v1.5：
-- 把 `server.v1.ps1.bak` 改回 `server.ps1`
-- 把 `timer.v1.html.bak` 改回 `timer.html`
-- 把 `Start.v1.bat.bak` 改回 `Start.bat`
-
-新版记录存储 key 是 `cst_v2_records`（与 v1 的 `cold_start_records_v2` 不互通）。
-
----
-
-遇到问题找 EDY。反馈 Bug 直接截图 + 后端窗口的报错日志。
+A：1) 连接 iPhone；2) 选择 🍎 iPhone 设备；3) 手动在 App 切换器中上滑关闭目标 App；4) 按 Space 启动计时；5) 手动点开 App 或用包名启动；6) 模板比对自动停表（需先设好启动成功模板）。
 
 ---
 
 ## 📋 变更记录
 
 详细的版本演进见 [CHANGELOG.md](CHANGELOG.md)。
-项目硬规范（任何 agent/协作者必读）见 [AGENTS.md](AGENTS.md)。
+项目硬规范（任何协作者必读）见 [AGENTS.md](AGENTS.md)。
