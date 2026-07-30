@@ -9,7 +9,9 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac"
+    "build:mac": "electron-builder --mac",
+    "release": "node scripts/release.js",
+    "gen-doc": "python scripts/gen-release-doc.py"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -31,8 +33,11 @@
       { "from": "adb/", "to": "backend/adb/" },
       { "from": "ios/", "to": "backend/ios/" },
       { "from": "static/", "to": "backend/static/" },
-      { "from": "scrcpy/", "to": "scrcpy/" }
+      { "from": "scrcpy/", "to": "scrcpy/" },
+      { "from": "python-embed/", "to": "python-embed/", "filter": ["**/*"] },
+      { "from": "CHANGELOG.md", "to": "CHANGELOG.md" }
     ],
+    "afterPack": "scripts/after-pack.js",
     "win": {
       "target": [
         "nsis"

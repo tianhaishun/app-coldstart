@@ -85,8 +85,29 @@ class PythonManager {
     return this.isWin ? 'python' : 'python3';
   }
 
-  /** 优先用 venv Python，找不到回退系统 Python */
+  /**
+   * 内置嵌入式 Python（打包后 resources/python-embed/python.exe）。
+   * 如果存在，优先使用——无需用户装 Python、无需 pip install、无需联网。
+   * 开发模式下指向项目根的 python-embed/（由 scripts/build-python-embed.py 构建）。
+   */
+  get bundledPython() {
+    const embedDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'python-embed')
+      : path.join(ROOT, 'python-embed');
+    const exe = this.isWin
+      ? path.join(embedDir, 'python.exe')
+      : path.join(embedDir, 'bin', 'python');
+    return fs.existsSync(exe) ? exe : null;
+  }
+
+  /**
+   * Python 可执行文件优先级：
+   *   1. 内置嵌入式 Python（打包版，零依赖）
+   *   2. .venv 虚拟环境 Python（开发 / Start.bat 模式）
+   *   3. 系统 Python（首次启动时创建 venv）
+   */
   get pythonPath() {
+    if (this.bundledPython) return this.bundledPython;
     return fs.existsSync(this.venvPython) ? this.venvPython : this.systemPython;
   }
 
@@ -198,9 +219,15 @@ class PythonManager {
   async start(onLog) {
     // 重置主动停止标记（新一轮启动，exit 视为意外）
     this._stopping = false;
-    // 1. 确保环境就绪
-    const envOk = await this.ensureEnvironment(onLog);
-    if (!envOk) return false;
+
+    // ── 内置 Python 模式：跳过 venv / pip，直接启动 ──
+    if (this.bundledPython) {
+      onLog('info', '使用内置 Python 运行时（无需安装 Python / pip install）');
+    } else {
+      // 1. 确保环境就绪（开发模式 / Start.bat 模式走 venv）
+      const envOk = await this.ensureEnvironment(onLog);
+      if (!envOk) return false;
+    }
 
     // 2. 如果后端已在运行（比如 Start.bat 先启动了），直接复用
     onLog('info', '检查后端是否已运行...');

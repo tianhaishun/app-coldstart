@@ -1,6 +1,50 @@
 # 变更记录（CHANGELOG）
 
-本文件记录项目的重要变更，按时间倒序。详细提交信息见 `git log`。
+本文件记录项目各版本的功能变更与修复，按版本倒序。版本遵循语义化版本规范。
+
+---
+
+## v2.0.0 — 2026-07-30
+
+### 新增
+- **Electron 桌面客户端**：从纯 Web（Start.bat + 浏览器）升级为原生桌面应用。主进程管理 Python 后端生命周期（venv/pip/uvicorn/健康检查），后端就绪后创建 BrowserWindow 加载前端页面。支持单实例锁定、全局异常兜底、设备热插拔即时感知（adb track-devices）。NSIS 安装器（可选安装目录、桌面/开始菜单快捷方式、卸载程序），安装预清理脚本防 adb/scrcpy 进程残留锁文件
+- **scrcpy 实时镜像 / 录屏**：独立置顶窗口 30fps 镜像（不抢 adb 命令锁），支持后台录屏（720p/30fps，Windows MKV / Mac MP4）。环境变量 `ADB` + `SCRCPY_SERVER_PATH` 复用后端同一 adb-server
+- **iOS 冷启动测试支持**：`server.py` 新增 `IosDevice` 类（pymobiledevice3 截图 + idevice_id CLI 设备检测），`/api/devices` 合并返回 Android + iOS 双平台设备（`platform` 字段）。Session 平台感知路由（AdbDevice / IosDevice 鸭子类型）。前端设备下拉框区分平台（🤖 Android / 🍎 iOS 图标）。AMDS 服务检测（`sc query`）
+- **全自动测速循环**：一键自动跑「卸装→测首次→杀进程→测二次」× N 轮，复用单一 `performance.now()` 时钟 + 奇偶分组统计。失败即停策略，可中途停止，页面内报告 + CSV 导出
+- **模板比对停表**：cv2.matchTemplate 区域搜索替代全屏 OCR，停表精度从 ±1-2s 提升到毫秒级（3ms/次）。用户点画面选定启动元素 → 后端截小区域存模板 → 运行时区域比对
+- **项目持久化**：启动模板 / 跳过按钮 / 包名按项目分开存储（Electron 模式持久化到 userData/projects，开发模式到仓库根 projects/）
+- **OC-2 主题**：OpenCode 风格暖灰极简设计，主色暖桃 `#fab283`，去毛玻璃 / 去渐变 / 文字灰度化，圆角统一 3px
+- **一键发布系统**：`npm run release` 自动构建安装包 + 生成 Word 发布说明文档（可导入飞书 / 钉钉 / 语雀等在线文档）
+
+### 修复
+- **路径穿越**：`static_fallback` 直接拼接路径未验证边界，`GET /..%2Fserver.py` 可读源码。修复：resolve 后用 `relative_to(STATIC_DIR)` 验证
+- **远程脚本**：删除 Tailwind Play CDN + Google Fonts，编译离线 `static/static.css`（21KB），成品零网络依赖
+- **锁不全**：新增 `Session.device_op()` 上下文管理器，8 个会触发 adb 的端点统一加锁
+- **adb 失败被吞**：`check=False` 吞非零退出码导致覆盖安装被当干净重装。修复：空输出立即抛错
+- **历史记录混算**：引入 `runStartIndex` + `run_id` 批次隔离，防止多次自动运行结果交叉污染
+- **纯色模板误命中**：TM_CCOEFF_NORMED 对纯色返回 1.0 满置信度。修复：set_marker_template 拒绝灰度标准差 < 15 的区域
+- **Windows 录屏视频无法拖动**：改为发送 Ctrl+C 优雅收尾让 scrcpy 写完索引，容器固定 `.mkv` 对截断更鲁棒
+
+### 维护
+- `on_event` → `lifespan`（FastAPI 推荐）
+- 请求模型加边界约束（ColdStartReq.mode 用 Literal，x/y 用 Field(ge=0,le=1)）
+- `requirements.txt` 版本上界（防破坏性更新）
+- `innerHTML` XSS 防御（escapeHtml 补全）
+- `fetchShotOnce` 15s 超时兜底（防 liveBusy 锁死）
+- `INSTALL_FAILED` 错误码中文翻译（24 条）
+- `.gitattributes` 行尾规范化
+- pre-commit hook：防误提交 .venv + ast 语法检查
+- 后端纯函数 pytest 测试（29 项）
+
+### 修复（构建）
+- **应用图标**：将 32×32 占位图标替换为 256×256 多分辨率 ICO（深蓝渐变秒表 + 黄色闪电），满足 electron-builder NSIS 最小尺寸要求
+- **winCodeSign 缓存解压失败**：手动解压 winCodeSign-2.6.0.7z 并用 `-snl-` 参数处理 macOS 符号链接，解决非管理员/未开启开发者模式下的构建报错
+
+---
+
+## v1.x — 2026-06 ~ 2026-07-23（纯 Web 版本）
+
+> 以下为 Electron 化之前的历史记录，保留备查。
 
 ---
 

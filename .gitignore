@@ -28,6 +28,15 @@ node_modules/
 # Electron 打包产物（electron-builder 输出）
 release/
 
+# 发布产物（安装包 + Word 发布说明，由 scripts/release.mjs 生成）
+publish/
+
+# 嵌入式 Python 运行时（~300MB，由 scripts/build-python-embed.py 构建）
+python-embed/
+
+# server.pyc 编译产物（由 after-pack 钩子在打包时生成）
+server.pyc
+
 # Electron 运行时缓存
 dist-electron/
 
