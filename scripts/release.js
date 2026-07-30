@@ -127,7 +127,7 @@ function main() {
     '',
     '  下一步:',
     '    1. 打开 ZIP 检查内容',
-    '    2. 上传到 GitHub Release / 共享盘',
+    '    2. 上传到 GitLab Release / 共享盘',
     '    3. Word 文档导入飞书/钉钉/语雀',
   ]);
 }

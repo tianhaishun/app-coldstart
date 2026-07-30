@@ -5,8 +5,9 @@ __pycache__/
 # 虚拟环境
 .venv/
 
-# Claude Code 本地配置
+# Claude Code 本地配置 + 规则文件（不推送到远程）
 .claude/
+CLAUDE.md
 
 # ZCode agent 本地配置 + plan 文件（agent 工具自动生成，与项目无关）
 .zcode/
