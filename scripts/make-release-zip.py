@@ -8,6 +8,15 @@
 #   python scripts/make-release-zip.py
 # ──────────────────────────────────────────────────────────────────────────────
 
+import sys
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+
 import json
 import sys
 import zipfile
@@ -88,6 +97,12 @@ def main():
         if docx_file.exists():
             zf.write(docx_file, docx_file.name)
             print(f"  + {docx_file.name}")
+
+        # Word 使用说明（如存在）
+        manual_docx = publish_version_dir / f"使用说明-v{version}.docx"
+        if manual_docx.exists():
+            zf.write(manual_docx, manual_docx.name)
+            print(f"  + {manual_docx.name}")
 
     zip_mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"\n✅ ZIP 打包完成: {zip_path}")

@@ -27,7 +27,10 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..');
-const PYTHON = path.join(ROOT, '.venv', 'Scripts', 'python.exe');
+// 跨平台 venv Python 路径：Windows = Scripts\python.exe，Mac/Linux = bin/python
+const PYTHON = process.platform === 'win32'
+  ? path.join(ROOT, '.venv', 'Scripts', 'python.exe')
+  : path.join(ROOT, '.venv', 'bin', 'python');
 const EMBED_DIR = path.join(ROOT, 'python-embed');
 
 const args = process.argv.slice(2);
@@ -96,10 +99,10 @@ function main() {
   console.log(`\n✅ 安装包: ${setupFiles[0]}`);
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 3. 生成 Word 发布说明
+  // 3. 生成 Word 发布文档（发布说明 + 使用说明）
   // ══════════════════════════════════════════════════════════════════════════
   const pyExe = fs.existsSync(PYTHON) ? `"${PYTHON}"` : 'python';
-  run(`${pyExe} scripts/gen-release-doc.py`, '生成 Word 发布说明');
+  run(`${pyExe} scripts/gen-docs.py`, '生成 Word 发布文档');
 
   // ══════════════════════════════════════════════════════════════════════════
   // 4. 打包 ZIP

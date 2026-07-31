@@ -30,7 +30,7 @@ npm run build:win
 
 # 5. Generate docs + ZIP
 Write-Host "`n--- Generate docs ---"
-python scripts/gen-release-doc.py
+python scripts/gen-docs.py
 python scripts/make-release-zip.py
 
 # 6. Upload to Package Registry
