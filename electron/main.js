@@ -43,7 +43,7 @@ let splashWindow = null;
 function createSplashWindow() {
   splashWindow = new BrowserWindow({
     width: 480,
-    height: 320,
+    height: 360,
     frame: false,
     resizable: false,
     transparent: true,
@@ -72,6 +72,7 @@ function createSplashWindow() {
       border: 1px solid rgba(250, 178, 131, 0.2);
       color: #e0e0e0;
       -webkit-user-select: none;
+      overflow: hidden;
     }
     .logo {
       font-size: 28px; font-weight: bold;
@@ -79,7 +80,7 @@ function createSplashWindow() {
       color: #fab283;
     }
     .spinner {
-      width: 40px; height: 40px;
+      width: 36px; height: 36px;
       border: 3px solid rgba(250, 178, 131, 0.2);
       border-top-color: #fab283;
       border-radius: 50%;
@@ -87,20 +88,79 @@ function createSplashWindow() {
       margin-bottom: 20px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .text { font-size: 14px; color: #aaa; }
-    .sub { font-size: 12px; color: #666; margin-top: 8px; }
+    #status {
+      font-size: 14px; color: #ccc;
+      text-align: center;
+      min-height: 20px;
+      max-width: 380px;
+      word-break: break-all;
+    }
+    #detail {
+      font-size: 11px; color: #777;
+      margin-top: 10px;
+      min-height: 16px;
+      max-width: 380px;
+      text-align: center;
+      font-family: "SF Mono", "Cascadia Mono", Consolas, monospace;
+    }
+    .bar-bg {
+      width: 280px; height: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 2px;
+      margin-top: 16px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #fab283, #f59e0b);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.5s ease;
+    }
   </style>
 </head>
 <body>
   <div class="logo">⏱️ App 冷启测速</div>
   <div class="spinner"></div>
-  <div class="text">正在启动...</div>
-  <div class="sub">首次启动需初始化引擎，请稍候</div>
+  <div id="status">正在启动...</div>
+  <div id="detail"></div>
+  <div class="bar-bg"><div class="bar-fill" id="bar"></div></div>
+  <script>
+    function updateStatus(text) {
+      document.getElementById('status').textContent = text;
+    }
+    function updateDetail(text) {
+      document.getElementById('detail').textContent = text;
+    }
+    function updateBar(percent) {
+      document.getElementById('bar').style.width = Math.min(100, Math.max(0, percent)) + '%';
+    }
+  </script>
 </body>
 </html>`;
 
   splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
   splashWindow.on('closed', () => { splashWindow = null; });
+}
+
+/**
+ * 更新闪屏状态文字（用户能看到当前在干什么）。
+ * @param {string} status - 主状态文字
+ * @param {string} [detail] - 详细信息（可选）
+ * @param {number} [progress] - 进度百分比 0-100（可选）
+ */
+function updateSplash(status, detail, progress) {
+  if (!splashWindow) return;
+  const esc = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, ' ');
+  try {
+    splashWindow.webContents.executeJavaScript(`updateStatus('${esc(status)}')`);
+    if (detail !== undefined) {
+      splashWindow.webContents.executeJavaScript(`updateDetail('${esc(detail)}')`);
+    }
+    if (progress !== undefined) {
+      splashWindow.webContents.executeJavaScript(`updateBar(${progress})`);
+    }
+  } catch { /* 闪屏可能已关闭 */ }
 }
 
 /** scrcpy 镜像/录屏管理器 */
@@ -151,6 +211,30 @@ function log(level, msg) {
   const prefix = `[${ts}] [${level}]`;
   const line = `${prefix} ${msg}`;
   startupLogs.push(line);
+
+  // 转发关键进度到闪屏（用户能看到当前在干什么）
+  if (splashWindow) {
+    if (level === 'info' || level === 'warn') {
+      // 根据日志内容判断阶段
+      if (msg.includes('虚拟环境') || msg.includes('venv')) {
+        updateSplash('正在创建 Python 虚拟环境...', msg, 15);
+      } else if (msg.includes('依赖') || msg.includes('pip')) {
+        updateSplash('正在安装 Python 依赖...', msg, 30);
+      } else if (msg.includes('OCR') || msg.includes('模型')) {
+        updateSplash('正在下载 OCR 模型...', msg, 50);
+      } else if (msg.includes('启动后端') || msg.includes('uvicorn')) {
+        updateSplash('正在启动后端服务...', msg, 70);
+      } else if (msg.includes('等待') || msg.includes('就绪')) {
+        updateSplash('正在等待后端就绪...', msg, 85);
+      } else if (msg.includes('内置 Python') || msg.includes('无需安装')) {
+        updateSplash('正在初始化运行时...', msg, 60);
+      } else {
+        updateSplash(msg, '', undefined);
+      }
+    } else if (level === 'error') {
+      updateSplash('启动遇到问题', msg, undefined);
+    }
+  }
 
   // py-out / py-err 是 Python 后端的输出，用不同前缀区分
   if (level === 'py-out') {
@@ -613,7 +697,9 @@ if (!gotLock) {
 
     log('info', '后端就绪，创建应用窗口。');
 
-    // 后端就绪后关闭闪屏（mainWindow 的 ready-to-show 会显示主窗口）
+    // 闪屏显示完成状态后关闭
+    updateSplash('启动完成！', '', 100);
+    await new Promise(r => setTimeout(r, 500)); // 让用户看到 100%
     splashWindow?.close();
 
     // 后端意外退出时：先通知前端展示 overlay，再弹窗恢复（见 handleBackendCrash）
