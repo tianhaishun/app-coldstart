@@ -31,7 +31,7 @@
 
   ; Step 2: OCR 引擎（最慢，加载 ONNX 模型）
   DetailPrint "[2/4] 初始化 OCR 引擎 (加载 ONNX 模型，约 10-20 秒)..."
-  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "from rapidocr_onnx_runtime import RapidOCR; RapidOCR()"'
+  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "from rapidocr_onnxruntime import RapidOCR; RapidOCR()"'
   Pop $0
 
   ; Step 3: iOS 工具链
