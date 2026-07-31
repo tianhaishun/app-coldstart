@@ -2,6 +2,8 @@
 
 > Electron 桌面客户端 + Python FastAPI 后端。Android（ADB）+ iOS（libimobiledevice）双平台冷启动测速，scrcpy 实时镜像，模板比对自动停表。
 
+**[📦 下载安装包](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases/v2.0.0)**
+
 ---
 
 ## ✨ 核心能力
@@ -11,7 +13,6 @@
 | **自动测速** | 卸装→测首次→杀进程→测二次，全自动循环；模板比对毫秒级停表 |
 | **scrcpy 实时镜像** | 独立置顶窗口 30fps 镜像（不抢 adb 锁），支持后台录屏 |
 | **iOS 支持** | USB 连接 iPhone，截图 + 模板比对 + 冷启动计时 |
-| **OC-2 主题** | OpenCode 风格暖灰极简设计，明暗切换 |
 | **项目持久化** | 启动模板 / 跳过模板 / 包名按项目分开存储 |
 | **计时精度** | 单一 `performance.now()` 时钟，不校准；详见「数据精度」 |
 
@@ -19,18 +20,13 @@
 
 ## 🚀 快速开始
 
-### 方式一：Electron 桌面客户端（推荐）
+### 方式一：下载安装包（推荐）
 
-1. 安装 **Python 3.10+**（[下载](https://www.python.org/downloads/)，勾「Add to PATH」）
-2. 安装 **Node.js 18+**
-3. 克隆仓库后：
-   ```bash
-   npm install          # 安装 Electron 依赖
-   npm start            # 启动桌面客户端
-   ```
-4. 首次启动自动创建 `.venv` + 安装 Python 依赖（约 1-3 分钟）
-5. 将 scrcpy 二进制放入 `scrcpy/` 目录（从 [scrcpy releases](https://github.com/Genymobile/scrcpy/releases) 下载 win64 包）
-6. iOS 测试需将 libimobiledevice 工具放入 `ios/` 目录
+1. 从 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases) 下载 `AppColdStart-2.0.0-setup.exe`
+2. 双击安装
+3. 桌面出现 AppColdStart 图标，双击启动
+
+**无需安装 Python，无需联网配置，装完即用。** 内置完整 Python 运行时 + ADB + scrcpy + iOS 工具链。
 
 ### 方式二：浏览器模式（Start.bat）
 
@@ -76,7 +72,7 @@ POST /api/cold_start
 
 ## 📱 iOS 测试说明
 
-iOS 冷启动测试依赖 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) + libimobiledevice 工具链：
+iOS 冷启动测试依赖 pymobiledevice3 + libimobiledevice 工具链：
 
 | 能力 | Android | iOS（非越狱） |
 |---|---|---|
@@ -88,7 +84,7 @@ iOS 冷启动测试依赖 [pymobiledevice3](https://github.com/doronz88/pymobile
 | 杀进程 | ✅ am force-stop | ❌ 需手动上滑关闭 |
 | 安装/卸载 | ✅ adb install | ✅ InstallationProxyService |
 
-**前置条件**：Windows 需安装 [Apple Mobile Device Service](https://support.apple.com/itunes)（随 iTunes 安装，或单独装 AMDS 驱动包）。
+**前置条件**：Windows 需安装 Apple Mobile Device Service（随 iTunes 安装，或单独装 AMDS 驱动包）。
 
 ---
 
@@ -106,6 +102,7 @@ iOS 冷启动测试依赖 [pymobiledevice3](https://github.com/doronz88/pymobile
 
 | 键 | 功能 |
 |---|---|
+| **Space** | 开始 / 停止计时 |
 | **Q** | 卸载重装 APK |
 | **W** | 杀进程 |
 | **R** | 清空历史 |
@@ -113,42 +110,6 @@ iOS 冷启动测试依赖 [pymobiledevice3](https://github.com/doronz88/pymobile
 | **B** | 返回键 |
 | **H** | 主页键 |
 | **O** | 重新抓 OCR |
-
----
-
-## 🛠️ 文件结构
-
-```
-app-coldstart-qoder/
-├── electron/                ← Electron 桌面客户端
-│   ├── main.js              ← 主进程（窗口/菜单/IPC/全局异常兜底）
-│   ├── preload.js           ← contextBridge 安全 IPC 桥
-│   ├── python-manager.js    ← Python 后端生命周期（venv/pip/uvicorn/健康检查）
-│   └── scrcpy-manager.js    ← scrcpy 镜像/录屏管理器
-├── server.py                ← FastAPI 后端（ADB + iOS + OCR + 模板比对）
-├── static/
-│   ├── index.html           ← 前端单文件（HTML+CSS+JS 内嵌）
-│   ├── static.css           ← 离线 Tailwind CSS（编译产物）
-│   └── themes/
-│       ├── oc-2.json        ← OpenCode OC-2 色源（锁定上游）
-│       ├── oc-2.css         ← 烘焙产物（_bake_oc2.py 生成）
-│       └── _bake_oc2.py     ← JSON → CSS 烘焙脚本
-├── scrcpy/                  ← scrcpy 二进制（不入版本库，~32MB）
-├── ios/                     ← libimobiledevice 工具链（不入版本库，~19MB）
-├── adb/                     ← 内置 ADB
-├── build/
-│   ├── icon.ico / icon.png  ← 应用图标
-│   └── installer.nsh        ← NSIS 安装器预清理脚本
-├── hooks/pre-commit         ← Git 钩子（防误提交 + ast 语法检查）
-├── tests/                   ← pytest 后端纯函数测试
-├── Start.bat                ← 浏览器模式启动器
-├── requirements.txt         ← Python 生产依赖
-├── requirements-dev.txt     ← Python 开发依赖（pytest）
-├── package.json             ← Electron + electron-builder 配置
-├── AGENTS.md                ← 项目硬规范（任何协作者必读）
-├── CHANGELOG.md             ← 版本变更记录
-└── README.md                ← 本文档
-```
 
 ---
 
@@ -176,8 +137,14 @@ npm run dev
 # 运行测试
 .venv\Scripts\python.exe -m pytest tests/ -v
 
-# 打包 Windows 安装包
+# 打包 Windows 安装包（含内嵌 Python）
 npm run build:win
+
+# 一键发布（构建 + Word 文档 + ZIP）
+npm run release
+
+# 生成发布文档（Word）
+npm run gen-doc
 
 # 重新生成 OC-2 主题 CSS
 .venv\Scripts\python.exe static/themes/_bake_oc2.py
@@ -187,25 +154,38 @@ npm run build:win
 
 ## ❓ 常见问题
 
-### Q1：首次启动很慢
+### Q1：安装版首次启动很慢？
 
-A：第一次会下载 RapidOCR ONNX 模型（~20MB）+ pymobiledevice3 依赖，总共约 200MB 装到 `.venv`。之后启动只需几秒。
+A：首次启动初始化 OCR 引擎需几秒，之后秒开。安装版已内置 Python 运行时，无需联网下载依赖。
 
-### Q2：scrcpy 镜像按钮不显示
+### Q2：scrcpy 镜像按钮不亮？
 
-A：`scrcpy/` 目录缺少二进制。从 [scrcpy releases](https://github.com/Genymobile/scrcpy/releases) 下载 Windows win64 包，解压到 `scrcpy/` 目录（需包含 `scrcpy.exe` + `scrcpy-server` + DLLs）。
+A：安装版已内置 scrcpy。浏览器模式需手动下载 scrcpy 二进制放入 `scrcpy/` 目录。
 
-### Q3：iOS 设备不显示
+### Q3：iOS 设备不显示？
 
-A：1) 确认已安装 iTunes 或 AMDS 驱动；2) iPhone 解锁并点「信任此电脑」；3) 用数据线（非充电线）。`ios/` 目录需有 `idevice_id.exe` 及依赖 DLLs。
+A：1) 确认已安装 iTunes 或 AMDS 驱动；2) iPhone 解锁并点「信任此电脑」；3) 用数据线（非充电线）。
 
-### Q4：浏览器显示"后端未启动"
+### Q4：浏览器显示"后端未启动"？
 
 A：看后端窗口的报错。常见：端口 8766 被占（Hyper-V/WSL 保留），改 `Start.bat` 里的 `PORT`。
 
 ### Q5：怎么测 iOS 冷启动？
 
 A：1) 连接 iPhone；2) 选择 🍎 iPhone 设备；3) 手动在 App 切换器中上滑关闭目标 App；4) 按 Space 启动计时；5) 手动点开 App 或用包名启动；6) 模板比对自动停表（需先设好启动成功模板）。
+
+---
+
+## 📄 开源许可
+
+本项目采用 [GPL-3.0](LICENSE) 许可证。
+
+Copyright (C) 2026 田海顺
+
+- 你可以自由使用、修改、分发本软件
+- 修改后的代码必须同样以 GPL v3 开源
+- 必须保留原始版权声明
+- 本软件不提供任何担保
 
 ---
 
