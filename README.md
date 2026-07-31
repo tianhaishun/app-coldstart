@@ -23,8 +23,9 @@
 ### 方式一：下载安装包（推荐）
 
 1. 从 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases) 下载 `AppColdStart-2.0.0-setup.exe`
-2. 双击安装
+2. 双击安装（安装过程中自动初始化 OCR 引擎，有分步进度日志）
 3. 桌面出现 AppColdStart 图标，双击启动
+4. 启动时显示加载动画，后端就绪后自动进入主界面
 
 **无需安装 Python，无需联网配置，装完即用。** 内置完整 Python 运行时 + ADB + scrcpy + iOS 工具链。
 
@@ -156,7 +157,7 @@ npm run gen-doc
 
 ### Q1：安装版首次启动很慢？
 
-A：首次启动初始化 OCR 引擎需几秒，之后秒开。安装版已内置 Python 运行时，无需联网下载依赖。
+A：安装过程中已自动初始化 OCR 引擎，启动时显示加载动画，后端就绪后秒开。
 
 ### Q2：scrcpy 镜像按钮不亮？
 
