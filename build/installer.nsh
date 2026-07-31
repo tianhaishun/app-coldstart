@@ -26,22 +26,22 @@
 
   ; Step 1: 核心库
   DetailPrint "[1/4] 加载核心库 (FastAPI / uvicorn / OpenCV / NumPy)..."
-  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import fastapi; import uvicorn; import cv2; import numpy; import PIL; print(\"  核心库 OK\")"'
+  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import fastapi; import uvicorn; import cv2; import numpy; import PIL"'
   Pop $0
 
   ; Step 2: OCR 引擎（最慢，加载 ONNX 模型）
   DetailPrint "[2/4] 初始化 OCR 引擎 (加载 ONNX 模型，约 10-20 秒)..."
-  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "from rapidocr_onnx_runtime import RapidOCR; RapidOCR(); print(\"  OCR 引擎 OK\")"'
+  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "from rapidocr_onnx_runtime import RapidOCR; RapidOCR()"'
   Pop $0
 
   ; Step 3: iOS 工具链
   DetailPrint "[3/4] 加载 iOS 工具链 (pymobiledevice3)..."
-  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import pymobiledevice3; print(\"  iOS 工具链 OK\")"'
+  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import pymobiledevice3"'
   Pop $0
 
   ; Step 4: 完成确认
   DetailPrint "[4/4] 验证后端可启动..."
-  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import uvicorn; print(\"  uvicorn OK\")"'
+  nsExec::ExecToLog '"$INSTDIR\resources\python-embed\python.exe" -c "import uvicorn"'
   Pop $0
 
   DetailPrint "──────────────────────────────"
