@@ -85,33 +85,54 @@ if ! command -v ideviceinstaller &>/dev/null; then
 fi
 echo "  idevice_id: OK"
 
-# ── 3. npm install ────────────────────────────────────────────────────────────
+# ── 3. 打包前检查（防止旧代码/旧产物导致错误包）──────────────────────────────
+info "打包前检查..."
+
+# 3.1 关键文件必须存在（旧代码没有这些 → 会打出默认图标的错误包）
+if [[ ! -f "build/icon-512.png" ]]; then
+    fail "缺少 build/icon-512.png（Mac 图标）—— 代码版本过旧，请先 git pull"
+fi
+if ! grep -q '"mac"' package.json; then
+    fail "package.json 缺少 mac 配置 —— 代码版本过旧，请先 git pull"
+fi
+if [[ ! -f "scripts/build-mac.sh" ]]; then
+    fail "缺少 scripts/build-mac.sh —— 代码版本过旧，请先 git pull"
+fi
+
+# 3.2 清理 release/ 残留产物（防止旧 .dmg 混入误导用户）
+if [[ -d "release" ]]; then
+    echo "  清理旧构建产物 release/ ..."
+    rm -rf release
+fi
+echo "  检查通过，开始构建"
+
+# ── 4. npm install ────────────────────────────────────────────────────────────
 info "安装 npm 依赖..."
 npm install
 echo "  npm 依赖安装完成"
 
-# ── 4. 打包 ────────────────────────────────────────────────────────────────────
+# ── 5. 打包 ────────────────────────────────────────────────────────────────────
 info "开始打包 .dmg（约 2-3 分钟）..."
 echo ""
 
 export CSC_IDENTITY_AUTO_DISCOVERY=false
 npm run build:mac
 
-# ── 5. 输出结果 ────────────────────────────────────────────────────────────────
+# ── 6. 输出结果 ────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}═══════════════════════════════════════════════${RESET}"
 echo -e "${GREEN}${BOLD}  打包完成！${RESET}"
 echo -e "${BOLD}═══════════════════════════════════════════════${RESET}"
 echo ""
 
-# 找到 .dmg 文件
+# 找到 .dmg 文件（release/ 已清理过，只会有一个新产物）
 DMG=$(find release -name "*.dmg" -type f 2>/dev/null | head -1)
 if [[ -n "$DMG" ]]; then
     SIZE=$(du -h "$DMG" | cut -f1)
     echo -e "  安装包: ${GREEN}${DMG}${RESET} (${SIZE})"
     echo ""
-    echo "  在 Finder 中打开："
-    echo "    open release/"
+    echo "  验证图标（应为 AppColdStart 秒表图标，不是默认原子球）："
+    echo "    open -R '$DMG'"
     echo ""
     echo "  首次打开 .dmg 安装后可能需要："
     echo "    xattr -cr /Applications/AppColdStart.app"
