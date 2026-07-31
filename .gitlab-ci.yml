@@ -1,203 +1,32 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# App 冷启测速 — GitLab CI/CD 流水线
+# App 冷启测速 — GitLab CI/CD
 #
-# 触发方式：
-#   git tag v2.1.0 && git push 7k7k --tags   → 自动构建 + 发布
-#   GitLab Web UI 手动触发 Pipeline           → 只构建，不发布
-#
-# 需要 Windows GitLab Runner（tags: windows），预装 Node.js 18+ 和 Python 3.11+。
-# scrcpy/ 和 ios/ 需预放在 Runner 的 CI_DEPS_DIR 指定路径。
-# 详见 docs/gitlab-runner-setup.md
-# ──────────────────────────────────────────────────────────────────────────────
+# 当前状态：配置就绪，等待 Windows Runner 注册后自动生效。
+# 触发方式：git tag vX.Y.Z && git push 7k7k --tags
+# Runner 配置：详见 docs/gitlab-runner-setup.md
 
 stages:
   - build
-  - release
 
 variables:
-  # 跳过代码签名（无证书）
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
-  # 浅克隆加速
-  GIT_DEPTH: "1"
-  # scrcpy/ 和 ios/ 预放在 Runner 机器的此路径下
-  CI_DEPS_DIR: "C:\\ci-deps\\app-coldstart"
 
-# 只在 tag 推送或手动触发时运行完整流水线
-workflow:
-  rules:
-    - if: $CI_COMMIT_TAG
-    - if: $CI_PIPELINE_SOURCE == "web"
-    - if: $CI_COMMIT_BRANCH
-
-# ── 缓存策略 ──────────────────────────────────────────────────────────────────
-# node_modules 和 python-embed 在依赖不变时复用，省 ~15 分钟
 cache:
-  key:
-    files:
-      - package.json
-      - package-lock.json
-      - requirements.txt
-    prefix: $CI_JOB_NAME
+  key: deps-v1
   paths:
     - node_modules/
     - python-embed/
-    - .cache-pip/
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stage 1: 构建
-# ══════════════════════════════════════════════════════════════════════════════
 build:
   stage: build
   tags:
     - windows
-  before_script:
-    # 确认环境
-    - |
-      Write-Host "=== CI Environment ==="
-      node --version
-      python --version
-      git --version
-      Write-Host "Tag: $env:CI_COMMIT_TAG"
-      Write-Host "Branch: $env:CI_COMMIT_BRANCH"
+  only:
+    - tags
   script:
-    # ── 1. npm install ──
-    - |
-      Write-Host "`n=== Step 1/7: npm install ==="
-      npm install --prefer-offline
-
-    # ── 2. 复制预放的 scrcpy/ 和 ios/ ──
-    - |
-      Write-Host "`n=== Step 2/7: Copy pre-placed deps ==="
-      if (-not (Test-Path "scrcpy")) {
-        Write-Host "  Copying scrcpy from $env:CI_DEPS_DIR ..."
-        Copy-Item -Recurse -Force "$env:CI_DEPS_DIR\scrcpy" "scrcpy"
-      } else {
-        Write-Host "  scrcpy/ already exists (cached)"
-      }
-      if (-not (Test-Path "ios")) {
-        Write-Host "  Copying ios from $env:CI_DEPS_DIR ..."
-        Copy-Item -Recurse -Force "$env:CI_DEPS_DIR\ios" "ios"
-      } else {
-        Write-Host "  ios/ already exists (cached)"
-      }
-
-    # ── 3. 构建嵌入式 Python（有缓存则跳过）──
-    - |
-      Write-Host "`n=== Step 3/7: Build python-embed ==="
-      python scripts/build-python-embed.py
-
-    # ── 4. 修复 winCodeSign 缓存（CI 首次运行时）──
-    - |
-      Write-Host "`n=== Step 4/7: Fix winCodeSign cache ==="
-      $csCache = "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign"
-      if (-not (Test-Path "$csCache\winCodeSign-2.6.0\rcedit-x64.exe")) {
-        Write-Host "  winCodeSign cache missing, will download during build..."
-      } else {
-        Write-Host "  winCodeSign cache OK"
-      }
-
-    # ── 5. 构建安装包 ──
-    - |
-      Write-Host "`n=== Step 5/7: electron-builder ==="
-      npm run build:win
-
-    # ── 6. 生成 Word 发布说明 + ZIP ──
-    - |
-      Write-Host "`n=== Step 6/7: Generate docs + ZIP ==="
-      python scripts/gen-release-doc.py
-      python scripts/make-release-zip.py
-
-    # ── 7. 上传到 GitLab Package Registry + 提取 CHANGELOG ──
-    - |
-      Write-Host "`n=== Step 7/7: Upload to Package Registry ==="
-      $version = if ($env:CI_COMMIT_TAG) { $env:CI_COMMIT_TAG.TrimStart('v') } else { (Get-Content package.json | ConvertFrom-Json).version }
-      Write-Host "  Version: $version"
-      $base = "$env:CI_API_V4_URL/projects/$env:CI_PROJECT_ID/packages/generic/app-coldstart/$version"
-
-      # 上传安装包
-      $setup = (Get-ChildItem "release\*-setup.exe" | Select-Object -First 1).FullName
-      Write-Host "  Uploading $setup ..."
-      curl.exe --silent --show-error --header "JOB-TOKEN: $env:CI_JOB_TOKEN" --upload-file "$setup" "$base/AppColdStart-setup.exe"
-
-      # 上传 ZIP
-      $zip = (Get-ChildItem "publish\*.zip" | Select-Object -First 1).FullName
-      Write-Host "  Uploading $zip ..."
-      curl.exe --silent --show-error --header "JOB-TOKEN: $env:CI_JOB_TOKEN" --upload-file "$zip" "$base/AppColdStart-$version.zip"
-
-      # 上传 Word 文档
-      $docx = (Get-ChildItem "publish\v*\*.docx" | Select-Object -First 1)
-      if ($docx) {
-        Write-Host "  Uploading $($docx.FullName) ..."
-        curl.exe --silent --show-error --header "JOB-TOKEN: $env:CI_JOB_TOKEN" --upload-file "$docx.FullName" "$base/release-notes.docx"
-      }
-
-      # 提取 CHANGELOG 当前版本段落作为发布说明
-      $changelog = ""
-      if (Test-Path "CHANGELOG.md") {
-        $content = Get-Content "CHANGELOG.md" -Raw -Encoding UTF8
-        if ($content -match "(?ms)^## v$version.*?(?=^## |\z)") {
-          $changelog = $Matches[0].Trim()
-        } else {
-          $changelog = "详见 CHANGELOG.md"
-        }
-      }
-
-      # 保存变量供 release job 使用
-      $setupUrl = "$base/AppColdStart-setup.exe"
-      $zipUrl = "$base/AppColdStart-$version.zip"
-      $docxUrl = "$base/release-notes.docx"
-
-      # 写入 dotenv 文件
-      "SETUP_URL=$setupUrl" | Out-File -FilePath ci_vars.env -Encoding utf8
-      "ZIP_URL=$zipUrl" | Out-File -FilePath ci_vars.env -Encoding utf8 -Append
-      "DOCX_URL=$docxUrl" | Out-File -FilePath ci_vars.env -Encoding utf8 -Append
-      "RELEASE_VERSION=$version" | Out-File -FilePath ci_vars.env -Encoding utf8 -Append
-      "RELEASE_NOTES=$changelog" | Out-File -FilePath ci_vars.env -Encoding utf8 -Append
-
-      Write-Host "`n=== Build Complete ==="
-
+    - powershell -ExecutionPolicy Bypass -File scripts/ci-build.ps1
   artifacts:
     paths:
       - release/*.exe
       - publish/*.zip
       - publish/v*/*.docx
-    reports:
-      dotenv: ci_vars.env
     expire_in: 30 days
-    exclude:
-      - node_modules/**/*
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Stage 2: 发布 GitLab Release（仅 tag 推送时触发）
-# ══════════════════════════════════════════════════════════════════════════════
-release:
-  stage: release
-  tags:
-    - windows
-  needs:
-    - job: build
-      artifacts: true
-  rules:
-    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-  script:
-    - |
-      Write-Host "Creating GitLab Release for $env:CI_COMMIT_TAG"
-      Write-Host "  Setup: $env:SETUP_URL"
-      Write-Host "  ZIP: $env:ZIP_URL"
-  release:
-    tag_name: $CI_COMMIT_TAG
-    name: 'App 冷启测速 $CI_COMMIT_TAG'
-    description: '$RELEASE_NOTES'
-    ref: '$CI_COMMIT_SHA'
-    assets:
-      links:
-        - name: 'Windows 安装包 (setup.exe)'
-          url: '$SETUP_URL'
-          filepath: /setup.exe
-          link_type: package
-        - name: '完整分发包 (zip)'
-          url: '$ZIP_URL'
-          link_type: package
-        - name: '发布说明 (Word)'
-          url: '$DOCX_URL'
-          link_type: other
