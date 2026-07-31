@@ -37,6 +37,72 @@ let mainWindow = null;
 /** Python 后端管理器 */
 const pyManager = new PythonManager();
 
+/** 启动闪屏窗口（后端启动期间显示，避免用户看到空白等待）*/
+let splashWindow = null;
+
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 480,
+    height: 320,
+    frame: false,
+    resizable: false,
+    transparent: true,
+    alwaysOnTop: true,
+    show: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      height: 100vh;
+      background: rgba(26, 26, 46, 0.95);
+      border-radius: 16px;
+      border: 1px solid rgba(250, 178, 131, 0.2);
+      color: #e0e0e0;
+      -webkit-user-select: none;
+    }
+    .logo {
+      font-size: 28px; font-weight: bold;
+      margin-bottom: 24px;
+      color: #fab283;
+    }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid rgba(250, 178, 131, 0.2);
+      border-top-color: #fab283;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .text { font-size: 14px; color: #aaa; }
+    .sub { font-size: 12px; color: #666; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="logo">⏱️ App 冷启测速</div>
+  <div class="spinner"></div>
+  <div class="text">正在启动...</div>
+  <div class="sub">首次启动需初始化引擎，请稍候</div>
+</body>
+</html>`;
+
+  splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  splashWindow.on('closed', () => { splashWindow = null; });
+}
+
 /** scrcpy 镜像/录屏管理器 */
 const scrcpyManager = new ScrcpyManager((eventName, payload) => {
   mainWindow?.webContents.send(eventName, payload);
@@ -528,6 +594,10 @@ if (!gotLock) {
     log('info', `平台: ${process.platform} ${process.arch}`);
     log('info', `开发模式: ${isDev ? '是 (--dev)' : '否'}`);
     log('info', '────────────────────────────────');
+
+    // 立即显示启动闪屏（用户不用盯着空白等待）
+    createSplashWindow();
+
     log('info', '正在启动 Python 后端...');
 
     // 启动 Python 后端
@@ -535,12 +605,16 @@ if (!gotLock) {
 
     if (!started) {
       log('error', '后端启动失败，显示错误窗口。');
+      splashWindow?.close();
       const detail = startupLogs.join('\n');
       createErrorWindow('后端启动失败', detail);
       return;
     }
 
     log('info', '后端就绪，创建应用窗口。');
+
+    // 后端就绪后关闭闪屏（mainWindow 的 ready-to-show 会显示主窗口）
+    splashWindow?.close();
 
     // 后端意外退出时：先通知前端展示 overlay，再弹窗恢复（见 handleBackendCrash）
     pyManager.onUnexpectedExit = (reason) => {

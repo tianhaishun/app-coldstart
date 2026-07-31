@@ -31,6 +31,7 @@
       { "from": "server.py", "to": "backend/server.py" },
       { "from": "requirements.txt", "to": "backend/requirements.txt" },
       { "from": "static/", "to": "backend/static/" },
+      { "from": "scripts/warmup.py", "to": "backend/scripts/warmup.py" },
       { "from": "CHANGELOG.md", "to": "CHANGELOG.md" }
     ],
     "afterPack": "scripts/after-pack.js",
