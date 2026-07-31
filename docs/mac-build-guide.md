@@ -85,7 +85,7 @@ npm run build:mac
 | 内嵌 ADB | ✅ 已内置 | ❌ 用系统 adb（brew install android-platform-tools） |
 | 内嵌 scrcpy | ✅ 已内置 | ❌ 需自己装（brew install scrcpy） |
 | 内嵌 iOS 工具 | ✅ 已内置 | ❌ 需自己装（brew install libimobiledevice） |
-| 源码保护 | ✅ server.pyc | ✅ server.pyc（after-pack 钩子） |
+| 源码保护 | ✅ 构建时编译（内嵌 Python 固定版本） | ✅ 首次启动时运行时编译（用实际运行的 Python，版本永远匹配） |
 
 Mac 用户安装 .dmg 后首次启动，工具会自动创建 Python 虚拟环境并安装依赖（需要联网，约 2-3 分钟）。
 

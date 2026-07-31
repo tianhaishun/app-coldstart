@@ -237,7 +237,13 @@ class PythonManager {
       return true;
     }
 
-    // 3. 启动 uvicorn 子进程
+    // 3. 运行时源码保护（Mac 等非内嵌 Python 平台）
+    //    构建时保留的 server.py，在此用「实际运行的 Python」编译为 .pyc 后删除源码。
+    //    保证字节码 magic number 与运行时 Python 完全匹配（Windows 内嵌 Python
+    //    已在构建时编译过，.pyc 存在则跳过）。
+    this.ensureSourcelessBackend(onLog);
+
+    // 4. 启动 uvicorn 子进程
     const pyExe = this.pythonPath;
     const args = [
       '-m', 'uvicorn', 'server:app',
@@ -312,6 +318,55 @@ class PythonManager {
     }
 
     return ready;
+  }
+
+  // ── 运行时源码保护 ────────────────────────────────────────
+
+  /**
+   * 运行时编译 server.py → server.pyc（仅当 server.py 仍存在时）。
+   *
+   * 背景：Windows 打包时用内嵌 Python（3.11.9 固定）编译，运行时同一版本，安全。
+   * Mac 用户 Python 版本不可控，构建时编译的 .pyc 可能 magic number 不匹配
+   * （bad magic number → uvicorn 导入失败 → App 打不开）。
+   * 因此 Mac 包保留 server.py 源码，首次启动时用实际运行的 Python 编译：
+   *   1. 编译 server.py → server.pyc（平铺格式，uvicorn 可直接导入）
+   *   2. 删除 server.py，只留字节码
+   *
+   * @param {(level: string, msg: string) => void} onLog
+   */
+  ensureSourcelessBackend(onLog) {
+    // 仅打包模式生效；开发模式保留源码（开发者需要改代码）
+    if (!app.isPackaged) return;
+
+    const serverPy = path.join(this.backendRoot, 'server.py');
+    if (!fs.existsSync(serverPy)) {
+      return;  // 已保护（Windows 构建时已编译）
+    }
+
+    const pyExe = this.pythonPath;
+    onLog('info', '检测到 server.py 源码，进行运行时编译保护...');
+
+    try {
+      // py_compile.compile(源文件, 平铺 .pyc 输出) —— 与编译者 magic 完全一致
+      const cmd = `import py_compile; py_compile.compile(${JSON.stringify(serverPy)}, ${JSON.stringify(serverPy + 'c')}, doraise=True)`;
+      execFileSync(pyExe, ['-c', cmd], {
+        cwd: this.backendRoot,
+        timeout: 30_000,
+      });
+    } catch (e) {
+      onLog('warn', `运行时编译失败，保留 server.py（${e.message}）`);
+      return;
+    }
+
+    const serverPyc = path.join(this.backendRoot, 'server.pyc');
+    if (fs.existsSync(serverPyc)) {
+      try {
+        fs.unlinkSync(serverPy);
+        onLog('info', '源码保护完成：server.py → server.pyc');
+      } catch {
+        onLog('warn', 'server.py 删除失败（可能被占用），保留源码');
+      }
+    }
   }
 
   // ── 健康检查 ──────────────────────────────────────────────

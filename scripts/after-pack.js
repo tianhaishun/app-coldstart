@@ -23,18 +23,24 @@ exports.default = async function (context) {
     return;
   }
 
-  // 优先用内置 Python 编译（保证字节码 magic number 匹配）
+  // 源码保护策略：
+  //   - Windows（内嵌 Python 3.11.9 固定）：构建时编译 server.py → server.pyc，
+  //     运行时是同一个 Python，magic number 必然匹配。✅
+  //   - Mac（用户自己的 Python，版本不可控）：构建时编译的 .pyc 可能和用户
+  //     的 Python 版本不匹配（bad magic number → App 打不开！）。
+  //     因此 Mac 包保留 server.py 源码，由 python-manager.js 在首次启动时
+  //     用实际运行的 Python 做「运行时编译」（同样产 .pyc + 删源码）。
   const embedPython = path.join(context.appOutDir, 'resources', 'python-embed', 'python.exe');
-  // 跨平台 venv 路径：Windows = .venv\Scripts\python.exe，Mac = .venv/bin/python
-  const venvPython = process.platform === 'win32'
-    ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
-    : path.join(__dirname, '..', '.venv', 'bin', 'python');
-  const pythonExe = fs.existsSync(embedPython) ? embedPython : venvPython;
+
+  if (!fs.existsSync(embedPython)) {
+    console.log('  [after-pack] 非内嵌 Python 平台（Mac），保留 server.py，由运行时编译保护');
+    return;
+  }
 
   console.log('  [after-pack] 编译 server.py → server.pyc ...');
 
   try {
-    execFileSync(pythonExe, ['-m', 'compileall', '-b', serverPy], {
+    execFileSync(embedPython, ['-m', 'compileall', '-b', serverPy], {
       cwd: backendDir,
       stdio: 'pipe',
       timeout: 30_000,
