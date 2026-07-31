@@ -25,7 +25,10 @@ exports.default = async function (context) {
 
   // 优先用内置 Python 编译（保证字节码 magic number 匹配）
   const embedPython = path.join(context.appOutDir, 'resources', 'python-embed', 'python.exe');
-  const venvPython = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+  // 跨平台 venv 路径：Windows = .venv\Scripts\python.exe，Mac = .venv/bin/python
+  const venvPython = process.platform === 'win32'
+    ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
+    : path.join(__dirname, '..', '.venv', 'bin', 'python');
   const pythonExe = fs.existsSync(embedPython) ? embedPython : venvPython;
 
   console.log('  [after-pack] 编译 server.py → server.pyc ...');

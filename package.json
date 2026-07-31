@@ -30,11 +30,7 @@
     "extraResources": [
       { "from": "server.py", "to": "backend/server.py" },
       { "from": "requirements.txt", "to": "backend/requirements.txt" },
-      { "from": "adb/", "to": "backend/adb/" },
-      { "from": "ios/", "to": "backend/ios/" },
       { "from": "static/", "to": "backend/static/" },
-      { "from": "scrcpy/", "to": "scrcpy/" },
-      { "from": "python-embed/", "to": "python-embed/", "filter": ["**/*"] },
       { "from": "CHANGELOG.md", "to": "CHANGELOG.md" }
     ],
     "afterPack": "scripts/after-pack.js",
@@ -43,7 +39,21 @@
         "nsis"
       ],
       "icon": "build/icon.ico",
-      "artifactName": "${productName}-${version}-setup.${ext}"
+      "artifactName": "${productName}-${version}-setup.${ext}",
+      "extraResources": [
+        { "from": "adb/", "to": "backend/adb/" },
+        { "from": "ios/", "to": "backend/ios/" },
+        { "from": "scrcpy/", "to": "scrcpy/" },
+        { "from": "python-embed/", "to": "python-embed/", "filter": ["**/*"] }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon-512.png",
+      "category": "public.app-category.developer-tools",
+      "artifactName": "${productName}-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
