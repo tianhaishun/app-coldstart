@@ -2410,10 +2410,15 @@ def cold_start(req: ColdStartReq) -> dict:
 
 STATIC_DIR = ROOT / "static"
 
+# 前端是本地单文件且更新频繁：Chromium 对无 Cache-Control 的 200 响应会做
+# 启发式缓存，导致用户升级后仍看到旧版页面（曾实测：旧 index.html 残留）。
+# 所有前端资源一律 no-store，客户端每次启动都拿最新版本。
+_FRONTEND_NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_FRONTEND_NO_CACHE_HEADERS)
 
 
 @app.get("/{path:path}")
@@ -2428,7 +2433,7 @@ def static_fallback(path: str) -> FileResponse:
         candidate.relative_to(STATIC_DIR.resolve())
     except ValueError:
         # 越出 STATIC_DIR，拒绝（路径穿越攻击）
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers=_FRONTEND_NO_CACHE_HEADERS)
     if candidate.is_file():
-        return FileResponse(candidate)
-    return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(candidate, headers=_FRONTEND_NO_CACHE_HEADERS)
+    return FileResponse(STATIC_DIR / "index.html", headers=_FRONTEND_NO_CACHE_HEADERS)

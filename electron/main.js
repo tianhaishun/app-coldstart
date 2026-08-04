@@ -282,7 +282,11 @@ function createMainWindow() {
   // 加载后端前端页面
   const url = `http://${HOST}:${PORT}/`;
   log('info', `加载前端: ${url}`);
-  mainWindow.loadURL(url);
+  // 先清 Chromium 磁盘缓存再加载：旧版本无 Cache-Control 时的启发式缓存
+  // 会让升级后的用户仍看到旧版前端（实测过），每次启动强制拿最新页面。
+  mainWindow.webContents.session.clearCache().then(() => {
+    mainWindow.loadURL(url);
+  });
 
   // 窗口准备好后显示（避免白屏）
   mainWindow.once('ready-to-show', () => {

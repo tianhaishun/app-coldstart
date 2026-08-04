@@ -2482,17 +2482,18 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 })();
 
 // ── 自动停表：cold_start 后轮询 /api/check_auto
-// 首次：先跳过弹窗再判启动模板；二次：不扫跳过（装后不会再弹允许类），只判启动模板
+// 首次有跳过模板时先处理弹窗；没有跳过模板时直接识别启动模板；二次始终不扫跳过。
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
 // weirdMs：异常阈值（默认 30s）——只标记，不中止；等模板命中或用户停止
 async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
   let lastLogAt = 0;
   let warnedWeird = false;
   let pollCount = 0;
-  const doSkips = checkSkips !== false;
+  // 只有明确传 true 才匹配跳过模板；false/undefined 均直接走启动模板。
+  const doSkips = checkSkips === true;
   autoLog('INFO', 'WAIT', doSkips
-    ? '开始轮询识别：优先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
-    : '开始轮询识别：二次冷启动不扫跳过弹窗，只匹配「启动成功」模板；命中且连续确认后停表');
+    ? '开始轮询识别：先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
+    : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表');
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
@@ -2770,7 +2771,8 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   const body = { mode: launchMode, package: pkg };
   if (launchMode === 'tap') { body.x = x; body.y = y; }
   const isFirst = label === '首次';
-  const checkSkips = isFirst;  // 仅首次扫允许/通知类跳过弹窗；二次不再扫
+  // 没有配置跳过弹窗模板时，直接匹配启动成功模板，不走跳过弹窗分支。
+  const checkSkips = isFirst && skipTemplateCount > 0;  // 仅首次且确有模板时扫描跳过弹窗；二次不扫
   const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
   autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…');
   const r = await fetch(API + '/api/cold_start', {
@@ -2790,7 +2792,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   const confNeed = j.marker_confirm_frames != null ? j.marker_confirm_frames : 1;
   const rising = j.marker_rising_edge !== false;
   const risingSeeded = j.marker_rising_seeded === true;
-  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 本趟不扫跳过弹窗'));
+  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'));
   return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips);
 }
 
