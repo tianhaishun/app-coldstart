@@ -511,7 +511,7 @@
         <div class="grid grid-cols-4 gap-1.5 shrink-0">
           <div>
             <label class="block text-[9px] font-mono font-bold text-on-surface-variant mb-1" title="仅标记异常，不中止等待；≥此秒数的样本会标异常并可补跑">异常阈值(s)</label>
-            <input id="autoTimeout" type="number" min="5" max="300" value="30" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <input id="autoTimeout" type="number" min="5" max="300" value="35" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
           </div>
           <div>
             <label class="block text-[9px] font-mono font-bold text-on-surface-variant mb-1" title="每次 check 返回后的空等；0=立刻下一帧（推荐，瓶颈在截图）">轮询(ms)</label>
@@ -668,10 +668,12 @@
       <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
         <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">📋 自动测速报告</span>
         <div class="flex gap-1">
+          <button id="reportRegenBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="删除样本后重算均值与报告文本">⟳ 重算</button>
           <button id="reportCopyBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">复制</button>
           <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">CSV</button>
         </div>
       </div>
+      <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
       <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
     </div>
   </aside>
@@ -2181,6 +2183,7 @@ let skipPickingMode = false;      // 是否处于"添加跳过按钮"模式
 let skipTemplateCount = 0;        // 当前跳过模板数量（可选，不影响开跑）
 let auditLogLines = [];           // 运行审计纯文本行（复制 / 附报告）
 let lastRunAuditLog = [];         // 最近一次 run 的日志快照
+let lastReportCtx = null;         // 最近一次报告上下文（「⟳ 重算」与 CSV 用，含 runStartIndex）
 let projectDirty = false;         // 相对已保存项目有未保存改动
 let autoGateReady = false;        // 开跑闸门是否全绿
 
@@ -2484,7 +2487,7 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 // ── 自动停表：cold_start 后轮询 /api/check_auto
 // 首次有跳过模板时先处理弹窗；没有跳过模板时直接识别启动模板；二次始终不扫跳过。
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
-// weirdMs：异常阈值（默认 30s）——只标记，不中止；等模板命中或用户停止
+// weirdMs：异常阈值（默认 35s）——只标记，不中止；等模板命中或用户停止
 async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
   let lastLogAt = 0;
   let warnedWeird = false;
@@ -2499,7 +2502,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
     const elapsed = performance.now() - startTs;
     if (!warnedWeird && weirdMs > 0 && elapsed > weirdMs) {
       warnedWeird = true;
-      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后会标「异常」并可补跑`);
+      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`);
     }
     try {
       const qs = doSkips ? '' : '?check_skips=false';
@@ -2530,8 +2533,9 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
           const total = Math.max(0, rawMs - shotCost);
           const thr = j.threshold != null ? j.threshold : 0.85;
           const need = j.confirm_need != null ? j.confirm_need : 1;
-          // 异常仍按墙钟等待判断（扣截图前是否已拖太久）
-          const abnormal = weirdMs > 0 && rawMs >= weirdMs;
+          // 异常按记录时间判断（已扣命中帧截图耗时），与表格/报告口径一致。
+          // 不能按墙钟 rawMs 判断：截图偏慢时会出现「记录 14.273s < 阈值 15s 却被标异常」的误标。
+          const abnormal = weirdMs > 0 && total >= weirdMs;
           autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`);
           return { time: total, abnormal, raw_ms: rawMs, shot_ms: shotCost };
         }
@@ -2609,7 +2613,7 @@ async function runAutoLoop() {
   const apkPath = $('apkPath').value.trim();
   const x = parseFloat($('tapX').value);
   const y = parseFloat($('tapY').value);
-  const weirdMs = Math.max(5, parseFloat($('autoTimeout').value) || 30) * 1000;
+  const weirdMs = Math.max(5, parseFloat($('autoTimeout').value) || 35) * 1000;
   const gapMs = Math.max(0, parseFloat($('autoGap').value) || 0);
   const rounds = Math.min(10, Math.max(1, parseInt($('autoRounds').value) || 5));
   const killCoolMs = Math.max(0, (parseFloat($('autoKillCool').value) || 0) * 1000);
@@ -2868,7 +2872,7 @@ function renderAutoReport(ctx) {
   L.push(`轮数        计划 ${planned} 轮` + (extra ? ` + 补跑 ${extra}` : '') + `（实际 ${ctx.rounds} · 首次 ${firsts.length} + 二次 ${seconds.length}）`);
   if (ctx.weirdSec != null) L.push(`异常阈值  ${ctx.weirdSec}s（≥此值标记异常，不中止等待）`);
   const abnList = runRecords.filter(r => r.abnormal);
-  if (abnList.length) L.push(`异常样本  ${abnList.length} 条（报告仍计入均值；可自行删除）`);
+  if (abnList.length) L.push(`异常样本  ${abnList.length} 条（报告仍计入均值；可在上方样本列表点 ✕ 删除后「⟳ 重算」）`);
   L.push(`总耗时      ${ctx.totalSec}s`);
   if (!ctx.success) {
     L.push(`状态        ✗ 中止：${ctx.error}`);
@@ -2903,7 +2907,7 @@ function renderAutoReport(ctx) {
   L.push('· 计时：单一 performance.now() 时钟，起点=服务端 cold_start 返回后，终点=模板连续确认命中');
   L.push('· 终点：认出启动成功画面；记入耗时 = 墙钟 − 命中帧截图耗时；SKIP 仅首次');
   L.push('· 测前：am kill-all 清后台 + force_stop 目标包 + 冷却，再 cold_start');
-  L.push('· 异常阈值：默认 30s，只标记不中止；出现异常可补跑（最多 +2 轮）；是否删除异常样本由你决定');
+  L.push('· 异常阈值：默认 35s，只标记不中止；出现异常可补跑（最多 +2 轮）；删除异常样本：报告上方列表点 ✕，自动重算');
   L.push('· 单次检测耗时主要在 adb 截图（shot_ms），匹配本身通常 <10ms（见运行审计日志）');
   if (reportMode === 'pkg') {
     L.push('· 本轮为包名启动：绕过 Launcher 触摸，不依赖桌面图标位置');
@@ -2923,9 +2927,57 @@ function renderAutoReport(ctx) {
   el.textContent = L.join('\n');
   card.classList.remove('hidden');
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  // ── 本轮样本交互列表：可删异常样本，删除后自动重算报告与统计（不用翻历史列表/复制 CSV）──
+  const samplesBox = $('reportSamples');
+  const extremeTag = new Map();  // records 索引 -> 'max'|'min'（n>=3 时每组剔 1 最大 + 1 最小，与明细一致）
+  function markExtreme(list) {
+    const vals = list.map(r => r.time);
+    if (vals.length >= 3) {
+      const riMax = records.indexOf(list[vals.indexOf(Math.max(...vals))]);
+      const riMin = records.indexOf(list[vals.indexOf(Math.min(...vals))]);
+      if (riMax >= 0) extremeTag.set(riMax, 'max');
+      if (riMin >= 0) extremeTag.set(riMin, 'min');
+    }
+  }
+  markExtreme(firsts);
+  markExtreme(seconds);
+  if (runRecords.length) {
+    samplesBox.classList.remove('hidden');
+    let fi = 0, si = 0;
+    const rows = runRecords.map((r, i) => {
+      const n = r.type === 'first' ? ++fi : ++si;
+      const ridx = records.indexOf(r);
+      const typeTag = r.type === 'first'
+        ? '<span class="tag-type tag-first">首</span>'
+        : '<span class="tag-type tag-second">二</span>';
+      const tag = extremeTag.has(ridx)
+        ? `<span class="tag ${extremeTag.get(ridx)}">${extremeTag.get(ridx) === 'max' ? 'MAX' : 'MIN'}</span>` : '';
+      const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除后自动重算">异常</span>' : '';
+      return `<div class="hist-item"><span class="idx">#${n}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
+    }).join('');
+    samplesBox.innerHTML =
+      `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">本轮样本 ${runRecords.length} 条（首次 ${firsts.length} + 二次 ${seconds.length}）· 点 ✕ 删除后自动重算报告与统计</div>` +
+      `<div class="p-1.5 flex flex-col gap-0.5 custom-scrollbar max-h-[180px] overflow-y-auto">${rows}</div>`;
+    samplesBox.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
+      const rec = runRecords[parseInt(b.dataset.ridx)];
+      const ri = records.indexOf(rec);
+      if (ri < 0) return;
+      records.splice(ri, 1);
+      saveRecords(); renderHistory(); renderStats();
+      renderAutoReport(ctx);  // ctx 全是原始值，可安全复用重算
+    }));
+  } else {
+    samplesBox.classList.add('hidden');
+  }
+  lastReportCtx = ctx;
 }
 
-// ── 报告区按钮：复制文本 / 下载 CSV ──
+// ── 报告区按钮：重算 / 复制文本 / 下载 CSV ──
+$('reportRegenBtn').addEventListener('click', () => {
+  if (!lastReportCtx) return;
+  renderAutoReport(lastReportCtx);  // 删除样本后重算均值与报告文本
+});
 $('reportCopyBtn').addEventListener('click', async () => {
   const text = $('autoReport').textContent;
   if (!text) return;
@@ -2943,11 +2995,19 @@ $('reportCopyBtn').addEventListener('click', async () => {
   }
 });
 $('reportCsvBtn').addEventListener('click', () => {
-  // 只导出最近一次 run_id 的记录（审核高5：不混入历史批次）
-  const autoAll = records.filter(r => r.source === 'auto' && r.run_id);
-  if (!autoAll.length) { uiAlert('无自动测速数据'); return; }
-  const latestRunId = autoAll[autoAll.length - 1].run_id;
-  const runRecords = autoAll.filter(r => r.run_id === latestRunId);
+  // 只导出当前报告对应的本轮记录（审核高5：不混入历史批次）。
+  // 用报告上下文的 runStartIndex 而非「最后一条记录的 run_id」——
+  // 否则把最新一轮样本删光后，会退回到导出上一轮的数据。
+  let runRecords;
+  if (lastReportCtx && lastReportCtx.runStartIndex != null) {
+    runRecords = records.slice(lastReportCtx.runStartIndex).filter(r => r.source === 'auto');
+  } else {
+    const autoAll = records.filter(r => r.source === 'auto' && r.run_id);
+    if (!autoAll.length) { uiAlert('无自动测速数据'); return; }
+    const latestRunId = autoAll[autoAll.length - 1].run_id;
+    runRecords = autoAll.filter(r => r.run_id === latestRunId);
+  }
+  if (!runRecords.length) { uiAlert('本轮无数据'); return; }
   const rows = [['type', 'round', 'time_ms', 'time_s', 'date']];
   runRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), (r.time/1000).toFixed(3), r.date]));
   const csv = '\uFEFF' + rows.map(row => row.join(',')).join('\n');  // BOM 防 Excel 乱码
