@@ -2,8 +2,6 @@
 
 > Electron 桌面客户端 + Python FastAPI 后端。Android（ADB）+ iOS（libimobiledevice）双平台冷启动测速，scrcpy 实时镜像，模板比对自动停表。
 
-**[📦 下载安装包](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases/v2.0.0)**
-
 ---
 
 ## ✨ 核心能力
@@ -20,20 +18,37 @@
 
 ## 🚀 快速开始
 
-### 方式一：下载安装包（推荐）
+桌面客户端是主要形态，通过一键启动脚本运行（**不再需要安装包**）。
 
-1. 从 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases) 下载 `AppColdStart-2.0.0-setup.exe`
-2. 双击安装（安装过程中自动初始化 OCR 引擎，有分步进度日志）
-3. 桌面出现 AppColdStart 图标，双击启动
-4. 启动时显示加载动画，后端就绪后自动进入主界面
+### 方式一：一键启动脚本（推荐）
 
-**无需安装 Python，无需联网配置，装完即用。** 内置完整 Python 运行时 + ADB + scrcpy + iOS 工具链。
+**Windows**：双击 `Start.bat`
 
-### 方式二：浏览器模式（Start.bat）
+**Mac**：终端执行 `bash start-mac.sh`
 
-双击 `Start.bat` —— 首次自动建 venv + 装依赖，启动后端并打开浏览器。
+脚本按当前环境自动处理，只装缺失项，重复执行无副作用：
 
-> ⚠️ 浏览器模式无 scrcpy 镜像 / 录屏 / iOS 支持，仅 Android 截图轮询。
+| 依赖 | Windows（Start.bat） | Mac（start-mac.sh） |
+|---|---|---|
+| Node.js / npm | 需预装（脚本会检查并提示） | brew 自动安装 |
+| adb | 自动下载官方 platform-tools 到 `adb/` | brew 安装 android-platform-tools（PATH 生效） |
+| scrcpy（镜像/录屏） | 自动下载上游 v3.3 到 `scrcpy/` | brew 安装并符号链接进 `scrcpy/` |
+| iOS 工具链 | 缺失时提示手动拷贝到 `ios/` | brew 安装 libimobiledevice + ideviceinstaller |
+| Electron + Python 依赖 | `npm install` + 客户端闪屏内自动建 `.venv` | 同左 |
+
+首次启动较慢（下载 Electron / 建 venv / 装 Python 依赖，1-3 分钟），之后秒开。
+
+> 要求：Windows 需预装 [Node.js LTS](https://nodejs.org/)（`winget install OpenJS.NodeJS.LTS`）；Mac 需装 [Homebrew](https://brew.sh/)（脚本会自动安装）。手机需开启 USB 调试。
+
+### 方式二：浏览器模式（备用，局域网访问用）
+
+双击 `Start-Web.bat` —— 首次自动建 venv + 装依赖，启动后端并打开浏览器（监听 `0.0.0.0`，同网段同事可用电脑 IP 访问）。
+
+> ⚠️ 浏览器模式无 scrcpy 镜像 / 录屏功能，仅 Android 截图轮询。
+
+### 方式三：安装包（历史发布）
+
+v2.0.0 及之前的安装包见 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases)，内置完整运行时，无需任何前置环境。
 
 ---
 

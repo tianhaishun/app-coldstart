@@ -26,6 +26,7 @@ import gzip
 import hashlib
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -47,8 +48,13 @@ ADB_EXE = str(_BUNDLED_ADB) if _BUNDLED_ADB.exists() else "adb"
 
 # 内置 iOS 工具链（同目录 ios\\idevice_id.exe），借鉴 XYLog 的 resolveIosBinaryPath 模式
 # 打包后 ROOT 落在 resources/backend，ios/ 在 extraResources 里
+# 找不到内置二进制时回退 PATH 里的 idevice_id（Mac 上用 brew 装 libimobiledevice 即在此列），
+# 与上方 ADB_EXE 的回退策略一致。
 _BUNDLED_IDEVICE_ID = ROOT / "ios" / "idevice_id.exe"
-IDEVICE_ID_EXE = str(_BUNDLED_IDEVICE_ID) if _BUNDLED_IDEVICE_ID.exists() else None
+IDEVICE_ID_EXE = (
+    str(_BUNDLED_IDEVICE_ID) if _BUNDLED_IDEVICE_ID.exists()
+    else shutil.which("idevice_id")
+)
 
 # APK 上传目录（每次上传保留原始文件名，不再覆盖式存储）。
 # 复数 _cst_uploads 与老的单数 _cst_upload.apk 区分；启动时整目录清空重建。
