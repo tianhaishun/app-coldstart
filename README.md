@@ -24,7 +24,7 @@
 
 **Windows**：双击 `Start.bat`
 
-**Mac**：终端执行 `bash start-mac.sh`
+**Mac**：双击 `Start-Mac.command`（Finder 中直接双击即启动）；或终端执行 `bash start-mac.sh`
 
 脚本按当前环境自动处理，只装缺失项，重复执行无副作用：
 

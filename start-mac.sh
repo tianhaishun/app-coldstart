@@ -2,10 +2,12 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # start-mac.sh — Mac 一键启动脚本（启动桌面客户端）
 #
-# 用法（在 Mac 终端中执行）：
-#   git clone git@git.7k7k.com:tianhaishun/app-coldstart.git
-#   cd app-coldstart
-#   bash start-mac.sh
+# 用法：
+#   方式一（推荐）：Finder 中双击 Start-Mac.command（本脚本的入口壳）
+#   方式二（终端）：
+#     git clone git@git.7k7k.com:tianhaishun/app-coldstart.git
+#     cd app-coldstart
+#     bash start-mac.sh
 #
 # 脚本自动完成（只装缺失的，重复执行无副作用）：
 #   1. 安装 Homebrew 依赖（按平台环境区分）：
