@@ -577,8 +577,11 @@ function createErrorWindow(title, detail) {
 let deviceTrackerProc = null;
 
 function startDeviceTracker() {
-  const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
-  if (!fs.existsSync(adbPath)) return;
+  const bundledName = process.platform === 'win32' ? 'adb.exe' : 'adb';
+  const bundledPath = path.join(pyManager.backendRoot, 'adb', bundledName);
+  // Windows uses the project binary; macOS uses the PATH binary installed by brew.
+  const adbPath = fs.existsSync(bundledPath) ? bundledPath : 'adb';
+  if (adbPath === 'adb' && !pyManager.checkAdbAvailable()) return;
 
   let initialized = false;
   let buffer = '';
@@ -729,9 +732,11 @@ if (!gotLock) {
     disposeDeviceTracker();
     scrcpyManager.dispose();
     pyManager.stop();
-    // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
-    // 借鉴 XYLog Viewer AdbManager._killServerSync，防止 adb.exe 残留导致升级文件锁）
-    const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
+    // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行）。
+    // Windows 优先项目内 adb，Mac 使用 PATH 中由 brew 安装的 adb。
+    const adbName = process.platform === 'win32' ? 'adb.exe' : 'adb';
+    const bundledAdb = path.join(pyManager.backendRoot, 'adb', adbName);
+    const adbPath = fs.existsSync(bundledAdb) ? bundledAdb : adbName;
     try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
   });
 }

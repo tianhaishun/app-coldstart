@@ -23,6 +23,9 @@ projects/
 stitch_adaptive_responsive_shortcut_layout/
 chk.html
 
+# 启动脚本自动下载的私有运行时与依赖完成标记
+.runtime/
+
 # 本地 npm 依赖（Electron / electron-builder）
 node_modules/
 

@@ -30,15 +30,26 @@
 
 | 依赖 | Windows（Start.bat） | Mac（start-mac.sh） |
 |---|---|---|
-| Node.js / npm | 需预装（脚本会检查并提示） | brew 自动安装 |
-| adb | 自动下载官方 platform-tools 到 `adb/` | brew 安装 android-platform-tools（PATH 生效） |
-| scrcpy（镜像/录屏） | 自动下载上游 v3.3 到 `scrcpy/` | brew 安装并符号链接进 `scrcpy/` |
-| iOS 工具链 | 缺失时提示手动拷贝到 `ios/` | brew 安装 libimobiledevice + ideviceinstaller |
-| Electron + Python 依赖 | `npm install` + 客户端闪屏内自动建 `.venv` | 同左 |
+| Node.js / npm | 缺失时自动下载官方 Node.js 私有运行时 | 缺失或版本过低时 brew 自动安装/更新 |
+| Python 3.10+ | 缺失时自动下载官方 Python 3.11.9 私有运行时 | 缺失或版本过低时 brew 自动安装 Python 3.11 |
+| adb | 缺失或 DLL 不全时自动下载官方 platform-tools | 缺失时 brew 安装 android-platform-tools |
+| scrcpy（镜像/录屏） | 缺失或不完整时下载上游 v3.3 | 缺失时 brew 安装并链接到 `scrcpy/` |
+| iOS 工具链 | 自动下载固定版本 libimobiledevice；尝试安装 Apple iTunes/AMDS | brew 安装 libimobiledevice + ideviceinstaller |
+| Electron + Python 依赖 | 脚本检测并执行 `npm install` / venv + pip | 同左 |
 
-首次启动较慢（下载 Electron / 建 venv / 装 Python 依赖，1-3 分钟），之后秒开。
+首次启动较慢（下载运行时、Electron、创建 venv、安装 Python 依赖，可能 1-5 分钟），之后秒开。
 
-> 要求：Windows 需预装 [Node.js LTS](https://nodejs.org/)（`winget install OpenJS.NodeJS.LTS`）；Mac 需装 [Homebrew](https://brew.sh/)（脚本会自动安装）。手机需开启 USB 调试。
+> Windows 和 Mac 均不要求预先安装 Node.js 或 Python。Windows 脚本需要能访问官方依赖源；Mac 脚本首次安装 Homebrew 可能需要管理员授权。手机需开启 USB 调试。缺少 iOS 设备时，iOS 专用工具不影响 Android 核心测速。
+
+> Windows iOS 工具链使用固定版本 `libimobiledevice-v1.4.1-windows-x64-portable.zip`，下载后进行 SHA256 校验；它是第三方预编译包，脚本不接受未校验的文件。核心 Android 测速不依赖它。
+
+> 浏览器备用模式 `Start-Web.bat` 复用 Python/adb/iOS 自举，但不安装 Node、Electron 或 scrcpy。客户端仍是主要使用方式。
+
+### 依赖安装原则
+
+启动脚本会逐项检测外部程序和项目依赖。Windows 没有 Node.js 或 Python 时，使用官方发行包下载到项目私有 `.runtime/`；Mac 使用 Homebrew 安装。Node.js、scrcpy 和 Windows iOS 固定下载包进行 SHA256 校验；校验失败会停止，不会继续使用该文件。Android 依赖是核心必需项，iOS 工具链和 scrcpy 属于功能依赖，安装失败时会明确提示对应功能不可用。Android platform-tools 使用 Google 官方 latest 地址，Apple iTunes 使用 Apple 官方地址。
+
+Windows 客户端启动前会执行 `scripts/start-windows.ps1`；`Start.bat` 只是双击入口，避免把复杂安装逻辑塞进批处理文件。
 
 ### 方式二：浏览器模式（备用，局域网访问用）
 
@@ -134,8 +145,8 @@ iOS 冷启动测试依赖 pymobiledevice3 + libimobiledevice 工具链：
 - 工具**不上传任何数据**
 - 测试记录保存在浏览器 `localStorage`（按项目分桶）
 - Electron 模式后端绑 `127.0.0.1`（仅本机）
-- `Start.bat` 默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，改 `HOST=127.0.0.1`
-- 内置 adb + scrcpy + iOS 工具链，不污染系统 PATH
+- Electron 客户端后端绑定 `127.0.0.1`（仅本机）；`Start-Web.bat` 备用模式才绑定 `0.0.0.0` 供局域网临时访问
+- adb、scrcpy、iOS 工具链由启动脚本按平台准备；Windows 私有 Node/Python 放在 `.runtime/`，不污染系统 PATH
 
 ---
 

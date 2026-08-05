@@ -24,6 +24,10 @@
 *.js   text
 *.json text
 
+# Mac 双击入口与 shell 脚本必须保持 LF，避免 Finder / bash 因 CRLF 解析异常
+*.sh text eol=lf
+*.command text eol=lf
+
 # 二进制：永远不做任何转换
 *.exe  binary
 *.dll  binary

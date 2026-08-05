@@ -80,9 +80,9 @@ class PythonManager {
       : path.join(this.venvDir, 'bin', 'python');
   }
 
-  /** 系统 Python 命令名（venv 不存在时用） */
+  /** 系统 Python 命令名（venv 不存在时用）；启动脚本可注入绝对路径 */
   get systemPython() {
-    return this.isWin ? 'python' : 'python3';
+    return process.env.CST_PYTHON || (this.isWin ? 'python' : 'python3');
   }
 
   /**
@@ -117,6 +117,19 @@ class PythonManager {
   }
 
   // ── 环境检测 ──────────────────────────────────────────────
+
+  /** adb 是否可从项目目录或当前 PATH 使用（设备监听的启动前检查） */
+  checkAdbAvailable() {
+    const adbName = this.isWin ? 'adb.exe' : 'adb';
+    const bundled = path.join(this.backendRoot, 'adb', adbName);
+    if (fs.existsSync(bundled)) return true;
+    try {
+      const result = spawnSync(adbName, ['version'], { stdio: 'ignore', timeout: 5_000 });
+      return result.status === 0;
+    } catch {
+      return false;
+    }
+  }
 
   /** venv 是否已存在且可用 */
   venvExists() {
