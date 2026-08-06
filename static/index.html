@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://127.0.0.1:8766; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:;">
 <title>App 冷启测速 · Cold Start Profiler</title>
 <!-- 离线 Tailwind CSS（编译产物，AGENTS.md §3.3）。零网络依赖，可断网运行 -->
 <link rel="stylesheet" href="/static.css">
@@ -658,7 +659,7 @@
       </div>
       <div class="grid grid-cols-3 gap-1.5 p-2 border-t border-outline-variant shrink-0">
         <button id="copyBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">复制报告</button>
-        <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">导出 CSV</button>
+        <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">导出 Excel</button>
         <button id="clearBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs">清空</button>
       </div>
     </div>
@@ -670,7 +671,7 @@
         <div class="flex gap-1">
           <button id="reportRegenBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="删除样本后重算均值与报告文本">⟳ 重算</button>
           <button id="reportCopyBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">复制</button>
-          <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">CSV</button>
+          <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">Excel</button>
         </div>
       </div>
       <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
@@ -680,6 +681,7 @@
 
 </main>
 
+<script src="/xlsx.full.min.js"></script>
 <script>
 
 const API = '';
@@ -1263,15 +1265,16 @@ $('browseApkBtn').addEventListener('click', async () => {
       ],
     });
     if (result.canceled || !result.filePath) return;
-    // 用 fetch 上传到后端（与拖拽上传同一套逻辑）
+    // Electron 不能在 renderer 中 fetch(file://) 读取本地路径；交给主进程读取并上传。
     try {
-      const fileResp = await fetch(result.filePath);
-      const blob = await fileResp.blob();
-      const file = new File([blob], result.filePath.split(/[/\\]/).pop());
-      uploadApkFile(file);
+      const uploaded = await window.electronAPI.uploadApk(result.filePath);
+      if (!uploaded?.ok) throw new Error(uploaded?.error || '上传失败');
+      $('apkPath').value = uploaded.path;
+      saveConfig();
+      showApkUploaded(uploaded.original_name || result.filePath.split(/[/\\]/).pop(), uploaded.size_mb);
+      refreshAutoChecklist();
     } catch(e) {
-      // Electron 下 fetch('C:\\...') 可能被 webSecurity 拦截；回退到 input[type=file]
-      $('apkFileInput').click();
+      uiAlert('上传失败', e.message, 'error');
     }
   } else {
     $('apkFileInput').click();
@@ -1907,7 +1910,7 @@ $('reinstallBtn').addEventListener('click', reinstall);
 $('forceStopBtn').addEventListener('click', forceStop);
 $('backHomeBtn').addEventListener('click', () => pressKey(3));
 
-// ── 报告/CSV ──
+// ── 报告/Excel ──
 function buildReport() {
   const s = computeStats();
   const gs = computeStatsGrouped();
@@ -2038,11 +2041,24 @@ $('csvBtn').addEventListener('click', () => {
   L.push(`最大值,${fmt(s.max)} s`);
   L.push(`最小值,${fmt(s.min)} s`);
   L.push(`去极值均值,${fmt(s.avg)} s`);
-  const blob = new Blob(['\uFEFF' + L.join('\n')], { type: 'text/csv;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `冷启动_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
-  a.click();
+  if (typeof XLSX === 'undefined') {
+    uiAlert('\u5BFC\u51FA\u5931\u8D25', 'Excel \u7EC4\u4EF6\u672A\u52A0\u8F7D\uFF0C\u8BF7\u5237\u65B0\u5BA2\u6237\u7AEF\u540E\u91CD\u8BD5\u3002', 'error');
+    return;
+  }
+  const detailRows = [['\u5E8F\u53F7', '\u7C7B\u578B', '\u8017\u65F6(s)', '\u91C7\u96C6\u65F6\u95F4', '\u72B6\u6001']];
+  records.forEach((r, i) => {
+    const idx = i + 1;
+    detailRows.push([idx, idx % 2 ? '\u9996\u6B21' : '\u4E8C\u6B21', Number((r.time / 1000).toFixed(3)), new Date(r.date).toLocaleString('zh-CN'), r.abnormal ? '\u5F02\u5E38' : '\u6709\u6548']);
+  });
+  const book = XLSX.utils.book_new();
+  const summarySheet = XLSX.utils.aoa_to_sheet(L.map(line => [line]));
+  const detailSheet = XLSX.utils.aoa_to_sheet(detailRows);
+  summarySheet['!cols'] = [{ wch: 100 }];
+  detailSheet['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 }];
+  detailSheet['!autofilter'] = { ref: detailSheet['!ref'] };
+  XLSX.utils.book_append_sheet(book, summarySheet, '\u62A5\u544A\u6C47\u603B');
+  XLSX.utils.book_append_sheet(book, detailSheet, '\u6837\u672C\u660E\u7EC6');
+  XLSX.writeFile(book, `\u51B7\u542F\u52A8_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.xlsx`, { bookType: 'xlsx', compression: true });
 });
 
 // ── 快捷键（方案1：取消 Space 手动计时）──
@@ -2625,6 +2641,16 @@ async function runAutoLoop() {
     uiAlert('请先补齐开跑检查中的必选项（红色 ✗）', '', 'warning');
     return;
   }
+  if (launchMode === 'pkg' && !pkg) {
+    setState('err', '包名启动需要填写包名');
+    uiAlert('无法开始自动循环', '请填写已安装应用的包名。', 'warning');
+    return;
+  }
+  if (launchMode === 'tap' && (!Number.isFinite(x) || !Number.isFinite(y))) {
+    setState('err', '模拟点击需要先设置图标坐标');
+    uiAlert('无法开始自动循环', '请先设置图标坐标。', 'warning');
+    return;
+  }
 
   // 开跑前自检（不占 adb 锁）：APK 是否还在、模板是否已设
   let preflight = null;
@@ -2789,7 +2815,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
     const msg = typeof d === 'string' ? d
       : Array.isArray(d) ? (d[0]?.msg || JSON.stringify(d))
       : (d || j.error || `HTTP ${r.status}`);
-    throw new Error(`${label}启动失败：${msg}`);
+    throw new Error(`${label}启动失败（HTTP ${r.status}）：${msg}`);
   }
   // §2.1：响应回来后直接打点。直播已在整段循环关闭，此处不必再 stopLive。
   const startTs = performance.now();
@@ -2973,7 +2999,7 @@ function renderAutoReport(ctx) {
   lastReportCtx = ctx;
 }
 
-// ── 报告区按钮：重算 / 复制文本 / 下载 CSV ──
+// ── 报告区按钮：重算 / 复制文本 / 下载 Excel ──
 $('reportRegenBtn').addEventListener('click', () => {
   if (!lastReportCtx) return;
   renderAutoReport(lastReportCtx);  // 删除样本后重算均值与报告文本
@@ -2994,10 +3020,8 @@ $('reportCopyBtn').addEventListener('click', async () => {
     uiAlert('请按 Ctrl+C 复制');
   }
 });
+$('reportCsvBtn').textContent = 'Excel';
 $('reportCsvBtn').addEventListener('click', () => {
-  // 只导出当前报告对应的本轮记录（审核高5：不混入历史批次）。
-  // 用报告上下文的 runStartIndex 而非「最后一条记录的 run_id」——
-  // 否则把最新一轮样本删光后，会退回到导出上一轮的数据。
   let runRecords;
   if (lastReportCtx && lastReportCtx.runStartIndex != null) {
     runRecords = records.slice(lastReportCtx.runStartIndex).filter(r => r.source === 'auto');
@@ -3008,16 +3032,15 @@ $('reportCsvBtn').addEventListener('click', () => {
     runRecords = autoAll.filter(r => r.run_id === latestRunId);
   }
   if (!runRecords.length) { uiAlert('本轮无数据'); return; }
-  const rows = [['type', 'round', 'time_ms', 'time_s', 'date']];
-  runRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), (r.time/1000).toFixed(3), r.date]));
-  const csv = '\uFEFF' + rows.map(row => row.join(',')).join('\n');  // BOM 防 Excel 乱码
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `coldstart_report_${Date.now()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  if (typeof XLSX === 'undefined') { uiAlert('导出失败', 'Excel 组件未加载，请刷新客户端后重试。', 'error'); return; }
+  const rows = [['类型', '轮次', '耗时(ms)', '耗时(s)', '采集时间', '状态']];
+  runRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), Number((r.time / 1000).toFixed(3)), r.date, r.abnormal ? '异常' : '有效']));
+  const book = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  sheet['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 24 }, { wch: 12 }];
+  sheet['!autofilter'] = { ref: sheet['!ref'] };
+  XLSX.utils.book_append_sheet(book, sheet, '样本明细');
+  XLSX.writeFile(book, `coldstart_report_${Date.now()}.xlsx`, { bookType: 'xlsx', compression: true });
 });
 
 // ── 启停按钮绑定 ──

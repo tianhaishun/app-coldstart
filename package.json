@@ -28,13 +28,34 @@
       "electron/**/*"
     ],
     "extraResources": [
-      { "from": "server.py", "to": "backend/server.py" },
-      { "from": "requirements.txt", "to": "backend/requirements.txt" },
-      { "from": "static/", "to": "backend/static/" },
-      { "from": "scripts/warmup.py", "to": "backend/scripts/warmup.py" },
-      { "from": "scripts/scrcpy_stream.py", "to": "backend/scripts/scrcpy_stream.py" },
-      { "from": "scripts/scrcpy_runtime.py", "to": "backend/scripts/scrcpy_runtime.py" },
-      { "from": "CHANGELOG.md", "to": "CHANGELOG.md" }
+      {
+        "from": "server.py",
+        "to": "backend/server.py"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "backend/requirements.txt"
+      },
+      {
+        "from": "static/",
+        "to": "backend/static/"
+      },
+      {
+        "from": "scripts/warmup.py",
+        "to": "backend/scripts/warmup.py"
+      },
+      {
+        "from": "scripts/scrcpy_stream.py",
+        "to": "backend/scripts/scrcpy_stream.py"
+      },
+      {
+        "from": "scripts/scrcpy_runtime.py",
+        "to": "backend/scripts/scrcpy_runtime.py"
+      },
+      {
+        "from": "CHANGELOG.md",
+        "to": "CHANGELOG.md"
+      }
     ],
     "afterPack": "scripts/after-pack.js",
     "win": {
@@ -44,10 +65,25 @@
       "icon": "build/icon.ico",
       "artifactName": "${productName}-${version}-setup.${ext}",
       "extraResources": [
-        { "from": "adb/", "to": "backend/adb/" },
-        { "from": "ios/", "to": "backend/ios/" },
-        { "from": "scrcpy/", "to": "scrcpy/" },
-        { "from": "python-embed/", "to": "python-embed/", "filter": ["**/*"] }
+        {
+          "from": "adb/",
+          "to": "backend/adb/"
+        },
+        {
+          "from": "ios/",
+          "to": "backend/ios/"
+        },
+        {
+          "from": "scrcpy/",
+          "to": "scrcpy/"
+        },
+        {
+          "from": "python-embed/",
+          "to": "python-embed/",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "mac": {
@@ -64,5 +100,8 @@
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh"
     }
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
   }
 }

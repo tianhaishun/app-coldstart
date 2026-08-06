@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * @returns {Promise<{canceled: boolean, filePath?: string}>}
    */
   openFileDialog: (options) => ipcRenderer.invoke('dialog:openFile', options),
+  uploadApk: (filePath) => ipcRenderer.invoke('apk:upload', { filePath }),
 
   /**
    * 原生消息提示框（替代 alert）。

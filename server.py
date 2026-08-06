@@ -2273,7 +2273,9 @@ def clear_skip_templates(req: ClearSkipReq) -> dict:
                 kept.append(t)
         SESSION._skip_templates = kept
         if not removed:
-            raise _err(400, f"找不到跳过模板 id={req.id}")
+            # 删除按钮是幂等操作：前端可能保留旧列表，模板已被清除时
+            # 不应把一次清理失败升级为后续自动测速无法运行。
+            return {"ok": True, "count": len(kept), "already_removed": True}
         return {"ok": True, "count": len(kept)}
 
 

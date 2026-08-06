@@ -24,6 +24,8 @@ const { app, BrowserWindow, shell, Menu, dialog, ipcMain, nativeImage } = requir
 const { execFileSync, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
+const crypto = require('crypto');
 const { PythonManager, HOST, PORT } = require('./python-manager');
 const { ScrcpyManager } = require('./scrcpy-manager');
 
@@ -118,6 +120,7 @@ function createSplashWindow() {
       transition: width 0.5s ease;
     }
   </style>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 </head>
 <body>
   <div class="logo">⏱️ App 冷启测速</div>
@@ -790,6 +793,54 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
  * buttons: 按钮文字数组
  * 返回: { response: 按钮索引, checkboxChecked: bool }
  */
+ipcMain.handle('apk:upload', async (event, { filePath }) => {
+  if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.apk')) {
+    return { ok: false, error: '请选择 .apk 文件' };
+  }
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    return { ok: false, error: 'APK 文件不存在' };
+  }
+  const boundary = `----AppColdStart${crypto.randomBytes(12).toString('hex')}`;
+  const filename = path.basename(resolved).replace(/["\\\r\n]/g, '_');
+  const preamble = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/vnd.android.package-archive\r\n\r\n`,
+    'utf8'
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const stat = fs.statSync(resolved);
+  const contentLength = preamble.length + stat.size + epilogue.length;
+  const result = await new Promise((resolve) => {
+    const req = http.request(`http://${HOST}:${PORT}/api/upload_apk`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': contentLength,
+      },
+      timeout: 120000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          resolve({ ...body, ok: res.statusCode >= 200 && res.statusCode < 300 && body.ok !== false });
+        } catch {
+          resolve({ ok: false, error: `上传响应无效（HTTP ${res.statusCode}）` });
+        }
+      });
+    });
+    req.on('error', err => resolve({ ok: false, error: `上传失败：${err.message}` }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: '上传超时' }); });
+    req.write(preamble);
+    const stream = fs.createReadStream(resolved);
+    stream.on('error', err => { req.destroy(); resolve({ ok: false, error: `读取 APK 失败：${err.message}` }); });
+    stream.on('end', () => req.end(epilogue));
+    stream.pipe(req, { end: false });
+  });
+  return result;
+});
+
 ipcMain.handle('dialog:showMessage', async (event, options) => {
   if (!mainWindow) return { response: 0 };
   const result = await dialog.showMessageBox(mainWindow, {
