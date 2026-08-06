@@ -173,10 +173,21 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 
 **实施建议**：第一步先做纯重构（POC 协议解析 + BufferedStream + matcher 提取为共享模块 `scrcpy_stream.py`，45 项测试保持通过），零风险，可与 macOS 验证并行；第二步 ScrcpyStream（后台线程 + 生命周期 + 截图回退）；第三步 check_auto 双通道 + 回归 29 项测试。
 
+## 第一阶段代码抽取（2026-08-06）
+
+已完成纯重构，未接入 `server.py` / `check_auto`，不改变 POC 行为：
+
+- 新增共享模块 `scripts/scrcpy_stream.py`：集中协议常量、`BufferedStream`、scrcpy 4.x 流头/会话头/媒体 packet 解析、`MarkerMatcher`、PyAV packet 解码和 BGR 帧处理。
+- `scripts/scrcpy_frame_probe.py` 保留设备发现、adb reverse、server 子进程生命周期、duration 循环和统计逻辑；改为调用共享模块。
+- 测试改为直接覆盖共享协议/matcher 实现，同时保留 `scrcpy_frame_probe.read_packet` 的兼容导入面。
+- 系统 Python 测试：40 passed, 5 skipped；项目 `.venv`（含 OpenCV）测试：45 passed；两个模块 `py_compile` 通过。
+- 已连接 Pixel 6a 实机冒烟：5.004s、288 帧、PTS FPS 56.926、PTS P50 16.875ms、解码+BGR P95 3.813ms，清理流程正常。
+
 ## 尚未完成（下一步候选）
 
 1. macOS 实机验证一次（通过标准未满足项）——清单见 `docs/scrcpy-frame-precision-mac-verify.md`，待 Mac 上执行。
-2. 接入实施（按上节决策意见）——第一步代码抽取可与 mac 验证并行开始。
+2. 第二阶段 `ScrcpyStream` 后台线程（生命周期、断流状态、清理/重连）——仍不接入正式测速。
+3. 第三阶段 `check_auto` 视频流优先 + ADB 截图回退，需先补线程/断流测试，再回归 `tests/`。
 
 ## 已知历史结果
 

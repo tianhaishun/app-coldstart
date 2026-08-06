@@ -8,7 +8,6 @@ import os
 import secrets
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -17,117 +16,70 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.scrcpy_stream import (
+        BufferedStream,
+        MarkerMatcher,
+        ProbeError,
+        process_packet,
+        read_packet,
+        read_session,
+        read_stream_header,
+        read_video_packet,
+    )
+except ModuleNotFoundError:
+    # Direct execution as ``python scripts/scrcpy_frame_probe.py`` puts the
+    # scripts directory, rather than the project root, on sys.path.
+    from scrcpy_stream import (
+        BufferedStream,
+        MarkerMatcher,
+        ProbeError,
+        process_packet,
+        read_packet,
+        read_session,
+        read_stream_header,
+        read_video_packet,
+    )
+
 DEFAULT_SCRCPY_VERSION = "4.0"
 READ_POLL_INTERVAL = 0.25
 STREAM_HEADER_TIMEOUT = 5.0
 SOCKET_PREFIX = "scrcpy_"
-DEVICE_NAME_LENGTH = 64
-PACKET_HEADER_SIZE = 12
-SESSION_FLAG = 1 << 63
-CONFIG_FLAG = 1 << 62
-KEY_FRAME_FLAG = 1 << 61
-PTS_MASK = KEY_FRAME_FLAG - 1
-H264_CODEC_ID = 0x68323634
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-class ProbeError(RuntimeError):
-    """A recoverable POC setup or stream error."""
+def summarize(samples: list[dict[str, Any]], duration: float) -> dict[str, Any]:
+    if len(samples) < 2:
+        raise ProbeError(f"POC 在 {duration:.1f}s 内只解码 {len(samples)} 帧，无法统计帧间隔")
+    pts_deltas = [(b["pts_us"] - a["pts_us"]) / 1000 for a, b in zip(samples, samples[1:]) if a["pts_us"] >= 0 and b["pts_us"] >= 0 and b["pts_us"] > a["pts_us"]]
+    receive_deltas = [(b["received_at"] - a["received_at"]) * 1000 for a, b in zip(samples, samples[1:])]
+    decode_ms = [item["decode_to_bgr_ms"] for item in samples]
+    match_samples = [item["match"] for item in samples if "match" in item]
+    match_times = [item["match_ms"] for item in match_samples]
 
+    def percentile(values: list[float], p: float) -> float:
+        ordered = sorted(values)
+        return round(ordered[min(len(ordered) - 1, int(len(ordered) * p))], 3)
 
-class MarkerMatcher:
-    """OpenCV ROI matcher for one decoded scrcpy frame."""
+    def stats(values: list[float]) -> dict[str, float | None]:
+        return {"p50": percentile(values, .5), "p95": percentile(values, .95), "max": round(max(values), 3)} if values else {"p50": None, "p95": None, "max": None}
 
-    def __init__(self, template: Any, cx: float, cy: float, padding: int = 20, threshold: float = 0.85):
-        import cv2
-        if template is None or len(template.shape) < 2:
-            raise ProbeError("启动模板为空或不是有效图像")
-        if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0):
-            raise ProbeError(f"启动模板坐标无效：cx={cx} cy={cy}")
-        if float(template.std()) < 15.0:
-            raise ProbeError("启动模板几乎是纯色（灰度标准差 < 15）")
-        self.cv2 = cv2
-        self.template = template
-        self.cx, self.cy = float(cx), float(cy)
-        self.padding, self.threshold = int(padding), float(threshold)
-        self.template_height, self.template_width = template.shape[:2]
-
-    @classmethod
-    def from_file(cls, path: str | Path, cx: float, cy: float, padding: int = 20, threshold: float = 0.85):
-        import cv2
-        template = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if template is None:
-            raise ProbeError(f"无法读取启动模板：{path}")
-        return cls(template, cx, cy, padding, threshold)
-
-    def match(self, frame: Any) -> dict[str, Any]:
-        started = time.perf_counter()
-        frame_height, frame_width = frame.shape[:2]
-        cx_px, cy_px = int(self.cx * frame_width), int(self.cy * frame_height)
-        sx1 = max(0, cx_px - self.template_width // 2 - self.padding)
-        sy1 = max(0, cy_px - self.template_height // 2 - self.padding)
-        sx2 = min(frame_width, cx_px + self.template_width // 2 + self.padding)
-        sy2 = min(frame_height, cy_px + self.template_height // 2 + self.padding)
-        full_frame = False
-        if sx2 - sx1 < self.template_width or sy2 - sy1 < self.template_height:
-            sx1, sy1, sx2, sy2 = 0, 0, frame_width, frame_height
-            full_frame = True
-        roi = frame[sy1:sy2, sx1:sx2]
-        if roi.shape[0] < self.template_height or roi.shape[1] < self.template_width:
-            return {
-                "confidence": 0.0, "hit": False,
-                "match_ms": round((time.perf_counter() - started) * 1000, 3),
-                "roi_width": int(roi.shape[1]), "roi_height": int(roi.shape[0]),
-                "full_frame_fallback": full_frame,
-            }
-        result = self.cv2.matchTemplate(roi, self.template, self.cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, _ = self.cv2.minMaxLoc(result)
-        return {
-            "confidence": round(float(confidence), 4),
-            "hit": bool(confidence >= self.threshold),
-            "match_ms": round((time.perf_counter() - started) * 1000, 3),
-            "roi_width": int(roi.shape[1]),
-            "roi_height": int(roi.shape[0]),
-            "full_frame_fallback": full_frame,
-        }
-
-
-def read_exact(sock: socket.socket, size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise ProbeError("scrcpy 视频 socket 提前断开")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
-
-class BufferedStream:
-    """Resumable exact reader over a socket.
-
-    Partially received bytes are kept in an internal buffer, so a
-    socket.timeout in the middle of a packet never loses sync: the next
-    read continues from where the previous one stopped.
-    """
-
-    def __init__(self, sock: socket.socket):
-        self.sock = sock
-        self._buffer = bytearray()
-
-    def read_exact(self, size: int) -> bytes:
-        while len(self._buffer) < size:
-            chunk = self.sock.recv(64 * 1024)
-            if not chunk:
-                raise ProbeError("scrcpy 视频 socket 提前断开")
-            self._buffer.extend(chunk)
-        out = bytes(self._buffer[:size])
-        del self._buffer[:size]
-        return out
-
-    def close(self) -> None:
-        self.sock.close()
+    pts_samples = [s for s in samples if s["pts_us"] >= 0]
+    pts_duration_s = (pts_samples[-1]["pts_us"] - pts_samples[0]["pts_us"]) / 1_000_000 if len(pts_samples) >= 2 else 0.0
+    receive_duration_s = samples[-1]["received_at"] - samples[0]["received_at"]
+    return {
+        "duration_s": round(duration, 3), "decoded_frames": len(samples),
+        "pts_fps": round(len(pts_deltas) / pts_duration_s, 3) if pts_duration_s > 0 else None,
+        "receive_fps": round(len(receive_deltas) / receive_duration_s, 3) if receive_duration_s > 0 else None,
+        "pts_interval_ms": stats(pts_deltas), "receive_interval_ms": stats(receive_deltas),
+        "decode_to_bgr_ms": stats(decode_ms), "marker_checked_frames": len(match_samples),
+        "marker_hit_frames": sum(1 for item in match_samples if item["hit"]),
+        "marker_match_ms": stats(match_times),
+        "marker_best_confidence": round(max((item["confidence"] for item in match_samples), default=0.0), 4),
+        "marker_full_frame_fallbacks": sum(1 for item in match_samples if item["full_frame_fallback"]),
+        "first_pts_us": pts_samples[0]["pts_us"] if pts_samples else None,
+        "last_pts_us": pts_samples[-1]["pts_us"] if pts_samples else None,
+    }
 
 
 def resolve_adb_path(value: str | None) -> str:
@@ -169,97 +121,6 @@ def choose_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def read_stream_header(stream: BufferedStream) -> tuple[str, int, int]:
-    device_name = stream.read_exact(DEVICE_NAME_LENGTH).rstrip(b"\x00").decode("utf-8", "replace")
-    if not device_name:
-        raise ProbeError("scrcpy 设备名为空")
-    codec_id = struct.unpack(">I", stream.read_exact(4))[0]
-    if codec_id != H264_CODEC_ID:
-        raise ProbeError(f"期望 H264 codec id，收到 0x{codec_id:08x}")
-    return device_name, codec_id, 0
-
-
-def read_session(stream: BufferedStream) -> tuple[int, int]:
-    header = stream.read_exact(PACKET_HEADER_SIZE)
-    if not (header[0] & 0x80):
-        raise ProbeError("scrcpy session header 缺失")
-    return struct.unpack(">II", header[4:12])
-
-
-def read_video_packet(stream: BufferedStream) -> tuple[int, bytes, bool, tuple[int, int] | None]:
-    header = stream.read_exact(PACKET_HEADER_SIZE)
-    if struct.unpack(">I", header[:4])[0] & 0x80000000:
-        return -1, b"", False, struct.unpack(">II", header[4:12])
-    pts_flags, size = struct.unpack(">QI", header)
-    if size <= 0 or size > 64 * 1024 * 1024:
-        raise ProbeError(f"非法视频 packet size={size}")
-    payload = stream.read_exact(size)
-    if pts_flags & CONFIG_FLAG:
-        return -1, payload, False, None
-    return pts_flags & PTS_MASK, payload, bool(pts_flags & KEY_FRAME_FLAG), None
-
-
-def read_packet(sock: socket.socket) -> tuple[int, bytes, bool]:
-    pts, payload, key, session = read_video_packet(sock)
-    if session is not None:
-        raise ProbeError("读取到 session packet，不能当作媒体 packet")
-    return pts, payload, key
-
-
-def process_packet(codec: Any, payload: bytes, pts_us: int, frame_index: int, samples: list[dict[str, Any]], received_at: float, matcher: MarkerMatcher | None = None) -> int:
-    decoded_at = time.perf_counter()
-    for packet in codec.parse(payload):
-        if pts_us >= 0:
-            packet.pts = packet.dts = pts_us
-        for frame in codec.decode(packet):
-            bgr = frame.to_ndarray(format="bgr24")
-            frame_index += 1
-            sample = {
-                "index": frame_index, "pts_us": pts_us, "received_at": received_at,
-                "decoded_at": time.perf_counter(),
-                "decode_to_bgr_ms": round((time.perf_counter() - decoded_at) * 1000, 3),
-                "width": int(bgr.shape[1]), "height": int(bgr.shape[0]),
-            }
-            if matcher is not None:
-                sample["match"] = matcher.match(bgr)
-            samples.append(sample)
-    return frame_index
-
-
-def summarize(samples: list[dict[str, Any]], duration: float) -> dict[str, Any]:
-    if len(samples) < 2:
-        raise ProbeError(f"POC 在 {duration:.1f}s 内只解码 {len(samples)} 帧，无法统计帧间隔")
-    pts_deltas = [(b["pts_us"] - a["pts_us"]) / 1000 for a, b in zip(samples, samples[1:]) if a["pts_us"] >= 0 and b["pts_us"] >= 0 and b["pts_us"] > a["pts_us"]]
-    receive_deltas = [(b["received_at"] - a["received_at"]) * 1000 for a, b in zip(samples, samples[1:])]
-    decode_ms = [item["decode_to_bgr_ms"] for item in samples]
-    match_samples = [item["match"] for item in samples if "match" in item]
-    match_times = [item["match_ms"] for item in match_samples]
-
-    def percentile(values: list[float], p: float) -> float:
-        ordered = sorted(values)
-        return round(ordered[min(len(ordered) - 1, int(len(ordered) * p))], 3)
-
-    def stats(values: list[float]) -> dict[str, float | None]:
-        return {"p50": percentile(values, .5), "p95": percentile(values, .95), "max": round(max(values), 3)} if values else {"p50": None, "p95": None, "max": None}
-
-    pts_samples = [s for s in samples if s["pts_us"] >= 0]
-    pts_duration_s = (pts_samples[-1]["pts_us"] - pts_samples[0]["pts_us"]) / 1_000_000 if len(pts_samples) >= 2 else 0.0
-    receive_duration_s = samples[-1]["received_at"] - samples[0]["received_at"]
-    return {
-        "duration_s": round(duration, 3), "decoded_frames": len(samples),
-        "pts_fps": round(len(pts_deltas) / pts_duration_s, 3) if pts_duration_s > 0 else None,
-        "receive_fps": round(len(receive_deltas) / receive_duration_s, 3) if receive_duration_s > 0 else None,
-        "pts_interval_ms": stats(pts_deltas), "receive_interval_ms": stats(receive_deltas),
-        "decode_to_bgr_ms": stats(decode_ms), "marker_checked_frames": len(match_samples),
-        "marker_hit_frames": sum(1 for item in match_samples if item["hit"]),
-        "marker_match_ms": stats(match_times),
-        "marker_best_confidence": round(max((item["confidence"] for item in match_samples), default=0.0), 4),
-        "marker_full_frame_fallbacks": sum(1 for item in match_samples if item["full_frame_fallback"]),
-        "first_pts_us": pts_samples[0]["pts_us"] if pts_samples else None,
-        "last_pts_us": pts_samples[-1]["pts_us"] if pts_samples else None,
-    }
-
-
 def start_server(serial: str, adb_path: str, server_path: Path, scid: str, max_fps: int, max_size: int, bitrate: int, version: str) -> tuple[subprocess.Popen[bytes], deque[str]]:
     remote = "/data/local/tmp/scrcpy-frame-probe-server.jar"
     push = adb_run(adb_path, serial, ["push", str(server_path), remote])
@@ -268,10 +129,12 @@ def start_server(serial: str, adb_path: str, server_path: Path, scid: str, max_f
     args = [adb_path, "-s", serial, "shell", "CLASSPATH=" + remote, "app_process", "/", "com.genymobile.scrcpy.Server", version, f"scid={scid}", "log_level=info", "video=true", "audio=false", "control=false", "cleanup=true", f"video_bit_rate={bitrate}", f"max_size={max_size}", f"max_fps={max_fps}", "video_codec=h264", "send_frame_meta=true", "send_codec_meta=true", "send_dummy_byte=true"]
     logs: deque[str] = deque(maxlen=80)
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
     def drain() -> None:
         if proc.stdout:
             for line in proc.stdout:
                 logs.append(line.decode("utf-8", "replace").rstrip())
+
     threading.Thread(target=drain, daemon=True).start()
     return proc, logs
 

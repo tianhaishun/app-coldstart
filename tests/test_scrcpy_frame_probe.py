@@ -15,7 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.scrcpy_frame_probe import (  # noqa: E402
+from scripts.scrcpy_frame_probe import read_packet, summarize  # noqa: E402
+from scripts.scrcpy_stream import (  # noqa: E402
     CONFIG_FLAG,
     H264_CODEC_ID,
     KEY_FRAME_FLAG,
@@ -23,10 +24,8 @@ from scripts.scrcpy_frame_probe import (  # noqa: E402
     MarkerMatcher,
     ProbeError,
     read_exact,
-    read_packet,
     read_session,
     read_stream_header,
-    summarize,
 )
 
 
