@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_SCRCPY_VERSION = "4.0"
+READ_POLL_INTERVAL = 0.25
+STREAM_HEADER_TIMEOUT = 5.0
 SOCKET_PREFIX = "scrcpy_"
 DEVICE_NAME_LENGTH = 64
 PACKET_HEADER_SIZE = 12
@@ -71,6 +73,13 @@ class MarkerMatcher:
             sx1, sy1, sx2, sy2 = 0, 0, frame_width, frame_height
             full_frame = True
         roi = frame[sy1:sy2, sx1:sx2]
+        if roi.shape[0] < self.template_height or roi.shape[1] < self.template_width:
+            return {
+                "confidence": 0.0, "hit": False,
+                "match_ms": round((time.perf_counter() - started) * 1000, 3),
+                "roi_width": int(roi.shape[1]), "roi_height": int(roi.shape[0]),
+                "full_frame_fallback": full_frame,
+            }
         result = self.cv2.matchTemplate(roi, self.template, self.cv2.TM_CCOEFF_NORMED)
         _, confidence, _, _ = self.cv2.minMaxLoc(result)
         return {
@@ -93,6 +102,32 @@ def read_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+class BufferedStream:
+    """Resumable exact reader over a socket.
+
+    Partially received bytes are kept in an internal buffer, so a
+    socket.timeout in the middle of a packet never loses sync: the next
+    read continues from where the previous one stopped.
+    """
+
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+        self._buffer = bytearray()
+
+    def read_exact(self, size: int) -> bytes:
+        while len(self._buffer) < size:
+            chunk = self.sock.recv(64 * 1024)
+            if not chunk:
+                raise ProbeError("scrcpy 视频 socket 提前断开")
+            self._buffer.extend(chunk)
+        out = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return out
+
+    def close(self) -> None:
+        self.sock.close()
 
 
 def resolve_adb_path(value: str | None) -> str:
@@ -134,31 +169,31 @@ def choose_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def read_stream_header(sock: socket.socket) -> tuple[str, int, int]:
-    device_name = read_exact(sock, DEVICE_NAME_LENGTH).rstrip(b"\x00").decode("utf-8", "replace")
+def read_stream_header(stream: BufferedStream) -> tuple[str, int, int]:
+    device_name = stream.read_exact(DEVICE_NAME_LENGTH).rstrip(b"\x00").decode("utf-8", "replace")
     if not device_name:
         raise ProbeError("scrcpy 设备名为空")
-    codec_id = struct.unpack(">I", read_exact(sock, 4))[0]
+    codec_id = struct.unpack(">I", stream.read_exact(4))[0]
     if codec_id != H264_CODEC_ID:
         raise ProbeError(f"期望 H264 codec id，收到 0x{codec_id:08x}")
     return device_name, codec_id, 0
 
 
-def read_session(sock: socket.socket) -> tuple[int, int]:
-    header = read_exact(sock, PACKET_HEADER_SIZE)
+def read_session(stream: BufferedStream) -> tuple[int, int]:
+    header = stream.read_exact(PACKET_HEADER_SIZE)
     if not (header[0] & 0x80):
         raise ProbeError("scrcpy session header 缺失")
     return struct.unpack(">II", header[4:12])
 
 
-def read_video_packet(sock: socket.socket) -> tuple[int, bytes, bool, tuple[int, int] | None]:
-    header = read_exact(sock, PACKET_HEADER_SIZE)
+def read_video_packet(stream: BufferedStream) -> tuple[int, bytes, bool, tuple[int, int] | None]:
+    header = stream.read_exact(PACKET_HEADER_SIZE)
     if struct.unpack(">I", header[:4])[0] & 0x80000000:
         return -1, b"", False, struct.unpack(">II", header[4:12])
     pts_flags, size = struct.unpack(">QI", header)
     if size <= 0 or size > 64 * 1024 * 1024:
         raise ProbeError(f"非法视频 packet size={size}")
-    payload = read_exact(sock, size)
+    payload = stream.read_exact(size)
     if pts_flags & CONFIG_FLAG:
         return -1, payload, False, None
     return pts_flags & PTS_MASK, payload, bool(pts_flags & KEY_FRAME_FLAG), None
@@ -207,7 +242,8 @@ def summarize(samples: list[dict[str, Any]], duration: float) -> dict[str, Any]:
     def stats(values: list[float]) -> dict[str, float | None]:
         return {"p50": percentile(values, .5), "p95": percentile(values, .95), "max": round(max(values), 3)} if values else {"p50": None, "p95": None, "max": None}
 
-    pts_duration_s = (samples[-1]["pts_us"] - samples[0]["pts_us"]) / 1_000_000
+    pts_samples = [s for s in samples if s["pts_us"] >= 0]
+    pts_duration_s = (pts_samples[-1]["pts_us"] - pts_samples[0]["pts_us"]) / 1_000_000 if len(pts_samples) >= 2 else 0.0
     receive_duration_s = samples[-1]["received_at"] - samples[0]["received_at"]
     return {
         "duration_s": round(duration, 3), "decoded_frames": len(samples),
@@ -219,7 +255,8 @@ def summarize(samples: list[dict[str, Any]], duration: float) -> dict[str, Any]:
         "marker_match_ms": stats(match_times),
         "marker_best_confidence": round(max((item["confidence"] for item in match_samples), default=0.0), 4),
         "marker_full_frame_fallbacks": sum(1 for item in match_samples if item["full_frame_fallback"]),
-        "first_pts_us": samples[0]["pts_us"], "last_pts_us": samples[-1]["pts_us"],
+        "first_pts_us": pts_samples[0]["pts_us"] if pts_samples else None,
+        "last_pts_us": pts_samples[-1]["pts_us"] if pts_samples else None,
     }
 
 
@@ -264,22 +301,36 @@ def run_probe(args: argparse.Namespace) -> int:
             except socket.timeout:
                 if time.monotonic() >= deadline: raise ProbeError(f"scrcpy 视频连接超时：{' | '.join(logs)[-1000:]}")
                 if proc.poll() is not None: raise ProbeError(f"scrcpy-server 提前退出：{' | '.join(logs)[-1000:]}")
-        sock.settimeout(None)
-        device_name, _codec, _ = read_stream_header(sock)
-        width, height = read_session(sock)
+        stream = BufferedStream(sock)
+        sock.settimeout(STREAM_HEADER_TIMEOUT)
+        try:
+            device_name, _codec, _ = read_stream_header(stream)
+            width, height = read_session(stream)
+        except socket.timeout:
+            raise ProbeError("等待 scrcpy 流头超时")
         print(f"device: {device_name} serial={serial} stream={width}x{height}")
         import av
         codec = av.CodecContext.create("h264", "r")
         matcher = MarkerMatcher.from_file(args.template, args.template_cx, args.template_cy, args.template_padding, args.template_threshold) if args.template else None
         samples: list[dict[str, Any]] = []; frame_index = 0; start = time.perf_counter()
+        stopped_on_hit = False
+        sock.settimeout(READ_POLL_INTERVAL)
         while time.perf_counter() < start + args.duration:
-            received_at = time.perf_counter(); pts_us, payload, _key, session = read_video_packet(sock)
+            try:
+                received_at = time.perf_counter()
+                pts_us, payload, _key, session = read_video_packet(stream)
+            except socket.timeout:
+                continue
             if session is not None:
                 width, height = session; continue
             frame_index = process_packet(codec, payload, pts_us, frame_index, samples, received_at, matcher)
             if matcher and samples and samples[-1].get("match", {}).get("hit"):
                 print(json.dumps({"marker_hit": samples[-1]["match"], "frame": samples[-1]}, ensure_ascii=False))
-                if args.stop_on_hit: break
+                if args.stop_on_hit:
+                    stopped_on_hit = True
+                    break
+        if stopped_on_hit and len(samples) < 2:
+            return 0
         print(json.dumps(summarize(samples, time.perf_counter() - start), ensure_ascii=False, indent=2))
         return 0
     finally:
@@ -303,5 +354,8 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        try: stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError): pass
     try: raise SystemExit(run_probe(parse_args()))
     except ProbeError as exc: print(f"[FAIL] {exc}", file=sys.stderr); raise SystemExit(1)

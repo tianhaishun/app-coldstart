@@ -6,6 +6,7 @@ Device integration remains a separate manual acceptance step.
 from __future__ import annotations
 
 import io
+import socket
 import struct
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ from scripts.scrcpy_frame_probe import (  # noqa: E402
     CONFIG_FLAG,
     H264_CODEC_ID,
     KEY_FRAME_FLAG,
+    BufferedStream,
     MarkerMatcher,
     ProbeError,
     read_exact,
@@ -36,6 +38,17 @@ class FragmentedSocket:
     def recv(self, size: int) -> bytes:
         return self._data.read(min(size, self._chunk_size))
 
+    def read_exact(self, size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = self.recv(remaining)
+            if not chunk:
+                raise ProbeError("scrcpy 视频 socket 提前断开")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
 
 def cv2_or_skip():
     return pytest.importorskip("cv2", reason="OpenCV is required for matcher tests")
@@ -48,6 +61,49 @@ def test_read_exact_handles_fragmented_socket():
 def test_read_exact_rejects_early_close():
     with pytest.raises(ProbeError, match="提前断开"):
         read_exact(FragmentedSocket(b"abc"), 4)
+
+
+class TimeoutThenDataSocket:
+    """Simulates a socket that times out mid-read, then delivers the rest."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+        self._timeouts_left = 2
+
+    def recv(self, size: int) -> bytes:
+        if self._timeouts_left > 0:
+            self._timeouts_left -= 1
+            raise socket.timeout
+        if self._pos >= len(self._data):
+            return b""
+        n = min(size, 4)
+        out = self._data[self._pos:self._pos + n]
+        self._pos += n
+        return out
+
+
+def _read_with_timeout_retry(read_call):
+    """Run a blocking read the way the probe main loop does: retry on socket.timeout."""
+    while True:
+        try:
+            return read_call()
+        except socket.timeout:
+            continue
+
+
+def test_buffered_stream_recovers_across_timeouts():
+    stream = BufferedStream(TimeoutThenDataSocket(b"0123456789"))
+    assert _read_with_timeout_retry(lambda: stream.read_exact(10)) == b"0123456789"
+
+
+def test_buffered_stream_resumes_partial_packet_after_timeout():
+    raw = struct.pack(">QI", 123 | KEY_FRAME_FLAG, 6) + b"h264!!"
+    stream = BufferedStream(TimeoutThenDataSocket(raw))
+    pts, payload, key = _read_with_timeout_retry(lambda: read_packet(stream))
+    assert pts == 123
+    assert payload == b"h264!!"
+    assert key is True
 
 
 def test_read_stream_header():
@@ -142,6 +198,20 @@ def test_marker_matcher_returns_low_confidence_for_different_frame():
     assert result["confidence"] < 0.85
 
 
+def test_marker_matcher_returns_zero_confidence_when_template_larger_than_frame():
+    cv2_or_skip()
+    import numpy as np
+
+    template = np.zeros((80, 80, 3), dtype=np.uint8)
+    template[10:70, 10:70] = (20, 100, 220)
+    frame = np.zeros((60, 60, 3), dtype=np.uint8)
+    matcher = MarkerMatcher(template, 0.5, 0.5, padding=20, threshold=0.8)
+    result = matcher.match(frame)
+    assert result["hit"] is False
+    assert result["confidence"] == 0.0
+    assert result["full_frame_fallback"] is True
+
+
 def test_summarize_reports_pts_and_receive_cadence():
     samples = [
         {"index": 1, "pts_us": 0, "received_at": 0.0, "decode_to_bgr_ms": 2.0},
@@ -154,3 +224,17 @@ def test_summarize_reports_pts_and_receive_cadence():
     assert result["receive_fps"] == 58.824
     assert result["pts_interval_ms"]["p50"] == 16.667
     assert result["decode_to_bgr_ms"]["p95"] == 3.0
+
+
+def test_summarize_ignores_negative_first_pts():
+    samples = [
+        {"index": 1, "pts_us": -1, "received_at": 0.0, "decode_to_bgr_ms": 2.0},
+        {"index": 2, "pts_us": 16667, "received_at": 0.017, "decode_to_bgr_ms": 3.0},
+        {"index": 3, "pts_us": 33334, "received_at": 0.034, "decode_to_bgr_ms": 2.5},
+    ]
+    result = summarize(samples, 0.034)
+    assert result["decoded_frames"] == 3
+    assert result["pts_fps"] == 59.999
+    assert result["first_pts_us"] == 16667
+    assert result["last_pts_us"] == 33334
+    assert result["pts_interval_ms"]["p50"] == 16.667
