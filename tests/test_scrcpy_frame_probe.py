@@ -63,7 +63,7 @@ def test_read_exact_rejects_early_close():
 
 
 class TimeoutThenDataSocket:
-    """Simulates a socket that times out mid-read, then delivers the rest."""
+    """Simulates a socket that times out before delivering data."""
 
     def __init__(self, data: bytes):
         self._data = data
@@ -82,7 +82,28 @@ class TimeoutThenDataSocket:
         return out
 
 
+class TimeoutDuringPayloadSocket:
+    """Delivers a packet header, times out, then delivers its payload."""
+
+    def __init__(self, data: bytes, header_size: int = 12):
+        self._header = data[:header_size]
+        self._payload = data[header_size:]
+        self._calls = 0
+
+    def recv(self, size: int) -> bytes:
+        self._calls += 1
+        if self._calls == 1:
+            return self._header
+        if self._calls == 2:
+            raise socket.timeout
+        if self._payload:
+            payload, self._payload = self._payload, b""
+            return payload
+        return b""
+
+
 def _read_with_timeout_retry(read_call):
+
     """Run a blocking read the way the probe main loop does: retry on socket.timeout."""
     while True:
         try:
@@ -103,6 +124,15 @@ def test_buffered_stream_resumes_partial_packet_after_timeout():
     assert pts == 123
     assert payload == b"h264!!"
     assert key is True
+
+
+def test_buffered_stream_resumes_payload_after_timeout():
+    raw = struct.pack(">QI", 456, 7) + b"payload"
+    stream = BufferedStream(TimeoutDuringPayloadSocket(raw))
+    pts, payload, key = _read_with_timeout_retry(lambda: read_packet(stream))
+    assert pts == 456
+    assert payload == b"payload"
+    assert key is False
 
 
 def test_read_stream_header():

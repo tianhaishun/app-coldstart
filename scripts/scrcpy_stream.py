@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
-import socket
 import struct
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterator
+
+
+@dataclass(frozen=True)
+class DecodedFrame:
+    """One decoded BGR frame with both device and host timing metadata."""
+
+    image: Any
+    pts_us: int
+    received_at: float
+    decoded_at: float
+    decode_to_bgr_ms: float
+    width: int
+    height: int
+    key_frame: bool = False
+
+
+class ProbeError(RuntimeError):
+    """A recoverable scrcpy stream or matcher error."""
 
 
 DEVICE_NAME_LENGTH = 64
@@ -14,10 +32,6 @@ CONFIG_FLAG = 1 << 62
 KEY_FRAME_FLAG = 1 << 61
 PTS_MASK = KEY_FRAME_FLAG - 1
 H264_CODEC_ID = 0x68323634
-
-
-class ProbeError(RuntimeError):
-    """A recoverable scrcpy stream or matcher error."""
 
 
 class MarkerMatcher:
@@ -117,6 +131,26 @@ class BufferedStream:
         del self._buffer[:size]
         return out
 
+    def read_video_packet(self) -> tuple[int, bytes, bool, tuple[int, int] | None]:
+        """Read one packet while preserving its header across timeouts."""
+
+        header = getattr(self, "_packet_header", None)
+        if header is None:
+            header = self.read_exact(PACKET_HEADER_SIZE)
+            self._packet_header = header
+        if struct.unpack(">I", header[:4])[0] & 0x80000000:
+            self._packet_header = None
+            return -1, b"", False, struct.unpack(">II", header[4:12])
+        pts_flags, size = struct.unpack(">QI", header)
+        if size <= 0 or size > 64 * 1024 * 1024:
+            self._packet_header = None
+            raise ProbeError(f"非法视频 packet size={size}")
+        payload = self.read_exact(size)
+        self._packet_header = None
+        if pts_flags & CONFIG_FLAG:
+            return -1, payload, False, None
+        return pts_flags & PTS_MASK, payload, bool(pts_flags & KEY_FRAME_FLAG), None
+
     def close(self) -> None:
         self.sock.close()
 
@@ -153,6 +187,9 @@ def read_session(stream: Any) -> tuple[int, int]:
 
 
 def read_video_packet(stream: Any) -> tuple[int, bytes, bool, tuple[int, int] | None]:
+    buffered_reader = getattr(stream, "read_video_packet", None)
+    if buffered_reader is not None:
+        return buffered_reader()
     header = stream.read_exact(PACKET_HEADER_SIZE)
     if struct.unpack(">I", header[:4])[0] & 0x80000000:
         return -1, b"", False, struct.unpack(">II", header[4:12])
@@ -172,6 +209,33 @@ def read_packet(stream: Any) -> tuple[int, bytes, bool]:
     return pts, payload, key
 
 
+def decode_payload_frames(
+    codec: Any,
+    payload: bytes,
+    pts_us: int,
+    received_at: float,
+    key_frame: bool = False,
+) -> Iterator[DecodedFrame]:
+    """Decode one H.264 payload into reusable frame records."""
+
+    decoded_at = time.perf_counter()
+    for packet in codec.parse(payload):
+        if pts_us >= 0:
+            packet.pts = packet.dts = pts_us
+        for frame in codec.decode(packet):
+            bgr = frame.to_ndarray(format="bgr24")
+            yield DecodedFrame(
+                image=bgr,
+                pts_us=pts_us,
+                received_at=received_at,
+                decoded_at=time.perf_counter(),
+                decode_to_bgr_ms=round((time.perf_counter() - decoded_at) * 1000, 3),
+                width=int(bgr.shape[1]),
+                height=int(bgr.shape[0]),
+                key_frame=key_frame,
+            )
+
+
 def process_packet(
     codec: Any,
     payload: bytes,
@@ -180,24 +244,35 @@ def process_packet(
     samples: list[dict[str, Any]],
     received_at: float,
     matcher: MarkerMatcher | None = None,
+    key_frame: bool = False,
 ) -> int:
-    decoded_at = time.perf_counter()
-    for packet in codec.parse(payload):
-        if pts_us >= 0:
-            packet.pts = packet.dts = pts_us
-        for frame in codec.decode(packet):
-            bgr = frame.to_ndarray(format="bgr24")
-            frame_index += 1
-            sample = {
-                "index": frame_index,
-                "pts_us": pts_us,
-                "received_at": received_at,
-                "decoded_at": time.perf_counter(),
-                "decode_to_bgr_ms": round((time.perf_counter() - decoded_at) * 1000, 3),
-                "width": int(bgr.shape[1]),
-                "height": int(bgr.shape[0]),
-            }
-            if matcher is not None:
-                sample["match"] = matcher.match(bgr)
-            samples.append(sample)
+    for decoded in decode_payload_frames(codec, payload, pts_us, received_at, key_frame):
+        frame_index += 1
+        sample = {
+            "index": frame_index,
+            "pts_us": decoded.pts_us,
+            "received_at": decoded.received_at,
+            "decoded_at": decoded.decoded_at,
+            "decode_to_bgr_ms": decoded.decode_to_bgr_ms,
+            "width": decoded.width,
+            "height": decoded.height,
+        }
+        if matcher is not None:
+            sample["match"] = matcher.match(decoded.image)
+        samples.append(sample)
     return frame_index
+
+
+__all__ = [
+    "BufferedStream",
+    "DecodedFrame",
+    "MarkerMatcher",
+    "ProbeError",
+    "decode_payload_frames",
+    "process_packet",
+    "read_exact",
+    "read_packet",
+    "read_session",
+    "read_stream_header",
+    "read_video_packet",
+]

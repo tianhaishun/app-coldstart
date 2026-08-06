@@ -126,7 +126,7 @@ def start_server(serial: str, adb_path: str, server_path: Path, scid: str, max_f
     push = adb_run(adb_path, serial, ["push", str(server_path), remote])
     if push.returncode != 0:
         raise ProbeError(push.stderr.decode("utf-8", "replace").strip() or "adb push 失败")
-    args = [adb_path, "-s", serial, "shell", "CLASSPATH=" + remote, "app_process", "/", "com.genymobile.scrcpy.Server", version, f"scid={scid}", "log_level=info", "video=true", "audio=false", "control=false", "cleanup=true", f"video_bit_rate={bitrate}", f"max_size={max_size}", f"max_fps={max_fps}", "video_codec=h264", "send_frame_meta=true", "send_codec_meta=true", "send_dummy_byte=true"]
+    args = [adb_path, "-s", serial, "shell", "CLASSPATH=" + remote, "app_process", "/", "com.genymobile.scrcpy.Server", version, f"scid={scid}", "log_level=info", "video=true", "audio=false", "control=false", "cleanup=true", f"video_bit_rate={bitrate}", f"max_size={max_size}", f"max_fps={max_fps}", "video_codec=h264", "send_frame_meta=true", "send_dummy_byte=true"]
     logs: deque[str] = deque(maxlen=80)
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 

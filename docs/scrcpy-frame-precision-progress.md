@@ -183,11 +183,21 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 - 系统 Python 测试：40 passed, 5 skipped；项目 `.venv`（含 OpenCV）测试：45 passed；两个模块 `py_compile` 通过。
 - 已连接 Pixel 6a 实机冒烟：5.004s、288 帧、PTS FPS 56.926、PTS P50 16.875ms、解码+BGR P95 3.813ms，清理流程正常。
 
+## 第二阶段 ScrcpyStream 运行时（2026-08-06）
+
+已完成独立运行时骨架，仍未接入 `server.py` / `check_auto`：
+
+- 新增 `scripts/scrcpy_runtime.py`：`ScrcpyStreamConfig` + `ScrcpyStream`，负责 adb reverse、推送/启动 scrcpy-server、socket 握手、后台 H.264 解码线程、最新帧缓存、回调、状态、断流错误、stop/reconnect 和资源清理。
+- `scripts/scrcpy_stream.py` 新增 `DecodedFrame` 与 `decode_payload_frames`，POC 与运行时共享同一套解码和协议处理；补强 `BufferedStream` 在 packet payload 中途 timeout 后继续读取，避免丢失数据包同步。
+- 新增 `tests/test_scrcpy_runtime.py`：fake socket/process/decoder 验证启动、握手、最新帧、状态和 stop 清理；另有缺失 server 快速失败测试。
+- 测试：系统 Python `43 passed, 5 skipped`；项目 `.venv` `48 passed`。
+- 实机运行时冒烟（Pixel 6a / scrcpy 4.0 / 720）：5 秒收到 287 帧，最新帧 324×720，单帧解码约 3.7ms，stop 后 adb reverse / 临时 server 清理正常。
+- 修复运行时与 POC 的无效 `send_codec_meta=true` 参数；scrcpy 4.0 不再输出 `Unknown server option` 警告。
+
 ## 尚未完成（下一步候选）
 
 1. macOS 实机验证一次（通过标准未满足项）——清单见 `docs/scrcpy-frame-precision-mac-verify.md`，待 Mac 上执行。
-2. 第二阶段 `ScrcpyStream` 后台线程（生命周期、断流状态、清理/重连）——仍不接入正式测速。
-3. 第三阶段 `check_auto` 视频流优先 + ADB 截图回退，需先补线程/断流测试，再回归 `tests/`。
+2. 第三阶段 `check_auto` 视频流优先 + ADB 截图回退：需先把运行时接到 `Session`，再补启动/设备切换/断流回退测试，回归 `server.py` 29 项测试。
 
 ## 已知历史结果
 
