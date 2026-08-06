@@ -6,7 +6,7 @@
   - 落盘/模板/直播仍可用 `screencap -p` PNG
   - OCR 用 RapidOCR（ONNX，跨平台，归一化坐标输出）
   - 所有 adb 调用集中在 AdbDevice，便于复用 + 加锁
-  - 实时画面走截图轮询（不做 scrcpy 流，保持简单可靠）
+  - 实时画面优先走可选 scrcpy 视频流；流不可用时回退截图轮询
 
 v1 → v2 的关键修复：
   - **计时精度**：新增 `/api/cold_start`，服务端编排 force_stop + tap/launch 一气呵成；
@@ -41,6 +41,26 @@ from typing import Optional, Literal, Any
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+try:
+    from scripts.scrcpy_runtime import ScrcpyStream, ScrcpyStreamConfig
+except ImportError:
+    ScrcpyStream = None
+    ScrcpyStreamConfig = None
+
+STREAM_MAX_SIZE = 720
+STREAM_MAX_FPS = 60
+STREAM_BITRATE = 8_000_000
+STREAM_FRAME_STALE_S = 1.0
+STREAM_VERSION = "4.0"
+_STREAM_SERVER_CANDIDATES = (
+    ROOT / "scrcpy" / "scrcpy-server",
+    ROOT.parent / "scrcpy" / "scrcpy-server",  # packaged: resources/backend → resources/scrcpy
+)
+STREAM_SERVER_PATH = next(
+    (path for path in _STREAM_SERVER_CANDIDATES if path.is_file()),
+    _STREAM_SERVER_CANDIDATES[0],
+)
 
 # 内置 adb（同目录 adb\\adb.exe），找不到再回退 PATH
 _BUNDLED_ADB = ROOT / "adb" / "adb.exe"
@@ -842,8 +862,15 @@ class Session:
         self.marker_check_last_ms = 0.0  # 上次 check 耗时
         self.marker_check_last_conf = 0.0  # 上次置信度
         # 跳过弹窗模板（最多 SKIP_TEMPLATE_MAX 个）。每项：
-        #   id/path/cx/cy/w/h/img/preview；last_tap_at 用于冷却防连点
+        #   id/path/cx/cy/w/h/src_w/src_h/img/preview；last_tap_at 用于冷却防连点
         self._skip_templates: list[dict] = []
+        # 模板采集时的画面尺寸。旧项目没有这些字段时保持 0，视频通道回退截图。
+        self._marker_src_w: int = 0
+        self._marker_src_h: int = 0
+        self._stream: Any = None
+        self._stream_start_thread: Optional[threading.Thread] = None
+        self._stream_start_attempted = False
+        self._stream_retry_after = 0.0
 
     def reset_marker_watch(self, *, after_force_stop: bool = False) -> None:
         """新一次测速开始前清零连续确认 / 本轮已点跳过。
@@ -879,7 +906,16 @@ class Session:
         return self._marker_img
 
     def select(self, serial: Optional[str], platform: str = "android") -> dict:
+        old_stream = None
         with self._lock:
+            changed = serial != self._serial or platform != getattr(self, "_platform", "android")
+            if changed:
+                old_stream = self._stream
+                self._stream = None
+                self._stream_start_attempted = False
+                self._stream_retry_after = 0.0
+                self._stream_start_thread = None
+            needs_stream = platform == "android" and bool(serial) and (changed or self._stream is None)
             self._serial = serial
             self._platform = platform
             if platform == "ios":
@@ -887,7 +923,105 @@ class Session:
             else:
                 self._device = AdbDevice(serial)
             self._last_shot = None
-            return {"serial": serial, "ready": self._device is not None, "platform": platform}
+        if old_stream is not None:
+            old_stream.stop()
+        with self._lock:
+            if (
+                needs_stream
+                and ScrcpyStream is not None
+                and ScrcpyStreamConfig is not None
+            ):
+                self._stream = ScrcpyStream(
+                    ScrcpyStreamConfig(
+                        serial=serial,
+                        adb_path=ADB_EXE,
+                        server_path=STREAM_SERVER_PATH,
+                        scrcpy_version=STREAM_VERSION,
+                        max_fps=STREAM_MAX_FPS,
+                        max_size=STREAM_MAX_SIZE,
+                        bitrate=STREAM_BITRATE,
+                    )
+                )
+            result = {"serial": serial, "ready": self._device is not None, "platform": platform}
+        if platform == "android" and serial:
+            self._start_stream_async()
+        return result
+
+    def _start_stream_async(self) -> None:
+        with self._lock:
+            stream = self._stream
+            if stream is None or self._stream_start_attempted:
+                return
+            now = time.monotonic()
+            if now < self._stream_retry_after:
+                return
+            self._stream_start_attempted = True
+            self._stream_start_thread = threading.Thread(
+                target=self._start_stream_worker,
+                args=(stream,),
+                name="cst-scrcpy-start",
+                daemon=True,
+            )
+            self._stream_start_thread.start()
+
+    def _start_stream_worker(self, stream: Any) -> None:
+        try:
+            stream.start()
+            print("[stream] scrcpy 视频流已就绪", flush=True)
+        except Exception as exc:
+            with self._lock:
+                if self._stream is stream:
+                    self._stream_start_attempted = False
+                    self._stream_retry_after = time.monotonic() + 5.0
+            print(f"[stream] 视频流不可用，回退 ADB 截图：{exc}", flush=True)
+
+    def _latest_stream_frame(self):
+        """Return a fresh latest frame without waiting or taking the Session lock."""
+        stream = self._stream
+        if stream is None:
+            self._start_stream_async()
+            return None
+        if not stream.is_available:
+            self._start_stream_async()
+            return None
+        frame = stream.latest_frame
+        if frame is None or time.monotonic() - frame.received_at > STREAM_FRAME_STALE_S:
+            return None
+        return frame
+
+    def _stream_scene(self, *, require_skips: bool = False):
+        """Return a fresh stream frame only when every needed template matches."""
+        frame = self._latest_stream_frame()
+        if frame is None:
+            return None
+        if self._marker_src_h <= 0 or self._marker_src_w <= 0:
+            return None
+        if self._marker_src_h != frame.height or self._marker_src_w != frame.width:
+            return None
+        if require_skips and any(
+            t.get("src_w") != frame.width or t.get("src_h") != frame.height
+            for t in self._skip_templates
+            if t.get("id") not in self._skip_fired_ids
+        ):
+            return None
+        return frame
+
+    def stream_status(self) -> dict:
+        stream = self._stream
+        if stream is None:
+            return {"available": False, "configured": False, "error": None}
+        status = stream.status()
+        status["configured"] = True
+        return status
+
+    def stop_stream(self) -> None:
+        with self._lock:
+            stream = self._stream
+            self._stream = None
+            self._stream_start_thread = None
+            self._stream_start_attempted = False
+        if stream is not None:
+            stream.stop()
 
     def current(self) -> dict:
         return {"serial": self._serial, "ready": self._device is not None, "platform": getattr(self, '_platform', 'android')}
@@ -1084,6 +1218,7 @@ def _kill_adb_server() -> None:
 async def lifespan(app: FastAPI):
     _cleanup_stale_temp_files()
     yield
+    SESSION.stop_stream()
     _kill_adb_server()
 
 
@@ -1202,6 +1337,8 @@ def _apply_project_to_session(pid: str) -> dict:
             m = meta.get("marker") or {}
             SESSION._marker_w = int(m.get("w") or 0)
             SESSION._marker_h = int(m.get("h") or 0)
+            SESSION._marker_src_w = int(m.get("src_w") or 0)
+            SESSION._marker_src_h = int(m.get("src_h") or 0)
             SESSION._marker_cx = float(m.get("cx") if m.get("cx") is not None else 0.5)
             SESSION._marker_cy = float(m.get("cy") if m.get("cy") is not None else 0.5)
             import cv2
@@ -1218,6 +1355,7 @@ def _apply_project_to_session(pid: str) -> dict:
             SESSION._marker_template = None
             SESSION.set_marker_image(None)
             SESSION._marker_w = SESSION._marker_h = 0
+            SESSION._marker_src_w = SESSION._marker_src_h = 0
             SESSION.reset_marker_watch()
             marker_preview, marker_mime = "", "image/jpeg"
 
@@ -1239,6 +1377,8 @@ def _apply_project_to_session(pid: str) -> dict:
                 "cy": float(s["cy"]),
                 "w": int(s.get("w") or 0),
                 "h": int(s.get("h") or 0),
+                "src_w": int(s.get("src_w") or 0),
+                "src_h": int(s.get("src_h") or 0),
                 "img": skip_img,  # 内存缓存，check_auto 免重复 imread
                 "last_tap_at": 0.0,
                 "preview_base64": prev,
@@ -1509,18 +1649,24 @@ def set_marker_template(req: SetMarkerReq) -> dict:
         import cv2
 
         with SESSION._lock:
-            # 1) 截当前屏（不复用缓存，确保是用户当前看到的画面）
-            shot = Path(tempfile.gettempdir()) / f"_cst_marker_src_{os.getpid()}.png"
-            try:
-                SESSION.device.screenshot(shot)
-                img = cv2.imread(str(shot))
-            finally:
+            # 1) 优先从视频流取同分辨率帧；不可用时使用原生 ADB 截图。
+            source_frame = SESSION._latest_stream_frame()
+            source_via = "video" if source_frame is not None else "adb"
+            if source_frame is not None:
+                img = source_frame.image.copy()
+            else:
+                shot = Path(tempfile.gettempdir()) / f"_cst_marker_src_{os.getpid()}.png"
                 try:
-                    shot.unlink()
-                except OSError:
-                    pass
+                    SESSION.device.screenshot(shot)
+                    img = cv2.imread(str(shot))
+                finally:
+                    try:
+                        shot.unlink()
+                    except OSError:
+                        pass
             if img is None:
                 raise AdbError("截图失败或 cv2 读图失败")
+            source_h, source_w = img.shape[:2]
 
             h_px, w_px = img.shape[:2]
             cx_px = int(req.cx * w_px)
@@ -1571,7 +1717,10 @@ def set_marker_template(req: SetMarkerReq) -> dict:
             SESSION._marker_template = MARKER_TEMPLATE_PATH
             SESSION._marker_w = actual_w
             SESSION._marker_h = actual_h
-            # 中心归一化坐标（实际截取后的中心，可能与请求的 cx/cy 略有偏差——因越界裁剪）
+            SESSION._marker_src_w = source_w
+            SESSION._marker_src_h = source_h
+            # 中心归一化坐标
+            # 中心坐标保持归一化，视频/截图路径均使用同一语义。（实际截取后的中心，可能与请求的 cx/cy 略有偏差——因越界裁剪）
             SESSION._marker_cx = (x1 + actual_w / 2) / w_px
             SESSION._marker_cy = (y1 + actual_h / 2) / h_px
             SESSION.set_marker_image(template)
@@ -1587,6 +1736,9 @@ def set_marker_template(req: SetMarkerReq) -> dict:
                 "height": actual_h,
                 "center_x": round(SESSION._marker_cx, 5),
                 "center_y": round(SESSION._marker_cy, 5),
+                "source_width": source_w,
+                "source_height": source_h,
+                "source_via": source_via,
                 "preview_base64": preview_b64,
                 "preview_mime": "image/jpeg",
             }
@@ -1684,9 +1836,17 @@ def marker_status() -> dict:
         "ready": ready,
         "width": SESSION._marker_w if ready else 0,
         "height": SESSION._marker_h if ready else 0,
+        "source_width": SESSION._marker_src_w if ready else 0,
+        "source_height": SESSION._marker_src_h if ready else 0,
         "center_x": round(SESSION._marker_cx, 5) if ready else None,
         "center_y": round(SESSION._marker_cy, 5) if ready else None,
     }
+
+
+@app.get("/api/stream_status")
+def stream_status() -> dict:
+    """Return optional video stream diagnostics; screenshot mode remains valid."""
+    return SESSION.stream_status()
 
 
 @app.post("/api/preflight_auto")
@@ -1823,6 +1983,8 @@ def save_project(pid: str, req: ProjectSaveReq) -> dict:
                     "cy": SESSION._marker_cy,
                     "w": SESSION._marker_w,
                     "h": SESSION._marker_h,
+                    "src_w": SESSION._marker_src_w,
+                    "src_h": SESSION._marker_src_h,
                 }
             else:
                 marker_dst.unlink(missing_ok=True)
@@ -1845,6 +2007,8 @@ def save_project(pid: str, req: ProjectSaveReq) -> dict:
                     "cy": float(t["cy"]),
                     "w": int(t.get("w") or 0),
                     "h": int(t.get("h") or 0),
+                    "src_w": int(t.get("src_w") or 0),
+                    "src_h": int(t.get("src_h") or 0),
                 })
 
         apk_hint = (req.apk_hint or "").strip()
@@ -1919,9 +2083,38 @@ def _match_template_in_scene(scene, template, cx: float, cy: float, pad: int) ->
     if sx2 - sx1 < tw or sy2 - sy1 < th:
         sx1, sy1, sx2, sy2 = 0, 0, scene_w, scene_h
     roi = scene[sy1:sy2, sx1:sx2]
+    if roi.shape[0] < th or roi.shape[1] < tw:
+        return 0.0
     res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, _ = cv2.minMaxLoc(res)
     return float(max_val)
+
+
+def _scene_for_template(scene, source_w: int, source_h: int):
+    """Resize the whole fallback scene to a template's source resolution.
+
+    Scaling the complete scene preserves the relationship between the scene and
+    its template. Scaling only a template was rejected by the POC calibration.
+    Unknown source dimensions keep the legacy screenshot behavior.
+    """
+    if not source_w or not source_h:
+        return scene
+    scene_h, scene_w = scene.shape[:2]
+    if (scene_w, scene_h) == (source_w, source_h):
+        return scene
+    import cv2
+    return cv2.resize(scene, (source_w, source_h), interpolation=cv2.INTER_AREA)
+
+
+def _scene_for_template(scene, source_w: int, source_h: int):
+    """Resize the complete ADB scene to a template's source resolution."""
+    if not source_w or not source_h:
+        return scene
+    scene_h, scene_w = scene.shape[:2]
+    if (scene_w, scene_h) == (source_w, source_h):
+        return scene
+    import cv2
+    return cv2.resize(scene, (source_w, source_h), interpolation=cv2.INTER_AREA)
 
 
 @app.post("/api/set_skip_template")
@@ -1940,15 +2133,20 @@ def set_skip_template(req: SetMarkerReq) -> dict:
             if len(SESSION._skip_templates) >= SKIP_TEMPLATE_MAX:
                 raise AdbError(f"跳过模板已满（最多 {SKIP_TEMPLATE_MAX} 个），请先清除再添加")
 
-            shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}.png"
-            try:
-                SESSION.device.screenshot(shot)
-                img = cv2.imread(str(shot))
-            finally:
+            source_frame = SESSION._latest_stream_frame()
+            source_via = "video" if source_frame is not None else "adb"
+            if source_frame is not None:
+                img = source_frame.image.copy()
+            else:
+                shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}.png"
                 try:
-                    shot.unlink()
-                except OSError:
-                    pass
+                    SESSION.device.screenshot(shot)
+                    img = cv2.imread(str(shot))
+                finally:
+                    try:
+                        shot.unlink()
+                    except OSError:
+                        pass
             if img is None:
                 raise AdbError("截图失败或 cv2 读图失败")
 
@@ -2007,6 +2205,9 @@ def set_skip_template(req: SetMarkerReq) -> dict:
                 "cy": cy_n,
                 "w": actual_w,
                 "h": actual_h,
+                "src_w": w_px,
+                "src_h": h_px,
+                "source_via": source_via,
                 "img": template.copy(),  # 内存缓存
                 "last_tap_at": 0.0,
                 "preview_base64": preview_b64,
@@ -2101,19 +2302,24 @@ def check_auto(
         import cv2
 
         with SESSION._lock:
-            # 1) 截当前屏（热路径：raw|gzip → BGR，免落盘）
+            # 1) 优先读取同分辨率视频帧；流不可用/模板分辨率不匹配时回退截图。
             t_shot0 = time.perf_counter()
-            try:
-                scene, shot_via = SESSION.device.screenshot_bgr()
-            except AdbError as e:
+            stream_frame = SESSION._stream_scene(require_skips=bool(check_skips))
+            if stream_frame is not None:
+                scene, shot_via = stream_frame.image, "video"
+                shot_ms = round((time.monotonic() - stream_frame.received_at) * 1000, 1)
+            else:
+                try:
+                    scene, shot_via = SESSION.device.screenshot_bgr()
+                except AdbError as e:
+                    shot_ms = (time.perf_counter() - t_shot0) * 1000
+                    return {
+                        "skipped": False, "hit": False, "confidence": 0.0,
+                        "check_skips": bool(check_skips),
+                        "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
+                        "match_ms": 0.0, "shot_via": shot_via, "error": str(e),
+                    }
                 shot_ms = (time.perf_counter() - t_shot0) * 1000
-                return {
-                    "skipped": False, "hit": False, "confidence": 0.0,
-                    "check_skips": bool(check_skips),
-                    "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
-                    "match_ms": 0.0, "shot_via": shot_via, "error": str(e),
-                }
-            shot_ms = (time.perf_counter() - t_shot0) * 1000
             if scene is None:
                 return {
                     "skipped": False, "hit": False, "confidence": 0.0,
@@ -2121,9 +2327,15 @@ def check_auto(
                     "ms": round(shot_ms, 1), "shot_ms": round(shot_ms, 1),
                     "match_ms": 0.0, "shot_via": shot_via, "error": "截图失败",
                 }
-
+            if shot_via != "video":
+                scene = _scene_for_template(
+                    scene, SESSION._marker_src_w, SESSION._marker_src_h
+                )
             now = time.time()
             t_match0 = time.perf_counter()
+
+            # 视频帧只用于同源、同分辨率模板；旧模板自动留在截图回退路径。
+            stream_mode = shot_via == "video"
 
             # 2) 跳过模板（仅 check_skips=true，一般只开在首次冷启动）
             #    命中且过冷却 → tap；打断 marker 连续帧
@@ -2131,6 +2343,8 @@ def check_auto(
             if check_skips:
                 for t in SESSION._skip_templates:
                     if t["id"] in SESSION._skip_fired_ids:
+                        continue
+                    if stream_mode and (t.get("src_w") != scene.shape[1] or t.get("src_h") != scene.shape[0]):
                         continue
                     template = t.get("img")
                     if template is None:

@@ -83,6 +83,7 @@ class ScrcpyStream:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
+        self._connected = False
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._listen: socket.socket | None = None
@@ -123,7 +124,7 @@ class ScrcpyStream:
             now = time.monotonic()
             return {
                 "available": self.is_available,
-                "connected": self._ready_event.is_set(),
+                "connected": self._connected,
                 "serial": self.config.serial,
                 "device": self._device_name,
                 "width": self._width,
@@ -147,6 +148,8 @@ class ScrcpyStream:
             try:
                 self._reverse()
                 self._start_server_process()
+                if self._stop_event.is_set():
+                    raise ProbeError("scrcpy 视频流已停止")
                 self._thread = threading.Thread(target=self._worker, name="scrcpy-stream", daemon=True)
                 self._thread.start()
             except Exception:
@@ -154,13 +157,19 @@ class ScrcpyStream:
                 raise
 
         wait_for = self.config.connect_timeout if timeout is None else timeout
-        if not self._ready_event.wait(wait_for):
-            self.stop()
-            raise ProbeError(f"scrcpy 视频连接超时：{self._recent_logs()}")
+        deadline = time.monotonic() + wait_for
+        while not self._ready_event.is_set():
+            if self._stop_event.wait(min(0.1, max(0.0, deadline - time.monotonic()))):
+                raise ProbeError("scrcpy 视频流已停止")
+            if time.monotonic() >= deadline:
+                self.stop()
+                raise ProbeError(f"scrcpy 视频连接超时：{self._recent_logs()}")
         error = self.error
         if error:
             self.stop()
             raise ProbeError(error)
+        if self._stop_event.is_set():
+            raise ProbeError("scrcpy 视频流已停止")
 
     def stop(self) -> None:
         """Stop the worker and remove the adb reverse/server resources."""
@@ -191,6 +200,7 @@ class ScrcpyStream:
         self._remove_remote()
         with self._lock:
             self._ready_event.clear()
+            self._connected = False
             self._reverse_ready = False
 
     def reconnect(self, timeout: float | None = None) -> None:
@@ -202,6 +212,7 @@ class ScrcpyStream:
     def _reset_state_locked(self) -> None:
         self._stop_event.clear()
         self._ready_event.clear()
+        self._connected = False
         self._error = None
         self._device_name = ""
         self._width = self._height = 0
@@ -222,11 +233,17 @@ class ScrcpyStream:
         self._local_port = port
 
     def _adb_run(self, args: list[str]) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            [self.config.adb_path, "-s", self.config.serial, *args],
-            capture_output=True,
-            check=False,
-        )
+        try:
+            return subprocess.run(
+                [self.config.adb_path, "-s", self.config.serial, *args],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ProbeError(f"adb 命令超时：{' '.join(args)}") from exc
+        except OSError as exc:
+            raise ProbeError(f"adb 命令失败：{exc}") from exc
 
     def _reverse(self) -> None:
         result = self._adb_run(["reverse", f"localabstract:{self._socket_name}", f"tcp:{self._local_port}"])
@@ -293,6 +310,7 @@ class ScrcpyStream:
             codec = self._make_decoder()
             with self._lock:
                 self._device_name, self._width, self._height = device_name, width, height
+                self._connected = True
                 self._ready_event.set()
             while not self._stop_event.is_set():
                 try:
@@ -334,6 +352,7 @@ class ScrcpyStream:
             proc = self._proc
             if proc is not None:
                 self._proc = None
+            self._connected = False
             if self._listen is listen:
                 self._listen = None
         for value in (sock, listen):
@@ -373,6 +392,7 @@ class ScrcpyStream:
 
     def _fail(self, message: str) -> None:
         with self._lock:
+            self._connected = False
             self._error = message
             self._logs.append(message)
             self._ready_event.set()
@@ -397,14 +417,14 @@ class ScrcpyStream:
             return
         try:
             self._adb_run(["reverse", "--remove", f"localabstract:{self._socket_name}"])
-        except OSError:
+        except (OSError, ProbeError):
             pass
         self._reverse_ready = False
 
     def _remove_remote(self) -> None:
         try:
             self._adb_run(["shell", "rm", "-f", self._remote])
-        except OSError:
+        except (OSError, ProbeError):
             pass
 
 

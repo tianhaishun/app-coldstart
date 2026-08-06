@@ -85,7 +85,7 @@ def test_stream_starts_decodes_latest_frame_and_cleans_up(tmp_path):
                 import socket
                 with socket.create_connection(("127.0.0.1", self._local_port), timeout=2) as sock:
                     _handshake(sock)
-                    time.sleep(0.1)
+                    time.sleep(1.0)
 
             threading.Thread(target=connect_and_send, daemon=True).start()
 

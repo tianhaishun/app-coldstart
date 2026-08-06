@@ -210,7 +210,6 @@ def main():
         "stack_data", "pure_eval", "matplotlib_inline",  # IPython 依赖
         "xonsh",                                   # shell（8MB）
         "pythonwin", "pyreadline3",               # pywin32 GUI / readline
-        "av", "av.libs",                           # PyAV FFmpeg 绑定（63MB！）
         "inquirer3", "readchar", "blessed",        # CLI 交互提示
         "coloredlogs",                             # 彩色日志
         "humanfriendly",                           # coloredlogs 依赖

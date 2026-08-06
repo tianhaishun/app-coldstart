@@ -190,14 +190,35 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 - 新增 `scripts/scrcpy_runtime.py`：`ScrcpyStreamConfig` + `ScrcpyStream`，负责 adb reverse、推送/启动 scrcpy-server、socket 握手、后台 H.264 解码线程、最新帧缓存、回调、状态、断流错误、stop/reconnect 和资源清理。
 - `scripts/scrcpy_stream.py` 新增 `DecodedFrame` 与 `decode_payload_frames`，POC 与运行时共享同一套解码和协议处理；补强 `BufferedStream` 在 packet payload 中途 timeout 后继续读取，避免丢失数据包同步。
 - 新增 `tests/test_scrcpy_runtime.py`：fake socket/process/decoder 验证启动、握手、最新帧、状态和 stop 清理；另有缺失 server 快速失败测试。
-- 测试：系统 Python `43 passed, 5 skipped`；项目 `.venv` `48 passed`。
+- 测试：系统 Python `49 passed, 6 skipped`；项目 `.venv` `55 passed`。
 - 实机运行时冒烟（Pixel 6a / scrcpy 4.0 / 720）：5 秒收到 287 帧，最新帧 324×720，单帧解码约 3.7ms，stop 后 adb reverse / 临时 server 清理正常。
 - 修复运行时与 POC 的无效 `send_codec_meta=true` 参数；scrcpy 4.0 不再输出 `Unknown server option` 警告。
 
+## 第三阶段接入（2026-08-06，进行中，尚未提交）
+
+已完成第一轮最小接入，尚未作为正式测速结论发布：
+
+- `Session.select()` 在 Android 设备切换时创建/停止 `ScrcpyStream`；iOS 不创建视频流；后端 lifespan 退出前先清理视频流，再 kill adb。
+- `check_auto` 优先读取新鲜且与模板源分辨率一致的视频帧；不满足时完整回退原 ADB 截图路径。返回字段保持兼容，视频路径 `shot_via="video"`、`shot_ms` 使用帧龄。
+- 启动模板/跳过模板优先从视频帧采集，并记录 `src_w/src_h`；旧项目缺少源分辨率时自动回退截图，不运行时缩放模板。
+- 增加 `/api/stream_status` 诊断接口；requirements 加入 PyAV；Windows embed 构建不再删除 `av`/`av.libs`；Electron extraResources 携带两个 stream 脚本。
+- 补充 Session 分辨率/新鲜度/设备切换/模板越界守卫测试；当前系统 Python `49 passed, 6 skipped`，项目 `.venv` `55 passed`。
+- 已在 Pixel 6a 实机验证 `Session` 视频通道：scrcpy 4.0 / 720 流成功建立，`check_auto` 返回 `shot_via="video"`，匹配耗时约 1.3ms；该次人为构造模板仅用于通道验证，不是正式模板命中结论。
+
+**Android 实机端到端验证已完成（2026-08-06）**：使用 Brick Blast 当前主界面采集同分辨率 324×720 模板，执行 `cold_start(pkg)` 后轮询 `check_auto(false)`；全程 `shot_via=["video"]`，主界面重新出现时命中 `confidence=0.9814`、`shot_ms=16.0ms`（约一帧龄）、`match_ms=1.6ms`。这证明正式 `server.py` 视频优先路径和冷启动状态机能够协同工作。该模板为本次实机临时模板，不代表项目模板已迁移完成。
+
+**ADB 回退实测（2026-08-06）**：停止视频流后继续调用 `check_auto(false)`，返回 `shot_via="raw_gzip"`、`shot_ms=298.8ms`、`match_ms=2.3ms`、无 error；视频通道关闭没有破坏原截图路径。
+
+**当前限制**：这轮代码尚未提交；还没有执行打包后 `import av` 验证。正式接入前必须补齐该项；Mac 实机仍待回家验证。
+
 ## 尚未完成（下一步候选）
 
-1. macOS 实机验证一次（通过标准未满足项）——清单见 `docs/scrcpy-frame-precision-mac-verify.md`，待 Mac 上执行。
-2. 第三阶段 `check_auto` 视频流优先 + ADB 截图回退：需先把运行时接到 `Session`，再补启动/设备切换/断流回退测试，回归 `server.py` 29 项测试。
+## 尚未完成（下一步候选）
+
+1. 用真实项目模板跑 Android 视频路径冷启动，并与 ADB 回退路径对照。
+2. 断流/拔线模拟：确认 `available=false` 后 `check_auto` 不报错并走截图；重新选择设备可重建流。
+3. 检查并构建 Windows embed，确认 PyAV/FFmpeg DLL 未被清理；再提交第三阶段改动。
+4. macOS 实机验证一次（通过标准未满足项）——清单见 `docs/scrcpy-frame-precision-mac-verify.md`。
 
 ## 已知历史结果
 
