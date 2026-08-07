@@ -209,9 +209,7 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 
 **ADB 回退实测（2026-08-06）**：停止视频流后继续调用 `check_auto(false)`，返回 `shot_via="raw_gzip"`、`shot_ms=298.8ms`、`match_ms=2.3ms`、无 error；视频通道关闭没有破坏原截图路径。
 
-**当前限制**：这轮代码尚未提交；还没有执行打包后 `import av` 验证。正式接入前必须补齐该项；Mac 实机仍待回家验证。
-
-## 尚未完成（下一步候选）
+**当前限制**：第三阶段代码已提交到 `f278d4b`；客户端错误修复和 Excel/报告 UI 改动随后提交为 `a9215ab`、`5c7174c`，均已推送。UX/UI 需求稿见 `docs/coldstart-client-ux-requirements.md`；当前已开始 Sprint 1（状态条、Electron 项目输入、跑测控件/快捷键锁定），尚未提交。仍需执行打包后 `import av` 验证；Mac 实机仍待回家验证。
 
 ## 尚未完成（下一步候选）
 

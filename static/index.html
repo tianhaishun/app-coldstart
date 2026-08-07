@@ -74,6 +74,19 @@
   .text-\[11px\] { font-size: 0.84rem !important; }
 
   .glass-panel { background: var(--glass); border: 1px solid var(--outline-var); border-radius: var(--radius); }
+  .status-bar { display: flex; align-items: center; gap: .45rem; min-height: 28px; padding: .35rem .6rem; border: 1px solid var(--outline-var); border-radius: var(--radius); background: var(--sc-low); color: var(--on-var); font: 0.72rem var(--font-mono, monospace); }
+  .status-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--amber); }
+  .status-bar.ok .status-dot { background: var(--mint); }
+  .status-bar.error .status-dot { background: var(--danger); }
+  .status-bar.running .status-dot { background: var(--primary); animation: pulse-low 1.2s infinite; }
+  .prompt-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(0,0,0,.55); }
+  .prompt-dialog { width: min(360px, calc(100vw - 32px)); padding: 1rem; border: 1px solid var(--outline-var); border-radius: var(--radius); background: var(--sc); color: var(--on); box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  .prompt-dialog h3 { margin: 0 0 .35rem; font-size: .95rem; }
+  .prompt-dialog p { margin: 0 0 .7rem; color: var(--on-var); font-size: .75rem; }
+  .prompt-dialog input { width: 100%; padding: .5rem; border: 1px solid var(--outline-var); border-radius: var(--radius); background: var(--sc-high); color: var(--on); }
+  .prompt-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .8rem; }
+  .prompt-actions button { padding: .4rem .8rem; border: 1px solid var(--outline-var); border-radius: var(--radius); background: var(--sc-high); color: var(--on); cursor: pointer; }
+  .prompt-actions button[data-prompt-ok] { background: var(--primary); color: var(--on-primary); }
   .report-summary-table th, .report-summary-table td { border: 1px solid var(--outline-var); padding: 0.45rem 0.55rem; text-align: left; white-space: nowrap; }
   .report-summary-table th { background: var(--sc-high); color: var(--on-var); font-weight: 700; }
   .report-summary-table td { background: var(--sc-lowest); color: var(--on); }
@@ -447,7 +460,11 @@
   <!-- ═══ 中栏：自动测速 + 审计日志（主工作区）═══ -->
   <section class="mid-col flex-1 flex flex-col gap-1.5 min-w-[360px] min-h-0 overflow-hidden">
 
-    <!-- 状态条（保留 #display/#state/#mainBtn 给 JS，界面隐藏手动大计时器） -->
+    <!-- 常显状态条；保留隐藏计时字段兼容旧 JS -->
+    <div id="clientStatusBar" class="status-bar" role="status" aria-live="polite">
+      <span id="clientStatusDot" class="status-dot"></span>
+      <span id="clientStatusText">正在初始化客户端…</span>
+    </div>
     <div id="timerCard" class="hidden" aria-hidden="true">
       <div id="display">0.000<span class="unit">s</span></div>
       <div id="state" class="timer-state">自动测速模式</div>
@@ -1095,8 +1112,29 @@ async function saveCurrentProject() {
   uiAlert(`已保存到项目「${j.name}」`, `启动模板：${j.has_marker ? '已存' : '未设'}\n跳过模板：${j.skip_count} 个\n\n注意：APK 未复制进项目，下次测试请重新上传。`);
 }
 
+async function uiPrompt(message, detail = '', defaultValue = '') {
+  const wrap = document.createElement('div');
+  wrap.className = 'prompt-overlay';
+  wrap.innerHTML = `<div class="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+    <h3 id="promptTitle">${escapeHtml(message)}</h3>
+    <p>${escapeHtml(detail)}</p>
+    <input id="promptInput" type="text" value="${escapeHtml(defaultValue)}" maxlength="80" autocomplete="off">
+    <div class="prompt-actions"><button type="button" data-prompt-cancel>取消</button><button type="button" data-prompt-ok>确定</button></div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const input = wrap.querySelector('#promptInput');
+  input.focus(); input.select();
+  return await new Promise(resolve => {
+    const close = value => { wrap.remove(); resolve(value); };
+    wrap.querySelector('[data-prompt-cancel]').onclick = () => close(null);
+    wrap.querySelector('[data-prompt-ok]').onclick = () => close(input.value.trim() || null);
+    input.onkeydown = e => { if (e.key === 'Enter') close(input.value.trim() || null); else if (e.key === 'Escape') close(null); };
+    wrap.onclick = e => { if (e.target === wrap) close(null); };
+  });
+}
+
 $('projectNewBtn').addEventListener('click', async () => {
-  const name = prompt('新项目名称（如：某某 App GP）');
+  const name = await uiPrompt('新建项目', '请输入项目名称，例如：某某 App GP');
   if (!name || !name.trim()) return;
   try {
     const r = await fetch(API + '/api/projects', {
@@ -1615,6 +1653,10 @@ function fmt(ms) { return (ms / 1000).toFixed(3); }
 function setState(kind, text) {
   $('state').className = 'timer-state' + (kind ? ' ' + kind : '');
   $('state').textContent = text;
+  const bar = $('clientStatusBar');
+  const label = $('clientStatusText');
+  if (bar) bar.className = 'status-bar' + (kind ? ` ${kind}` : '');
+  if (label) label.textContent = text || '就绪';
 }
 function loop() {
   const elapsedMs = performance.now() - startTs;
@@ -2071,6 +2113,11 @@ $('csvBtn').addEventListener('click', () => {
 // ── 快捷键（方案1：取消 Space 手动计时）──
 document.addEventListener('keydown', e => {
   if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if (autoRunning && ['Delete', 'q', 'w', 'r'].includes(e.key)) {
+    e.preventDefault();
+    uiAlert('自动跑测进行中', '当前设备和数据操作已锁定，请先停止本轮。', 'warning');
+    return;
+  }
   if (e.key === 'Delete') { e.preventDefault(); removeLast(); }
   else if (e.key.toLowerCase() === 'q') { e.preventDefault(); reinstall(); }
   else if (e.key.toLowerCase() === 'w') { e.preventDefault(); forceStop(); }
@@ -2358,6 +2405,10 @@ function setAutoRunLayout(running) {
     if (badge) badge.textContent = '准备';
     refreshAutoChecklist();
   }
+  const lockIds = ['deviceSel', 'refreshDevBtn', 'projectSel', 'projectNewBtn', 'projectSaveBtn', 'projectDelBtn', 'launchMode', 'apkPkg', 'browseApkBtn', 'reinstallBtn', 'forceStopBtn', 'backHomeBtn', 'manualShotBtn', 'refreshOcrBtn', 'setMarkerBtn', 'addSkipBtn', 'clearSkipBtn', 'liveToggle'];
+  lockIds.forEach(id => { const el = $(id); if (el) el.disabled = !!running; });
+  const mode = $('launchMode');
+  if (mode) mode.disabled = !!running;
 }
 
 function markProjectDirty() {
