@@ -194,7 +194,7 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 - 实机运行时冒烟（Pixel 6a / scrcpy 4.0 / 720）：5 秒收到 287 帧，最新帧 324×720，单帧解码约 3.7ms，stop 后 adb reverse / 临时 server 清理正常。
 - 修复运行时与 POC 的无效 `send_codec_meta=true` 参数；scrcpy 4.0 不再输出 `Unknown server option` 警告。
 
-## 第三阶段接入（2026-08-06，进行中，尚未提交）
+## 第三阶段接入（2026-08-06，第一轮已完成）
 
 已完成第一轮最小接入，尚未作为正式测速结论发布：
 
@@ -209,7 +209,7 @@ TM_CCOEFF_NORMED 对缩放模板极度敏感：模板模糊化后与清晰帧内
 
 **ADB 回退实测（2026-08-06）**：停止视频流后继续调用 `check_auto(false)`，返回 `shot_via="raw_gzip"`、`shot_ms=298.8ms`、`match_ms=2.3ms`、无 error；视频通道关闭没有破坏原截图路径。
 
-**当前限制**：第三阶段代码已提交到 `f278d4b`；客户端错误修复和 Excel/报告 UI 改动随后提交为 `a9215ab`、`5c7174c`，均已推送。UX/UI 需求稿见 `docs/coldstart-client-ux-requirements.md`；当前已开始 Sprint 1（状态条、Electron 项目输入、跑测控件/快捷键锁定），尚未提交。仍需执行打包后 `import av` 验证；Mac 实机仍待回家验证。
+**当前限制**：第三阶段代码已提交到 `f278d4b`；客户端错误修复和 Excel/报告 UI 改动随后提交为 `a9215ab`、`5c7174c`，均已推送。UX/UI 需求稿见 `docs/coldstart-client-ux-requirements.md`；当前已开始 Sprint 1（状态条、Electron 项目输入、跑测控件/快捷键锁定），基础版本已提交到 c8ffa3e，快捷键/菜单/清空记录锁定修复待提交。仍需执行打包后 `import av` 验证；Mac 实机仍待回家验证。
 
 ## 尚未完成（下一步候选）
 
