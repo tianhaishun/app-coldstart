@@ -29,6 +29,7 @@
     ],
     "extraResources": [
       { "from": "server.py", "to": "backend/server.py" },
+      { "from": "adb_helper.py", "to": "backend/adb_helper.py" },
       { "from": "requirements.txt", "to": "backend/requirements.txt" },
       { "from": "static/", "to": "backend/static/" },
       { "from": "scripts/warmup.py", "to": "backend/scripts/warmup.py" },

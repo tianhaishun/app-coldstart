@@ -42,8 +42,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 内置 adb（同目录 adb\\adb.exe），找不到再回退 PATH
+try:
+    from adb_helper import AdbHelper, AdbHelperError
+except ImportError:
+    AdbHelper = None
+    AdbHelperError = RuntimeError
+
 _BUNDLED_ADB = ROOT / "adb" / "adb.exe"
-ADB_EXE = str(_BUNDLED_ADB) if _BUNDLED_ADB.exists() else "adb"
+if _BUNDLED_ADB.exists():
+    ADB_EXE = str(_BUNDLED_ADB)
+else:
+    try:
+        ADB_EXE = AdbHelper.resolve_adb_path(project_root=ROOT) if AdbHelper else "adb"
+    except (AdbHelperError, OSError):
+        ADB_EXE = "adb"
 
 # 内置 iOS 工具链（同目录 ios\\idevice_id.exe），借鉴 XYLog 的 resolveIosBinaryPath 模式
 # 打包后 ROOT 落在 resources/backend，ios/ 在 extraResources 里
@@ -1310,6 +1322,10 @@ class ReinstallReq(BaseModel):
     serial: Optional[str] = None
 
 
+class ApkParseReq(BaseModel):
+    apk_path: str
+
+
 class ColdStartReq(BaseModel):
     """冷启动请求：服务端做 force_stop → tap/launch，响应返回后前端开始计时。
 
@@ -1430,6 +1446,29 @@ async def upload_apk(file: UploadFile) -> dict:
 @app.get("/api/device/current")
 def current_device() -> dict:
     return SESSION.current()
+
+
+@app.post("/api/parse_apk")
+def parse_apk(req: ApkParseReq) -> dict:
+    """解析 APK 的 package/version 元数据，不执行安装。"""
+    if AdbHelper is None:
+        raise _err(500, "ADB helper 未加载")
+    try:
+        info = AdbHelper(
+            SESSION._serial,
+            adb_path=ADB_EXE,
+            project_root=ROOT,
+        ).parse_apk(req.apk_path)
+        return {
+            "ok": True,
+            "path": info.path,
+            "package": info.package,
+            "version_name": info.version_name,
+            "version_code": info.version_code,
+            "label": info.label,
+        }
+    except (AdbHelperError, OSError) as exc:
+        raise _err(400, str(exc)) from exc
 
 
 @app.get("/api/screenshot")
