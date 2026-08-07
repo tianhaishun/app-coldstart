@@ -501,7 +501,10 @@
     <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-tertiary/40 flex-1 flex flex-col min-h-0 overflow-hidden">
       <div class="flex items-center justify-between text-on-surface mb-1 shrink-0">
         <span class="font-mono text-[11px] font-bold tracking-wider text-on-surface-variant">🤖 自动测速</span>
-        <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
+        <span class="flex items-center gap-1.5">
+          <span id="frameSourceBadge" class="text-[9px] px-1.5 py-0.5 rounded border border-outline-variant text-on-surface-variant">帧源检测中</span>
+          <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
+        </span>
       </div>
       <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
         <!-- 准备区：跑测时折叠，把空间让给审计日志 -->
@@ -1660,6 +1663,28 @@ function setState(kind, text) {
   if (bar) bar.className = 'status-bar' + (kind ? ` ${kind}` : '');
   if (label) label.textContent = text || '就绪';
 }
+
+async function refreshStreamBadge() {
+  const badge = $('frameSourceBadge');
+  if (!badge) return;
+  try {
+    const r = await fetch(API + '/api/stream_status');
+    const j = await r.json();
+    if (j.available) {
+      badge.textContent = `高帧率视频 · ${j.width}×${j.height}`;
+      badge.title = `scrcpy 视频流已连接 · 已接收 ${j.frames || 0} 帧`;
+      badge.className = 'text-[9px] px-1.5 py-0.5 rounded border border-tertiary text-tertiary';
+    } else {
+      badge.textContent = 'ADB 截图回退';
+      badge.title = j.error || 'scrcpy 视频流不可用，自动测速仍可使用 ADB 截图';
+      badge.className = 'text-[9px] px-1.5 py-0.5 rounded border border-warning/40 text-warning';
+    }
+  } catch {
+    badge.textContent = '截图模式';
+    badge.title = '无法读取视频流状态';
+    badge.className = 'text-[9px] px-1.5 py-0.5 rounded border border-outline-variant text-on-surface-variant';
+  }
+}
 function loop() {
   const elapsedMs = performance.now() - startTs;
   $('display').innerHTML = fmt(elapsedMs) + '<span class="unit">s</span>';
@@ -2635,7 +2660,8 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
           // 异常按记录时间判断（已扣命中帧截图耗时），与表格/报告口径一致。
           // 不能按墙钟 rawMs 判断：截图偏慢时会出现「记录 14.273s < 阈值 15s 却被标异常」的误标。
           const abnormal = weirdMs > 0 && total >= weirdMs;
-          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`);
+          const sourceLabel = j.shot_via === 'video' ? '高帧率视频' : (j.shot_via ? 'ADB截图回退' : '未知帧源');
+          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 帧源 ${sourceLabel} · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`);
           return { time: total, abnormal, raw_ms: rawMs, shot_ms: shotCost };
         }
         // 未确认：每 2s 打进度；写清当前在等什么
@@ -3453,6 +3479,8 @@ async function setSkipFromPoint(cx, cy) {
   else fetchShotOnce(true);
   relayoutStage();
   refreshSkipList();  // 同步后端跳过模板列表（重启后端后会是空的；有项目时 initProjects 会覆盖）
+  refreshStreamBadge();
+  setInterval(refreshStreamBadge, 5000);
   syncMarkerReadyFromServer();  // 同步启动模板就绪状态
   initScrcpy();  // Electron 桌面客户端：检测 scrcpy 可用性，显示镜像/录屏按钮
   await initProjects();  // 恢复上次项目（模板写入 Session + 历史按项目分桶）
