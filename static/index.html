@@ -74,6 +74,9 @@
   .text-\[11px\] { font-size: 0.84rem !important; }
 
   .glass-panel { background: var(--glass); border: 1px solid var(--outline-var); border-radius: var(--radius); }
+  .report-summary-table th, .report-summary-table td { border: 1px solid var(--outline-var); padding: 0.45rem 0.55rem; text-align: left; white-space: nowrap; }
+  .report-summary-table th { background: var(--sc-high); color: var(--on-var); font-weight: 700; }
+  .report-summary-table td { background: var(--sc-lowest); color: var(--on); }
   .glass-dim { background: var(--sc-lowest); }
 
   .custom-scrollbar::-webkit-scrollbar { width: 7px; }
@@ -674,8 +677,12 @@
           <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">Excel</button>
         </div>
       </div>
+      <div id="reportSummary" class="p-2.5"></div>
       <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
-      <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
+      <details class="border-t border-outline-variant">
+        <summary class="px-2.5 py-1.5 text-[10px] font-mono text-on-surface-variant cursor-pointer">查看详细文字报告与审计日志</summary>
+        <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
+      </details>
     </div>
   </aside>
 
@@ -2948,6 +2955,35 @@ function renderAutoReport(ctx) {
     L.push('');
     L.push('── 运行审计日志 ──');
     audit.forEach(line => L.push(line));
+  }
+
+  const summaryBox = $('reportSummary');
+  if (summaryBox) {
+    const summaryRows = [
+      { label: '首次冷启动', data: fr, final: firstFinal, count: firsts.length },
+      { label: '二次冷启动', data: sr, final: secondFinal, count: seconds.length },
+    ];
+    const conclusion = firstFinal !== null && secondFinal !== null
+      ? `首次比二次慢 ${fmt(Math.abs(firstFinal - secondFinal))}s`
+      : '数据不足，无法比较';
+    summaryBox.innerHTML = `
+      <div class="text-[10px] font-mono text-on-surface-variant mb-2">
+        <b class="text-on-surface">${escapeHtml(pkg)}</b> · ${escapeHtml(device)} · ${escapeHtml(platformLabel)} · ${escapeHtml(reportMode === 'pkg' ? '包名启动' : '模拟点击')}
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs font-mono border-collapse report-summary-table">
+          <thead><tr><th>类型</th><th>样本数</th><th>原始均值</th><th>剔除极值</th><th>最终值</th><th>状态</th></tr></thead>
+          <tbody>${summaryRows.map(row => {
+            const d = row.data;
+            const avg = d ? fmt(d.mean) + 's' : '—';
+            const dropped = d && d.max !== null ? `MAX ${fmt(d.max)}s / MIN ${fmt(d.min)}s` : '不足 3 条，未剔除';
+            const finalText = row.final !== null ? fmt(row.final) + 's' : '—';
+            return `<tr><td><b>${row.label}</b></td><td>${row.count}</td><td>${avg}</td><td>${dropped}</td><td><b>${finalText}</b></td><td>${row.count ? (d && d.warning ? '样本不足' : '有效') : '无数据'}</td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+      <div class="mt-2 text-xs font-mono text-on-surface"><b>结论：</b>${conclusion}</div>
+      <div class="mt-1 text-[10px] font-mono text-on-surface-variant">总耗时 ${escapeHtml(String(ctx.totalSec || '—'))}s · 异常样本 ${abnList.length} 条 · n≥3 时每组去掉 1 个最大值和 1 个最小值</div>`;
   }
 
   el.textContent = L.join('\n');
