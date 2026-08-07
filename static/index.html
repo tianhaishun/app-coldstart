@@ -1038,6 +1038,7 @@ async function refreshProjectList(selectId) {
 }
 
 async function loadProjectById(pid, { clearApk = true } = {}) {
+  if (autoRunning) { uiAlert('自动跑测进行中', '当前不能切换项目。', 'warning'); return; }
   if (!pid) {
     currentProjectId = '';
     localStorage.removeItem(PROJECT_ID_KEY);
@@ -1389,6 +1390,7 @@ async function refreshDevices() {
   }
 }
 async function selectDevice(serial) {
+  if (autoRunning) { uiAlert('自动跑测进行中', '当前不能切换设备。', 'warning'); return; }
   if (!serial) return;
   // 从设备列表查找平台（Android vs iOS）
   const dev = lastDeviceList.find(d => d.serial === serial);
@@ -2422,7 +2424,7 @@ function setAutoRunLayout(running) {
     if (badge) badge.textContent = '准备';
     refreshAutoChecklist();
   }
-  const lockIds = ['deviceSel', 'refreshDevBtn', 'projectSel', 'projectNewBtn', 'projectSaveBtn', 'projectDelBtn', 'launchMode', 'apkPkg', 'browseApkBtn', 'reinstallBtn', 'forceStopBtn', 'backHomeBtn', 'manualShotBtn', 'refreshOcrBtn', 'setMarkerBtn', 'addSkipBtn', 'clearSkipBtn', 'clearBtn', 'liveToggle'];
+  const lockIds = ['deviceSel', 'refreshDevBtn', 'projectSel', 'projectNewBtn', 'projectSaveBtn', 'projectDelBtn', 'launchMode', 'apkPkg', 'browseApkBtn', 'reinstallBtn', 'forceStopBtn', 'backHomeBtn', 'manualShotBtn', 'refreshOcrBtn', 'setMarkerBtn', 'addSkipBtn', 'clearSkipBtn', 'clearBtn', 'liveToggle', 'autoTimeout', 'autoGap', 'autoRounds', 'autoKillCool'];
   lockIds.forEach(id => { const el = $(id); if (el) el.disabled = !!running; });
   const mode = $('launchMode');
   if (mode) mode.disabled = !!running;
@@ -2588,6 +2590,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
   autoLog('INFO', 'WAIT', doSkips
     ? '开始轮询识别：先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
     : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表');
+  let deviceErrorCount = 0;
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
@@ -2600,6 +2603,11 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
       const r = await fetch(API + '/api/check_auto' + qs);
       if (r.ok) {
         const j = await r.json();
+        if (!j.error) deviceErrorCount = 0;
+        else {
+          deviceErrorCount += 1;
+          if (deviceErrorCount >= 8) throw new Error(`设备/后端连续不可用：${j.error}`);
+        }
         pollCount += 1;
         const shotMs = j.shot_ms != null ? `${Math.round(j.shot_ms)}ms` : '—';
         const matchMs = j.match_ms != null ? `${(j.match_ms).toFixed(1)}ms` : '—';
@@ -2644,16 +2652,20 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
           autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`);
         }
       } else {
+        deviceErrorCount += 1;
+        if (deviceErrorCount >= 8) throw new Error(`设备/后端连续不可用（HTTP ${r.status}），自动循环已中止`);
         if (elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`);
+          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试（${deviceErrorCount}/8）`);
         }
       }
     } catch (e) {
+      deviceErrorCount += 1;
+      if (deviceErrorCount >= 8) throw new Error(`设备/后端连续不可用，自动循环已中止：${e.message}`);
       console.warn('自动检测轮询失败（将继续重试）:', e.message);
       if (elapsed - lastLogAt > 2000) {
         lastLogAt = elapsed;
-        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`);
+        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试（${deviceErrorCount}/8）`);
       }
     }
     if (gapMs > 0) await sleep(gapMs);
@@ -2864,6 +2876,7 @@ async function runAutoLoop() {
     autoRunning = false;
     autoAbortFlag = false;
     $('autoStopBtn').disabled = true;
+    $('autoStopBtn').textContent = '■ 停止';
     setAutoRunLayout(false);
     if (autoLiveWasOn && $('liveToggle').checked) startLive();
   }
@@ -3160,6 +3173,8 @@ $('autoStopBtn').addEventListener('click', () => {
   if (!autoRunning) return;
   autoAbortFlag = true;
   autoLog('WARN', 'ABORT', '收到停止指令，当前步骤完成后退出…');
+  setState('running', '正在停止当前步骤…');
+  $('autoStopBtn').textContent = '■ 停止中…';
   $('autoStopBtn').disabled = true;
 });
 
@@ -3369,7 +3384,7 @@ async function setSkipFromPoint(cx, cy) {
       const ready2 = list.filter(d => d.state === 'device');
       if (ready2.length > 0 && (!deviceReady || !currentOk)) {
         const newTarget = ready2[0].serial;
-        if (newTarget !== before) {
+        if (newTarget !== before && !autoRunning) {
           $('deviceSel').value = newTarget;
           await selectDevice(newTarget);
         }
@@ -3400,7 +3415,7 @@ async function setSkipFromPoint(cx, cy) {
             const ready2 = list.filter(d => d.state === 'device');
             if (ready2.length > 0 && (!deviceReady || !currentOk)) {
               const newTarget = ready2[0].serial;
-              if (newTarget !== before) {
+              if (newTarget !== before && !autoRunning) {
                 $('deviceSel').value = newTarget;
                 await selectDevice(newTarget);
               }
@@ -3424,7 +3439,7 @@ async function setSkipFromPoint(cx, cy) {
         const ready2 = list.filter(d => d.state === 'device');
         if (ready2.length > 0 && (!deviceReady || !currentOk)) {
           const newTarget = ready2[0].serial;
-          if (newTarget !== before) {
+          if (newTarget !== before && !autoRunning) {
             $('deviceSel').value = newTarget;
             await selectDevice(newTarget);
           }
