@@ -88,7 +88,9 @@
       ],
       "icon": "build/icon-512.png",
       "category": "public.app-category.developer-tools",
-      "artifactName": "${productName}-${version}.${ext}"
+      "artifactName": "${productName}-${version}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
     },
     "nsis": {
       "oneClick": false,
