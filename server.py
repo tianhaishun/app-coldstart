@@ -107,6 +107,12 @@ _projects_env = os.environ.get("CST_PROJECTS_DIR")
 PROJECTS_DIR = Path(_projects_env) if _projects_env else (ROOT / "projects")
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# 设备模板持久化目录（真机实测痛点修复）：模板是内存态，后端重启即丢，
+# 用户反复重设体验差。设模板时同步落盘，DeviceSession 创建时自动恢复。
+# 注意：启动清理（_cleanup_stale_temp_files）只清 tempdir，不动这里。
+DEVICE_TEMPLATES_DIR = PROJECTS_DIR / "_device_templates"
+DEVICE_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _safe_apk_filename(original: str) -> str:
     """把用户上传的原始文件名过滤成安全的磁盘文件名。
@@ -532,6 +538,12 @@ def _safe_serial(serial: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", serial or "")
 
 
+def _device_template_files(serial: str) -> tuple[Path, Path]:
+    """设备模板持久化文件（marker 图 + 元信息）。重启后端自动恢复用。"""
+    safe = _safe_serial(serial)
+    return DEVICE_TEMPLATES_DIR / f"marker_{safe}.png", DEVICE_TEMPLATES_DIR / f"meta_{safe}.json"
+
+
 class DeviceSession:
     """单台设备的独立会话：设备句柄 + 独立锁 + 模板 + 观察状态 + 截图缓存。
 
@@ -586,6 +598,8 @@ class DeviceSession:
         # 跳过弹窗模板（最多 SKIP_TEMPLATE_MAX 个）。每项：
         #   id/path/cx/cy/w/h/img/preview；last_tap_at 用于冷却防连点
         self._skip_templates: list[dict] = []
+        # 从持久化目录恢复上次的启动模板（后端重启自动恢复，免反复重设）
+        self._restore_marker()
 
     def reset_marker_watch(self, *, after_force_stop: bool = False) -> None:
         """新一次测速开始前清零连续确认 / 本轮已点跳过。
@@ -644,6 +658,33 @@ class DeviceSession:
             threshold=self.marker_threshold,
         )
         return self._marker_matcher
+
+    def _restore_marker(self) -> None:
+        """从持久化目录恢复上次的模板（后端重启自动恢复，免用户反复重设）。
+
+        真机实测痛点修复：模板是内存态，每次后端重启就丢。设模板时同步落盘
+        （set_marker_template 里调用 _save_marker_persistent），创建会话时恢复。
+        恢复失败（文件缺失/损坏）静默视为未设，不阻塞。
+        """
+        try:
+            import json as _json
+            marker_file, meta_file = _device_template_files(self.serial)
+            if not marker_file.is_file() or not meta_file.is_file():
+                return
+            meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+            self._marker_template = marker_file
+            self._marker_w = int(meta.get("w") or 0)
+            self._marker_h = int(meta.get("h") or 0)
+            self._marker_cx = float(meta.get("cx") if meta.get("cx") is not None else 0.5)
+            self._marker_cy = float(meta.get("cy") if meta.get("cy") is not None else 0.5)
+            self.marker_threshold = float(meta.get("threshold") or MARKER_MATCH_THRESHOLD)
+            if meta.get("res"):
+                self._marker_res = tuple(meta["res"])
+            self._marker_img = None  # ensure_marker_image 惰性读盘
+            self._marker_matcher = None
+            print(f"[marker:{self.serial}] 已从磁盘恢复模板（{self._marker_w}×{self._marker_h}）", flush=True)
+        except Exception as e:
+            print(f"[marker:{self.serial}] 模板恢复失败（忽略，视为未设）：{e}", file=sys.stderr, flush=True)
 
     def screenshot_bytes(self, *, use_cache: bool = True) -> tuple[bytes, dict]:
         """截图并返回 (PNG bytes, 诊断元信息)。
@@ -1483,6 +1524,25 @@ def set_marker_template(req: SetMarkerReq) -> dict:
 
             # 4) 存模板（覆盖式，按设备隔离的单文件）
             cv2.imwrite(str(ds.marker_path), template)
+
+            # 4.3) 持久化到磁盘（重启后端自动恢复，免用户反复重设——真机实测痛点）
+            try:
+                import json as _json
+                marker_file, meta_file = _device_template_files(ds.serial)
+                ok_buf, buf = cv2.imencode(".png", template)
+                if ok_buf:
+                    tw2, th2 = template.shape[1], template.shape[0]
+                    marker_file.write_bytes(buf.tobytes())
+                    meta_file.write_text(_json.dumps({
+                        "w": tw2,
+                        "h": th2,
+                        "cx": (x1 + tw2 / 2) / w_px,
+                        "cy": (y1 + th2 / 2) / h_px,
+                        "threshold": ds.marker_threshold,
+                        "res": [w_px, h_px],
+                    }, ensure_ascii=False), encoding="utf-8")
+            except OSError as e:
+                print(f"[marker:{ds.serial}] 模板持久化失败（不阻塞）：{e}", file=sys.stderr, flush=True)
 
             # 4.5) 记录设模板时的屏幕分辨率（审核 F-P1-4：后续分辨率变化检测基准）
             ds._marker_res = (w_px, h_px)

@@ -375,3 +375,51 @@ def test_verify_launch_ios_returns_note(monkeypatch):
         assert r["ok"] is True and r["match"] is None and "iOS" in r["note"]
     finally:
         _reset_registry()
+
+
+def test_marker_persists_across_sessions():
+    """模板持久化（真机痛点修复）：设模板落盘后，新 DeviceSession 自动恢复。"""
+    import cv2
+    from server import DeviceSession
+
+    _reset_registry()
+    try:
+        # 构造一个带模板的会话（模拟 set_marker_template 落盘）
+        ds1 = SESSION.session_for("DEV_PERSIST")
+        template = np.zeros((24, 40, 3), dtype=np.uint8)
+        cv2.rectangle(template, (2, 2), (37, 21), (40, 180, 240), -1)
+        ds1._marker_template = ds1.marker_path
+        ds1._marker_w, ds1._marker_h = 40, 24
+        ds1._marker_cx, ds1._marker_cy = 0.3, 0.4
+        ds1.marker_threshold = 0.9
+        ds1._marker_res = (1080, 2400)
+        # 直接调持久化保存（复现 set_marker_template 的落盘逻辑）
+        from server import _device_template_files
+        marker_file, meta_file = _device_template_files("DEV_PERSIST")
+        ok_buf, buf = cv2.imencode(".png", template)
+        assert ok_buf
+        marker_file.write_bytes(buf.tobytes())
+        import json
+        meta_file.write_text(json.dumps({
+            "w": 40, "h": 24, "cx": 0.3, "cy": 0.4,
+            "threshold": 0.9, "res": [1080, 2400],
+        }), encoding="utf-8")
+
+        # 新会话（模拟后端重启）→ 自动恢复
+        ds2 = DeviceSession("DEV_PERSIST")
+        assert ds2._marker_template is not None
+        assert ds2._marker_w == 40 and ds2._marker_h == 24
+        assert ds2.marker_threshold == 0.9
+        assert ds2._marker_res == (1080, 2400)
+        # 恢复的模板可正常用于匹配（ensure_marker_image 读盘）
+        img = ds2.ensure_marker_image()
+        assert img is not None and img.shape[0] == 24
+    finally:
+        _reset_registry()
+        # 清理持久化文件（避免污染其他测试）
+        import shutil
+        from server import DEVICE_TEMPLATES_DIR
+        for f in DEVICE_TEMPLATES_DIR.glob("marker_DEV_PERSIST*"):
+            f.unlink(missing_ok=True)
+        for f in DEVICE_TEMPLATES_DIR.glob("meta_DEV_PERSIST*"):
+            f.unlink(missing_ok=True)
