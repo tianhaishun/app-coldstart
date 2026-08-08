@@ -3518,6 +3518,22 @@ async function setSkipFromPoint(cx, cy) {
   pollers.devices = setInterval(async () => {
     const before = deviceReady ? $('deviceSel').value : null;
     const list = await refreshDevices();
+    // 前后端选中状态校验：后端重启会清 SESSION（内存态），前端 deviceReady/
+    // 下拉值不会重置——此时设备虽在列表但后端 serial=null，任何操作报「未选择
+    // 设备」（真机踩过）。脱节时强制重新选中。
+    let backendSerial = null;
+    try {
+      const cr = await fetch(API + '/api/device/current');
+      backendSerial = (await cr.json()).serial;
+    } catch { /* 后端未就绪，跳过校验 */ }
+    if (before && backendSerial !== before) {
+      const ready2 = list.filter(d => d.state === 'device');
+      if (ready2.length > 0) {
+        $('deviceSel').value = ready2[0].serial;
+        await selectDevice(ready2[0].serial);
+        return;
+      }
+    }
     const currentOk = list.find(d => d.serial === before && d.state === 'device');
     if (!currentOk) {
       const ready2 = list.filter(d => d.state === 'device');
