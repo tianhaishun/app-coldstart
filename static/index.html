@@ -677,6 +677,8 @@
         <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">📝 历史记录</span>
         <span><span id="histBadge" class="text-[10px] px-1.5 py-0.5 bg-surface-container-high rounded font-mono">0</span> <span class="text-[10px] text-on-surface-variant">条</span></span>
       </div>
+      <!-- 样本编辑区（常驻：随时可删样本并重算，不依赖自动循环——用户反馈的流程修复） -->
+      <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
       <div id="historyList" class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-0.5 custom-scrollbar">
         <div class="text-center text-on-surface-variant py-5 text-xs">暂无记录 · 用自动测速采集</div>
       </div>
@@ -697,7 +699,6 @@
           <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">CSV</button>
         </div>
       </div>
-      <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
       <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
     </div>
   </aside>
@@ -1850,6 +1851,52 @@ function renderStats() {
     hintEl.innerHTML = '<span class="tag-second">二次</span> 下一条应是 <b>二次冷启动</b> · 杀进程后点「开始计时」（不要卸载）';
   }
 }
+// ── 样本编辑区（常驻）：随时删样本并重算，不依赖自动循环 ──
+// 流程修复：之前样本列表只在 renderAutoReport（自动循环结束）时渲染，
+// 用户反馈「要先跑循环才能删历史记录」不合理——改为页面加载即渲染全部样本。
+function renderSampleList() {
+  const samplesBox = $('reportSamples');
+  if (!samplesBox) return;
+  if (!records.length) { samplesBox.classList.add('hidden'); return; }
+  samplesBox.classList.remove('hidden');
+  // 分组剔除标记（MAX/MIN，n>=3 时每组剔 1 最大 + 1 最小，与明细一致）
+  const extremeTag = new Map();
+  function markExtreme(list) {
+    const vals = list.map(r => r.time);
+    if (vals.length >= 3) {
+      const riMax = records.indexOf(list[vals.indexOf(Math.max(...vals))]);
+      const riMin = records.indexOf(list[vals.indexOf(Math.min(...vals))]);
+      if (riMax >= 0) extremeTag.set(riMax, 'max');
+      if (riMin >= 0) extremeTag.set(riMin, 'min');
+    }
+  }
+  markExtreme(records.filter(r => r.type === 'first'));
+  markExtreme(records.filter(r => r.type === 'second'));
+  let fi = 0, si = 0;
+  const rows = records.map((r, i) => {
+    const isOdd = (i + 1) % 2 === 1;
+    const rType = r.type || (isOdd ? 'first' : 'second');  // 与 computeStatsGrouped 同规则
+    const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
+    const typeTag = rType === 'first'
+      ? '<span class="tag-type tag-first">首</span>'
+      : '<span class="tag-type tag-second">二</span>';
+    const tag = extremeTag.has(i)
+      ? `<span class="tag ${extremeTag.get(i)}">${extremeTag.get(i) === 'max' ? 'MAX' : 'MIN'}</span>` : '';
+    const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除后自动重算">异常</span>' : '';
+    return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
+  }).join('');
+  samplesBox.innerHTML =
+    `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">样本 ${records.length} 条（首次 ${records.filter(r => r.type === 'first').length} + 二次 ${records.filter(r => r.type === 'second').length}）· 点 ✕ 删除后自动重算统计与报告</div>` +
+    `<div class="p-1.5 flex flex-col gap-0.5 custom-scrollbar max-h-[140px] overflow-y-auto">${rows}</div>`;
+  samplesBox.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
+    const ri = parseInt(b.dataset.ridx);
+    if (!(ri >= 0 && ri < records.length)) return;
+    records.splice(ri, 1);
+    saveRecords(); renderHistory(); renderStats();
+    if (lastReportCtx) renderAutoReport(lastReportCtx);  // 有报告时同步重算
+  }));
+}
+
 function renderHistory() {
   const el = $('historyList');
   $('histBadge').textContent = records.length;
@@ -1892,6 +1939,7 @@ function renderHistory() {
     const idx = parseInt(e.target.dataset.idx);
     records.splice(idx, 1); saveRecords(); renderHistory(); renderStats();
   }));
+  renderSampleList();  // 样本编辑区同步（常驻）
 }
 function removeLast() { if (!records.length) return; records.pop(); saveRecords(); renderHistory(); renderStats(); }
 async function clearAll() {
@@ -3131,48 +3179,7 @@ function renderAutoReport(ctx) {
   card.classList.remove('hidden');
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  // ── 本轮样本交互列表：可删异常样本，删除后自动重算报告与统计（不用翻历史列表/复制 CSV）──
-  const samplesBox = $('reportSamples');
-  const extremeTag = new Map();  // records 索引 -> 'max'|'min'（n>=3 时每组剔 1 最大 + 1 最小，与明细一致）
-  function markExtreme(list) {
-    const vals = list.map(r => r.time);
-    if (vals.length >= 3) {
-      const riMax = records.indexOf(list[vals.indexOf(Math.max(...vals))]);
-      const riMin = records.indexOf(list[vals.indexOf(Math.min(...vals))]);
-      if (riMax >= 0) extremeTag.set(riMax, 'max');
-      if (riMin >= 0) extremeTag.set(riMin, 'min');
-    }
-  }
-  markExtreme(firsts);
-  markExtreme(seconds);
-  if (runRecords.length) {
-    samplesBox.classList.remove('hidden');
-    let fi = 0, si = 0;
-    const rows = runRecords.map((r, i) => {
-      const n = r.type === 'first' ? ++fi : ++si;
-      const ridx = records.indexOf(r);
-      const typeTag = r.type === 'first'
-        ? '<span class="tag-type tag-first">首</span>'
-        : '<span class="tag-type tag-second">二</span>';
-      const tag = extremeTag.has(ridx)
-        ? `<span class="tag ${extremeTag.get(ridx)}">${extremeTag.get(ridx) === 'max' ? 'MAX' : 'MIN'}</span>` : '';
-      const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除后自动重算">异常</span>' : '';
-      return `<div class="hist-item"><span class="idx">#${n}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
-    }).join('');
-    samplesBox.innerHTML =
-      `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">本轮样本 ${runRecords.length} 条（首次 ${firsts.length} + 二次 ${seconds.length}）· 点 ✕ 删除后自动重算报告与统计</div>` +
-      `<div class="p-1.5 flex flex-col gap-0.5 custom-scrollbar max-h-[180px] overflow-y-auto">${rows}</div>`;
-    samplesBox.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
-      const rec = runRecords[parseInt(b.dataset.ridx)];
-      const ri = records.indexOf(rec);
-      if (ri < 0) return;
-      records.splice(ri, 1);
-      saveRecords(); renderHistory(); renderStats();
-      renderAutoReport(ctx);  // ctx 全是原始值，可安全复用重算
-    }));
-  } else {
-    samplesBox.classList.add('hidden');
-  }
+  renderSampleList();  // 样本编辑区常驻渲染（历史卡，随时可删样本，不依赖本报告）
   lastReportCtx = ctx;
 }
 
