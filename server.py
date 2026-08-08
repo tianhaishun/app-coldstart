@@ -1614,9 +1614,12 @@ def preflight_auto(req: ReinstallReq) -> dict:
         errors.append(str(e))
     if not (req.package or "").strip():
         errors.append("包名为空")
-    apk = Path(req.apk_path or "")
-    if not apk.is_file():
-        errors.append(f"APK 不存在：{req.apk_path}（请重新上传）")
+    # iOS 模式用已装 App/IPA，不要求 APK（真机验证发现误拦自动循环）
+    apk = None
+    if ds is not None and ds.platform != "ios":
+        apk = Path(req.apk_path or "")
+        if not apk.is_file():
+            errors.append(f"APK 不存在：{req.apk_path}（请重新上传）")
     marker_ok = False
     if ds is not None:
         marker_ok = (
@@ -1628,8 +1631,8 @@ def preflight_auto(req: ReinstallReq) -> dict:
     return {
         "ok": len(errors) == 0,
         "errors": errors,
-        "apk_name": apk.name if apk.is_file() else "",
-        "apk_size_mb": round(apk.stat().st_size / 1048576, 1) if apk.is_file() else 0,
+        "apk_name": apk.name if apk and apk.is_file() else "",
+        "apk_size_mb": round(apk.stat().st_size / 1048576, 1) if apk and apk.is_file() else 0,
         "marker_ready": marker_ok,
         "device": ds.serial if ds else None,
     }
