@@ -18,6 +18,7 @@ from adb_helper import (  # noqa: E402
     PerfTimer,
     ScreenPoller,
     TemplateMatcher,
+    install_error_cn,
     parse_aapt_badging,
 )
 
@@ -76,6 +77,78 @@ def test_adb_helper_rejects_command_timeout(monkeypatch, tmp_path):
     adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
     with pytest.raises(AdbHelperError, match="超时"):
         adb.get_state()
+
+
+def test_adb_helper_swipe_builds_command(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    adb.swipe(10, 20, 300, 400, dur_ms=150)
+    # 与既有测试一致：adb 路径可解析为绝对路径，只断言 index 1 起（-s SERIAL ...）
+    assert calls[0][1:] == [
+        "-s", "SERIAL",
+        "shell", "input", "swipe", "10", "20", "300", "400", "150",
+    ]
+
+
+def test_reinstall_rejects_empty_uninstall_output(monkeypatch, tmp_path):
+    """教训七：uninstall 空输出（设备离线）必须抛错，不能 install -r 变覆盖安装。"""
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    with pytest.raises(AdbHelperError, match="无输出"):
+        adb.reinstall("com.example", apk)
+
+
+def test_reinstall_uses_pm_fallback_on_failure(monkeypatch, tmp_path):
+    outputs = iter(
+        [SimpleNamespace(returncode=0, stdout=b"Failure [INSTALL_FAILED_ALREADY_EXISTS]", stderr=b""),
+         SimpleNamespace(returncode=0, stdout=b"Success", stderr=b""),
+         SimpleNamespace(returncode=0, stdout=b"Success", stderr=b"")]
+    )
+
+    def fake_run(command, **kwargs):
+        return next(outputs)
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    log = adb.reinstall("com.example", apk)
+    assert any("pm uninstall --user 0" in line for line in log)
+    assert any("install" in line and "Success" in line for line in log)
+
+
+def test_reinstall_translates_install_error(monkeypatch, tmp_path):
+    outputs = iter(
+        [SimpleNamespace(returncode=0, stdout=b"Success", stderr=b""),
+         SimpleNamespace(returncode=0, stdout=b"Failure [INSTALL_FAILED_OLDER_SDK]", stderr=b"")]
+    )
+
+    def fake_run(command, **kwargs):
+        return next(outputs)
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    with pytest.raises(AdbHelperError, match="OLDER_SDK|系统版本过低"):
+        adb.reinstall("com.example", apk)
+
+
+def test_install_error_cn_translation():
+    assert "系统版本过低" in install_error_cn("Failure [INSTALL_FAILED_OLDER_SDK]")
+    assert install_error_cn("Success") is None
 
 
 def test_screen_poller_captures_and_matches_at_fixed_interval():

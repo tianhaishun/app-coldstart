@@ -34,6 +34,44 @@ class DeviceInfo:
     model: str = ""
 
 
+# adb install 失败错误码中文翻译（从 server.py AdbDevice 迁移，对齐 AGENTS 教训七）。
+# adb 输出形如 "Failure [INSTALL_FAILED_OLDER_SDK]"，匹配后附加中文解释。
+_INSTALL_ERROR_CN: dict[str, str] = {
+    "INSTALL_FAILED_ALREADY_EXISTS": "应用已存在（请尝试卸载后重装）",
+    "INSTALL_FAILED_INVALID_APK": "APK 文件无效或已损坏",
+    "INSTALL_FAILED_INVALID_URI": "APK 路径无效",
+    "INSTALL_FAILED_INSUFFICIENT_STORAGE": "设备存储空间不足",
+    "INSTALL_FAILED_DUPLICATE_PACKAGE": "包名重复",
+    "INSTALL_FAILED_NO_SHARED_USER": "共享用户不存在",
+    "INSTALL_FAILED_UPDATE_INCOMPATIBLE": "签名不一致，需先卸载已安装的同名应用",
+    "INSTALL_FAILED_SHARED_USER_INCOMPATIBLE": "共享用户签名不兼容",
+    "INSTALL_FAILED_MISSING_SHARED_LIBRARY": "缺少依赖的共享库",
+    "INSTALL_FAILED_REPLACE_COULDNT_DELETE": "无法删除旧版本（残留数据）",
+    "INSTALL_FAILED_DEXOPT": "DEX 优化失败（APK 与系统不兼容）",
+    "INSTALL_FAILED_OLDER_SDK": "系统版本过低，不满足 APK 最低要求",
+    "INSTALL_FAILED_CONFLICTING_PROVIDER": "ContentProvider 权限冲突",
+    "INSTALL_FAILED_NEWER_SDK": "系统版本高于 APK 目标版本",
+    "INSTALL_FAILED_TEST_ONLY": "APK 是 test-only 构建，需加 -t 参数安装",
+    "INSTALL_FAILED_CPU_ABI_INCOMPATIBLE": "CPU 架构不兼容",
+    "INSTALL_FAILED_MISSING_FEATURE": "设备缺少 APK 要求的硬件特性",
+    "INSTALL_FAILED_CONTAINER_ERROR": "容器错误（SD 卡问题）",
+    "INSTALL_FAILED_INVALID_INSTALL_LOCATION": "安装位置无效",
+    "INSTALL_FAILED_MEDIA_UNAVAILABLE": "媒体不可用（SD 卡未挂载）",
+    "INSTALL_FAILED_VERIFICATION_TIMEOUT": "验证超时",
+    "INSTALL_FAILED_VERIFICATION_FAILURE": "验证失败",
+    "INSTALL_FAILED_PACKAGE_CHANGED": "包名发生变化",
+    "INSTALL_FAILED_UID_CHANGED": "UID 已变化（需先卸载旧版）",
+}
+
+
+def install_error_cn(output: str) -> str | None:
+    """从 adb install 输出匹配 INSTALL_FAILED_* 错误码，返回中文解释（无匹配返回 None）。"""
+    for code, cn in _INSTALL_ERROR_CN.items():
+        if code in output:
+            return f"{code}：{cn}"
+    return None
+
+
 @dataclass(frozen=True)
 class ApkInfo:
     path: str
@@ -221,12 +259,29 @@ class AdbHelper:
                 raise AdbHelperError(f"截图失败（raw: {raw_error}; png: {png_error}）") from png_error
 
     def screenshot(self, target: str | Path) -> Path:
-        data = self.run_bytes(["exec-out", "screencap", "-p"], timeout=15.0)
-        if not data.startswith(b"\x89PNG"):
-            raise AdbHelperError("截图不是有效 PNG")
+        """截屏保存 PNG 到 target。优先 exec-out 直出；失败回退「设备端落盘 + pull」。
+
+        与 server.py 老 AdbDevice 行为对齐：exec-out 直出不支持/超时的设备走兜底路径。
+        """
         path = Path(target)
-        path.write_bytes(data)
-        return path
+        try:
+            data = self.run_bytes(["exec-out", "screencap", "-p"], timeout=15.0)
+            if len(data) < 1024 or not data.startswith(b"\x89PNG"):
+                raise AdbHelperError("exec-out screencap 返回的不是有效 PNG")
+            path.write_bytes(data)
+            return path
+        except AdbHelperError:
+            # 回退：手机端落盘 + pull
+            device_path = "/sdcard/_cst_shot.png"
+            self.run(["shell", "screencap", "-p", device_path], timeout=15.0)
+            self.run(["pull", device_path, str(path)], timeout=30.0)
+            try:
+                self.run(["shell", "rm", "-f", device_path], check=False, timeout=5.0)
+            except AdbHelperError:
+                pass
+            if not path.exists():
+                raise AdbHelperError("pull 后截图不存在")
+            return path
 
     def tap_pixel(self, x: int, y: int) -> None:
         self.run(["shell", "input", "tap", str(int(x)), str(int(y))], timeout=10.0)
@@ -234,6 +289,21 @@ class AdbHelper:
     def tap_norm(self, cx: float, cy: float) -> None:
         width, height = self._last_size or self.screen_size()
         self.tap_pixel(round(cx * width), round(cy * height))
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, dur_ms: int = 200) -> None:
+        self.run(
+            [
+                "shell",
+                "input",
+                "swipe",
+                str(int(x1)),
+                str(int(y1)),
+                str(int(x2)),
+                str(int(y2)),
+                str(int(dur_ms)),
+            ],
+            timeout=15.0,
+        )
 
     def keyevent(self, code: int) -> None:
         self.run(["shell", "input", "keyevent", str(int(code))], timeout=5.0)
@@ -278,7 +348,37 @@ class AdbHelper:
         return output
 
     def reinstall(self, package: str, apk_path: str | Path) -> list[str]:
-        return [f"uninstall: {self.uninstall(package)}", f"install: {self.install(apk_path)}"]
+        """卸载重装（严格版，对齐 AGENTS 教训七），返回 adb 原始输出日志行。
+
+        严格性：adb 输出必须有明确 Success/Failure 字样；空输出（device offline /
+        adb 断连）立即抛错，不静默继续——否则 uninstall 静默失败后 install -r 会
+        覆盖安装，被当「干净重装」，污染首次冷启动样本。失败时抛 AdbHelperError。
+        """
+        path = Path(apk_path)
+        if not path.is_file():
+            raise AdbHelperError(f"APK 文件不存在：{path}")
+        log: list[str] = []
+        out = self.run(["uninstall", package], check=False, timeout=60.0)
+        log.append(f"uninstall: {out}")
+        if not out:
+            raise AdbHelperError("卸载失败：adb 无输出（设备离线或 adb 断连）")
+        if "Failure" in out:
+            # 兜底：部分设备（如装为系统用户）需要 --user 0 才能卸
+            out2 = self.run(
+                ["shell", "pm", "uninstall", "--user", "0", package],
+                check=False, timeout=30.0,
+            )
+            log.append(f"pm uninstall --user 0: {out2}")
+            if not out2:
+                raise AdbHelperError("pm uninstall --user 0 无输出（设备离线或 adb 断连）")
+        out3 = self.run(["install", "-r", str(path)], check=False, timeout=180.0)
+        log.append(f"install: {out3}")
+        if not out3:
+            raise AdbHelperError("安装失败：adb 无输出（设备离线或 adb 断连）")
+        if "Success" not in out3:
+            hint = install_error_cn(out3)
+            raise AdbHelperError(f"安装失败：{out3}" + (f"\n💡 {hint}" if hint else ""))
+        return log
 
     def parse_apk(self, apk_path: str | Path) -> ApkInfo:
         """Parse package/version metadata using aapt or aapt2 on either OS."""
@@ -534,5 +634,5 @@ def _raw_screencap_to_bgr(raw: bytes) -> Any:
 __all__ = [
     "AdbHelper", "AdbHelperError", "ApkInfo", "DeviceInfo", "MatchResult",
     "PerfTimer", "ScreenPoller", "ScreenSample", "TemplateMatcher",
-    "parse_aapt_badging",
+    "install_error_cn", "parse_aapt_badging",
 ]

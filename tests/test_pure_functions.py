@@ -5,7 +5,8 @@
 测试范围（AGENTS.md §1.4「改完必须验证」的自动化基础）：
   - _safe_apk_filename：APK 文件名安全过滤（路径穿越防御，安全关键代码）
   - _safe_project_id：项目 id 安全过滤（路径穿越防御）
-  - _raw_screencap_to_bgr：raw screencap 缓冲 → BGR 解析（自动测速热路径）
+  - _raw_screencap_to_bgr：raw screencap 缓冲 → BGR 解析（自动测速热路径；
+    v4 起该函数已从 server.py 并入 adb_helper.py，测试随迁）
 """
 
 import re
@@ -22,9 +23,9 @@ import pytest  # noqa: E402
 from server import (  # noqa: E402
     _safe_apk_filename,
     _safe_project_id,
-    _raw_screencap_to_bgr,
     AdbError,
 )
+from adb_helper import AdbHelperError, _raw_screencap_to_bgr  # noqa: E402  (v4 起并入 adb_helper)
 
 
 # ── _safe_apk_filename ──────────────────────────────────────────
@@ -219,33 +220,33 @@ class TestRawScreencapToBgr:
 
     def test_too_short_raises(self):
         """缓冲过短（< 12 字节）抛异常。"""
-        with pytest.raises(AdbError):
+        with pytest.raises(AdbHelperError):
             _raw_screencap_to_bgr(b"\x00" * 8)
 
     def test_zero_dimensions_raises(self):
         """尺寸为 0 抛异常。"""
         raw = struct.pack("<III", 0, 100, 1) + b"\x00" * 100
-        with pytest.raises(AdbError):
+        with pytest.raises(AdbHelperError):
             _raw_screencap_to_bgr(raw)
 
     def test_oversized_dimensions_raises(self):
         """尺寸超限（> 10000）抛异常。"""
         raw = struct.pack("<III", 99999, 1, 1) + b"\x00" * 4
-        with pytest.raises(AdbError):
+        with pytest.raises(AdbHelperError):
             _raw_screencap_to_bgr(raw)
 
     def test_unsupported_format_raises(self):
         """不支持的像素格式（fmt 不在 1/2/5）抛异常。"""
         w, h = 1, 1
         raw = struct.pack("<III", w, h, 99) + b"\x00" * 4
-        with pytest.raises(AdbError):
+        with pytest.raises(AdbHelperError):
             _raw_screencap_to_bgr(raw)
 
     def test_length_mismatch_raises(self):
         """长度既不匹配 12+need 也不匹配 16+need 时抛异常。"""
         w, h = 2, 2
         raw = struct.pack("<III", w, h, 1) + b"\x00" * 10  # need=16，给 10
-        with pytest.raises(AdbError):
+        with pytest.raises(AdbHelperError):
             _raw_screencap_to_bgr(raw)
 
     def test_larger_image_reshape(self):

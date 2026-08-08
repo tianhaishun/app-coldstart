@@ -5,7 +5,7 @@
     Pixel 6a 实测 ~350ms，优于 `screencap -p` 的 ~580ms）；失败回退 PNG
   - 落盘/模板/直播仍可用 `screencap -p` PNG
   - OCR 用 RapidOCR（ONNX，跨平台，归一化坐标输出）
-  - 所有 adb 调用集中在 AdbDevice，便于复用 + 加锁
+  - 所有 adb 调用集中在 adb_helper.AdbHelper（跨平台封装），便于复用 + 加锁
   - 实时画面走截图轮询（不做 scrcpy 流，保持简单可靠）
 
 v1 → v2 的关键修复：
@@ -26,7 +26,7 @@ import gzip
 import hashlib
 import os
 import re
-import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,13 +43,17 @@ if str(ROOT) not in sys.path:
 
 # 内置 adb（同目录 adb\\adb.exe），找不到再回退 PATH
 try:
-    from adb_helper import AdbHelper, AdbHelperError
+    from adb_helper import AdbHelper, AdbHelperError, TemplateMatcher
 except ImportError:
     AdbHelper = None
     AdbHelperError = RuntimeError
+    TemplateMatcher = None
 
+# Windows 打包内置 adb/adb.exe；macOS/Linux 仓库里只有 Windows 二进制（PE 格式
+# 在 mac 上会 PermissionError），必须走 AdbHelper 解析（项目 adb/adb → PATH，
+# 即 brew android-platform-tools）。
 _BUNDLED_ADB = ROOT / "adb" / "adb.exe"
-if _BUNDLED_ADB.exists():
+if os.name == "nt" and _BUNDLED_ADB.exists():
     ADB_EXE = str(_BUNDLED_ADB)
 else:
     try:
@@ -57,19 +61,24 @@ else:
     except (AdbHelperError, OSError):
         ADB_EXE = "adb"
 
-# 内置 iOS 工具链（同目录 ios\\idevice_id.exe）
-# 打包后 ROOT 落在 resources/backend，ios/ 在 extraResources 里
+# 内置 iOS 工具链（同目录 ios\\idevice_id.exe；打包后 ROOT 落在 resources/backend，
+# ios/ 在 extraResources 里）。Windows 打包内置；macOS/Linux 依赖 brew 的
+# libimobiledevice（idevice_id 在 PATH 里）——不按平台解析会导致 Mac 上
+# IosDevice.devices() 因 IDEVICE_ID_EXE=None 恒返回空列表（iOS 设备检测不到）。
 _BUNDLED_IDEVICE_ID = ROOT / "ios" / "idevice_id.exe"
-IDEVICE_ID_EXE = str(_BUNDLED_IDEVICE_ID) if _BUNDLED_IDEVICE_ID.exists() else None
+if _BUNDLED_IDEVICE_ID.exists():
+    IDEVICE_ID_EXE = str(_BUNDLED_IDEVICE_ID)
+else:
+    IDEVICE_ID_EXE = shutil.which("idevice_id")
 
 # APK 上传目录（每次上传保留原始文件名，不再覆盖式存储）。
 # 复数 _cst_uploads 与老的单数 _cst_upload.apk 区分；启动时整目录清空重建。
 APK_UPLOAD_DIR = Path(tempfile.gettempdir()) / "_cst_uploads"
 
-# 启动成功模板图（cv2.matchTemplate 区域比对用，覆盖式单文件）。
-# 用户在画面上点"启动成功"元素位置 → 后端截小区域存为这个模板 → 运行时只搜小区域。
+# 启动成功模板图（cv2.matchTemplate 区域比对用）。多设备（v4）起按设备隔离存
+# tempdir/_cst_marker_<safe_serial>.png（见 DeviceSession.marker_path），不再用单文件。
+# 用户在画面上点"启动成功"元素位置 → 后端截小区域存为模板 → 运行时只搜小区域。
 # 比 OCR 文字匹配快约 20-40 倍（毫秒级 vs 秒级），冷启动计时精度大幅提升。
-MARKER_TEMPLATE_PATH = Path(tempfile.gettempdir()) / "_cst_marker.png"
 MARKER_MATCH_THRESHOLD = 0.85   # cv2.matchTemplate 命中阈值（TM_CCOEFF_NORMED，0~1）
 MARKER_SEARCH_PADDING = 20      # 模板坐标周围搜索范围（像素，容忍 UI 轻微位移）
 MARKER_DEFAULT_W = 240          # 默认模板宽（用户没传 box_w 时用）
@@ -84,7 +93,6 @@ MARKER_REQUIRE_RISING_EDGE = True
 
 # 跳过弹窗模板（通知权限「允许/不允许」等）：命中后自动点击，不停表
 SKIP_TEMPLATE_MAX = 3
-SKIP_TEMPLATE_DIR = Path(tempfile.gettempdir()) / "_cst_skips"
 SKIP_MATCH_THRESHOLD = 0.85
 SKIP_SEARCH_PADDING = 40        # 弹窗按钮位移通常比启动元素大一点
 SKIP_DEFAULT_W = 200            # 按钮区域默认比启动元素略窄
@@ -105,13 +113,15 @@ def _safe_apk_filename(original: str) -> str:
 
     防御点（可信度要求高，路径攻击必须拦）：
       - 只取 basename：防 ``../../evil.apk`` 路径穿越写到任意目录
+      - 反斜杠统一转正斜杠再取 basename：Windows 风格 ``..\\..\\evil.apk`` 在
+        macOS/Linux 上 os.path.basename 不认反斜杠，必须先归一化（跨平台一致）
       - 非 [A-Za-z0-9_\\-.] 字符（含中文/空格/特殊符号）替换为 ``_``：避免文件系统/adb 命令解析问题
       - 强制 .apk 后缀
       - 过滤后为空或过短，用 ``apk_<short>`` 兜底
       - 与目录内已有文件同名时追加短 hash 后缀（不覆盖，保历史）
     返回值仅为文件名（不含路径），调用方拼到 APK_UPLOAD_DIR 下。
     """
-    name = os.path.basename(original or "").strip()
+    name = os.path.basename((original or "").replace("\\", "/")).strip()
     if not name:
         name = "apk_upload.apk"
     # 强制 .apk 后缀（无论原名后缀是什么）
@@ -175,6 +185,13 @@ class OcrEngine:
         import cv2
 
         engine = self._get()
+        # 多设备并发 OCR：RapidOCR 单引擎推理不保证线程安全，识别整体加锁串行
+        with self._lock:
+            return self._recognize_locked(engine, image_path)
+
+    def _recognize_locked(self, engine, image_path: Path) -> list[OcrItem]:
+        import cv2
+
         img = cv2.imread(str(image_path))
         if img is None:
             raise RuntimeError(f"cv2 读图失败：{image_path}")
@@ -217,351 +234,6 @@ class OcrEngine:
         return items
 
 
-# ── ADB 设备 ───────────────────────────────────────────────────────────
-
-
-# adb install 失败错误码中文翻译。
-# adb 输出形如 "Failure [INSTALL_FAILED_OLDER_SDK]"，匹配后附加中文解释，
-# 让用户不用查文档就能知道为什么装不上。
-_INSTALL_ERROR_CN: dict[str, str] = {
-    "INSTALL_FAILED_ALREADY_EXISTS": "应用已存在（请尝试卸载后重装）",
-    "INSTALL_FAILED_INVALID_APK": "APK 文件无效或已损坏",
-    "INSTALL_FAILED_INVALID_URI": "APK 路径无效",
-    "INSTALL_FAILED_INSUFFICIENT_STORAGE": "设备存储空间不足",
-    "INSTALL_FAILED_DUPLICATE_PACKAGE": "包名重复",
-    "INSTALL_FAILED_NO_SHARED_USER": "共享用户不存在",
-    "INSTALL_FAILED_UPDATE_INCOMPATIBLE": "签名不一致，需先卸载已安装的同名应用",
-    "INSTALL_FAILED_SHARED_USER_INCOMPATIBLE": "共享用户签名不兼容",
-    "INSTALL_FAILED_MISSING_SHARED_LIBRARY": "缺少依赖的共享库",
-    "INSTALL_FAILED_REPLACE_COULDNT_DELETE": "无法删除旧版本（残留数据）",
-    "INSTALL_FAILED_DEXOPT": "DEX 优化失败（APK 与系统不兼容）",
-    "INSTALL_FAILED_OLDER_SDK": "系统版本过低，不满足 APK 最低要求",
-    "INSTALL_FAILED_CONFLICTING_PROVIDER": "ContentProvider 权限冲突",
-    "INSTALL_FAILED_NEWER_SDK": "系统版本高于 APK 目标版本",
-    "INSTALL_FAILED_TEST_ONLY": "APK 是 test-only 构建，需加 -t 参数安装",
-    "INSTALL_FAILED_CPU_ABI_INCOMPATIBLE": "CPU 架构不兼容",
-    "INSTALL_FAILED_MISSING_FEATURE": "设备缺少 APK 要求的硬件特性",
-    "INSTALL_FAILED_CONTAINER_ERROR": "容器错误（SD 卡问题）",
-    "INSTALL_FAILED_INVALID_INSTALL_LOCATION": "安装位置无效",
-    "INSTALL_FAILED_MEDIA_UNAVAILABLE": "媒体不可用（SD 卡未挂载）",
-    "INSTALL_FAILED_VERIFICATION_TIMEOUT": "验证超时",
-    "INSTALL_FAILED_VERIFICATION_FAILURE": "验证失败",
-    "INSTALL_FAILED_PACKAGE_CHANGED": "包名发生变化",
-    "INSTALL_FAILED_UID_CHANGED": "UID 已变化（需先卸载旧版）",
-}
-
-
-def _translate_install_error(output: str) -> Optional[str]:
-    """从 adb install 输出中匹配 INSTALL_FAILED_* 错误码，返回中文解释。"""
-    for code, cn in _INSTALL_ERROR_CN.items():
-        if code in output:
-            return f"{code}：{cn}"
-    return None
-
-
-class AdbError(RuntimeError):
-    """adb 调用失败的统一异常，message 直接返回给前端。"""
-
-
-class AdbDevice:
-    """单设备的 adb 操作集合。多设备时由调用方传入不同的 serial。"""
-
-    def __init__(self, serial: Optional[str] = None) -> None:
-        self.serial = serial
-        self._last_size: Optional[tuple[int, int]] = None
-
-    # ── 基础调用 ──
-    def _build_args(self, args: list[str]) -> list[str]:
-        if self.serial:
-            return [ADB_EXE, "-s", self.serial, *args]
-        return [ADB_EXE, *args]
-
-    def run(
-        self,
-        args: list[str],
-        *,
-        timeout: float = 30.0,
-        check: bool = True,
-    ) -> str:
-        """同步跑 adb 命令，返回 stdout（已 strip）。失败抛 AdbError。"""
-        cmd = self._build_args(args)
-        try:
-            cp = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise AdbError(f"adb 命令超时（{timeout}s）：{' '.join(args)}") from e
-        except FileNotFoundError as e:
-            raise AdbError(f"找不到 adb：{ADB_EXE}") from e
-        out = cp.stdout.decode("utf-8", "replace")
-        err = cp.stderr.decode("utf-8", "replace")
-        if check and cp.returncode != 0:
-            tail = (err or out).strip().splitlines()
-            last = tail[-1] if tail else f"exit={cp.returncode}"
-            raise AdbError(last)
-        return out.strip()
-
-    def run_bytes(self, args: list[str], *, timeout: float = 30.0) -> bytes:
-        """跑 adb 取原始 bytes（用于 screencap -p 直出 PNG）。"""
-        cmd = self._build_args(args)
-        try:
-            cp = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired as e:
-            raise AdbError(f"adb 命令超时（{timeout}s）：{' '.join(args)}") from e
-        if cp.returncode != 0:
-            err = cp.stderr.decode("utf-8", "replace").strip().splitlines()
-            raise AdbError(err[-1] if err else f"exit={cp.returncode}")
-        return cp.stdout
-
-    # ── 设备列表 ──
-    @staticmethod
-    def devices() -> list[dict]:
-        """返回 [{serial, state, model?}]。adb devices 解析。"""
-        try:
-            out = subprocess.run(
-                [ADB_EXE, "devices"],
-                capture_output=True,
-                timeout=5,
-                check=False,
-                text=True,
-            ).stdout
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            raise AdbError(f"adb devices 失败：{e}") from e
-        devs: list[dict] = []
-        for line in out.splitlines():
-            m = re.match(r"^(\S+)\s+(\S+)\s*$", line)
-            if not m:
-                continue
-            sn, state = m.group(1), m.group(2)
-            if sn.startswith("List of") or sn == "*":
-                continue
-            if state not in ("device", "unauthorized", "offline"):
-                continue
-            model = ""
-            if state == "device":
-                try:
-                    model = subprocess.run(
-                        [ADB_EXE, "-s", sn, "shell", "getprop", "ro.product.model"],
-                        capture_output=True, timeout=3, check=False, text=True,
-                    ).stdout.strip()
-                except Exception:
-                    pass
-            devs.append({"serial": sn, "state": state, "model": model})
-        return devs
-
-    # ── 截图 ──
-    def screenshot(self, target: Optional[Path] = None) -> Path:
-        """优先 exec-out screencap -p 直出 PNG；不支持则回退 screencap + pull。
-
-        给需要落盘的路径用（设模板 / 直播缓存）。自动测速热路径请用 screenshot_bgr()。
-        """
-        if target is None:
-            fd, name = tempfile.mkstemp(prefix="_cst_", suffix=".png")
-            os.close(fd)
-            target = Path(name)
-        try:
-            data = self.run_bytes(["exec-out", "screencap", "-p"], timeout=15.0)
-            if len(data) < 1024 or not data.startswith(b"\x89PNG"):
-                raise AdbError("exec-out screencap 返回的不是有效 PNG")
-            target.write_bytes(data)
-            return target
-        except AdbError:
-            # 回退：手机端落盘 + pull
-            device_path = "/sdcard/_cst_shot.png"
-            self.run(["shell", "screencap", "-p", device_path], timeout=15.0)
-            self.run(["pull", device_path, str(target)], timeout=30.0)
-            try:
-                self.run(["shell", "rm", "-f", device_path], check=False, timeout=5.0)
-            except AdbError:
-                pass
-            if not target.exists():
-                raise AdbError("pull 后截图不存在")
-            return target
-
-    def screenshot_bgr(self) -> tuple[Any, str]:
-        """截当前屏为 OpenCV BGR ndarray（自动测速热路径）。
-
-        优先：`screencap | gzip -1`（raw，免设备端 PNG 编码；Pixel 6a 实测快于 -p）。
-        失败回退：`screencap -p` + cv2.imdecode。
-
-        返回 (bgr, via)，via 为 ``raw_gzip`` / ``png``，供日志诊断。
-        """
-        import cv2
-        import numpy as np
-
-        # 1) raw + gzip（热路径）
-        try:
-            gz = self.run_bytes(
-                ["exec-out", "sh", "-c", "screencap | gzip -1 -c"],
-                timeout=15.0,
-            )
-            if len(gz) < 64:
-                raise AdbError("gzip 截图过短")
-            raw = gzip.decompress(gz)
-            bgr = _raw_screencap_to_bgr(raw)
-            return bgr, "raw_gzip"
-        except Exception as e:
-            # 2) PNG 回退（保持旧路径可用）
-            try:
-                data = self.run_bytes(["exec-out", "screencap", "-p"], timeout=15.0)
-                if len(data) < 1024 or not data.startswith(b"\x89PNG"):
-                    raise AdbError("exec-out screencap 返回的不是有效 PNG")
-                arr = np.frombuffer(data, dtype=np.uint8)
-                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if bgr is None:
-                    raise AdbError("PNG imdecode 失败")
-                return bgr, "png"
-            except AdbError:
-                raise
-            except Exception as e2:
-                raise AdbError(f"截图失败（gzip: {e}; png: {e2})") from e2
-
-    def screen_size(self) -> tuple[int, int]:
-        out = self.run(["shell", "wm", "size"], timeout=5.0)
-        m = re.search(r"(\d+)x(\d+)", out)
-        if not m:
-            raise AdbError(f"解析 wm size 失败：{out!r}")
-        self._last_size = (int(m.group(1)), int(m.group(2)))
-        return self._last_size
-
-    # ── 输入 ──
-    def tap_pixel(self, x: int, y: int) -> None:
-        self.run(["shell", "input", "tap", str(x), str(y)], timeout=10.0)
-
-    def tap_norm(self, cx: float, cy: float) -> None:
-        w, h = self._last_size or self.screen_size()
-        self.tap_pixel(int(cx * w), int(cy * h))
-
-    def swipe(self, x1: int, y1: int, x2: int, y2: int, dur_ms: int = 200) -> None:
-        self.run(
-            ["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(dur_ms)],
-            timeout=15.0,
-        )
-
-    def keyevent(self, code: int) -> None:
-        self.run(["shell", "input", "keyevent", str(code)], check=False, timeout=5.0)
-
-    def launch_pkg(self, pkg: str) -> None:
-        """包名启动（绕过 Launcher 触摸）。
-
-        严格性（对齐教训七）：启动是冷启动测速的关键操作，不能静默失败。
-        之前用 check=False 会吞掉 monkey 的非零退出码——错误包名实测返回退出码 252
-        且输出 ``No activities found to run, monkey aborted.``，却被当成功，
-        导致前端开始计时但应用根本没起来（自动测速多轮无人值守时尤其严重）。
-
-        不用 run 的 check=True：monkey 诊断噪音常走 stderr，check=True 优先取 stderr
-        会给用户无意义噪音。这里 check=False 自己解析 stdout：
-        成功标志含 ``Events injected``，失败标志含 ``aborted`` / ``No activities found``。
-        """
-        out = self.run(
-            ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
-            check=False, timeout=10.0,
-        )
-        low = (out or "").lower()
-        # 失败信号优先（即使退出码 0，输出含失败标志也判败，应对 Android 碎片化）
-        if "aborted" in low or "no activities found" in low:
-            raise AdbError(f"包名启动失败：找不到可启动的 Activity（包名错或无桌面入口）。pkg={pkg}")
-        # 成功信号：必须注入了事件。无此标志视为异常（空输出 = 设备离线/adb 断连）
-        if "events injected" not in low:
-            raise AdbError(f"包名启动失败（monkey 输出异常）：{out.strip() or '(空输出，设备可能离线)'}")
-
-    def force_stop(self, pkg: str) -> None:
-        self.run(["shell", "am", "force-stop", pkg], check=False, timeout=5.0)
-
-    def kill_all(self) -> str:
-        """清后台：``am kill-all``（不清系统关键前台，比逐包 force-stop 温和）。
-
-        用于自动测速每轮启动前腾内存，减轻启动抖动。失败可接受（部分 ROM 无此命令）。
-        """
-        out = self.run(["shell", "am", "kill-all"], check=False, timeout=10.0)
-        return (out or "").strip()
-
-    def list_packages(self) -> list[str]:
-        """列出第三方已装包名。`pm list packages -3` 过滤掉系统 App。
-
-        输出形如 ``package:com.foo\\npackage:com.bar``，去掉前缀返回纯包名列表。
-        """
-        out = self.run(["shell", "pm", "list", "packages", "-3"], timeout=15.0)
-        pkgs = []
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("package:"):
-                pkgs.append(line[len("package:"):])
-        return sorted(pkgs)
-
-    def reinstall(self, pkg: str, apk_path: str) -> list[str]:
-        """卸载重装，返回日志行。失败抛 AdbError。
-
-        保持简单透明：uninstall → 兜底 pm uninstall → install → 判 Success。
-        返回的 log 是 adb 原始输出（uninstall: ... / install: ...），不加工。
-        前端原样显示，用户能直接看到 adb 真实反馈。
-
-        严格性（审核修复）：adb 输出必须有明确的 Success/Failure 字样。
-        空输出（device offline / adb 断连）视为失败，不静默继续——否则
-        uninstall 静默失败后 install -r 会覆盖安装，被当"干净重装"，污染首次冷启动。
-        """
-        if not Path(apk_path).exists():
-            raise AdbError(f"APK 文件不存在：{apk_path}")
-        log: list[str] = []
-        out = self.run(["uninstall", pkg], check=False, timeout=60.0)
-        log.append(f"uninstall: {out}")
-        # adb uninstall 输出必须有明确结果（Success 或 Failure [xxx]）
-        # 空输出 = 设备离线/adb 断连，不能继续（否则 install -r 变覆盖安装）
-        if not out:
-            raise AdbError("卸载失败：adb 无输出（设备离线或 adb 断连）")
-        if "Failure" in out:
-            # 兜底：部分设备（如装为系统用户）需要 --user 0 才能卸
-            out2 = self.run(["shell", "pm", "uninstall", "--user", "0", pkg], check=False, timeout=30.0)
-            log.append(f"pm uninstall --user 0: {out2}")
-            if not out2:
-                raise AdbError("pm uninstall --user 0 无输出（设备离线或 adb 断连）")
-        out3 = self.run(["install", "-r", apk_path], check=False, timeout=180.0)
-        log.append(f"install: {out3}")
-        if not out3:
-            raise AdbError("安装失败：adb 无输出（设备离线或 adb 断连）")
-        if "Success" not in out3:
-            hint = _translate_install_error(out3)
-            raise AdbError(f"安装失败：{out3}" + (f"\n💡 {hint}" if hint else ""))
-        return log
-
-
-def _raw_screencap_to_bgr(raw: bytes):
-    """解析 ``adb screencap``（无 -p）原始缓冲 → BGR uint8。
-
-    头：老设备 12 字节 (w,h,fmt)；新设备（含 Pixel）16 字节多一个 colorspace 字段。
-    fmt：1=RGBA_8888，2=RGBX_8888，5=BGRA_8888。
-    """
-    import numpy as np
-
-    if len(raw) < 12:
-        raise AdbError("raw screencap 过短")
-    w, h, fmt = struct.unpack_from("<III", raw, 0)
-    if w <= 0 or h <= 0 or w > 10000 or h > 10000:
-        raise AdbError(f"raw screencap 尺寸异常：{w}x{h} fmt={fmt}")
-    bpp = 4
-    if fmt not in (1, 2, 5):  # RGBA / RGBX / BGRA
-        raise AdbError(f"不支持的 raw 像素格式 fmt={fmt}")
-    need = w * h * bpp
-    if len(raw) - 12 == need:
-        off = 12
-    elif len(raw) - 16 == need:
-        off = 16
-    else:
-        raise AdbError(
-            f"raw screencap 长度不匹配 len={len(raw)} 期望 {need}+12/16 "
-            f"({w}x{h} fmt={fmt})"
-        )
-    rgba = np.frombuffer(raw, dtype=np.uint8, offset=off).reshape(h, w, 4)
-    if fmt == 5:  # BGRA
-        bgr = np.ascontiguousarray(rgba[:, :, :3])
-    else:  # RGBA / RGBX → BGR
-        bgr = np.ascontiguousarray(rgba[:, :, 2::-1])
-    return bgr
-
-
 def _check_amds() -> dict:
     """检测 Apple Mobile Device Service 状态。
 
@@ -601,7 +273,7 @@ def _ios_async(coro):
 class IosDevice:
     """iOS 设备操作（通过 pymobiledevice3 / lockdown 协议）。
 
-    与 AdbDevice 平行，但底层不用 ADB，而是通过 usbmuxd → lockdown。
+    与 AdbHelper 平行，但底层不用 ADB，而是通过 usbmuxd → lockdown。
     非越狱设备限制：
       - 无模拟点击（tap/swipe 不可用，调用时抛 AdbError 提示）
       - 无程序化杀进程（force_stop 是 no-op + 警告日志）
@@ -814,14 +486,42 @@ class IosDevice:
 
 
 
-class Session:
-    """全局会话单例。设备操作串行化（adb server 不擅长并发）。"""
+class AdbError(RuntimeError):
+    """adb 调用失败的统一异常（iOS 设备限制也抛这个），message 直接返回给前端。"""
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._device: Optional[AdbDevice] = None
-        self._serial: Optional[str] = None
-        self._ocr = OcrEngine()
+
+# adb 调用失败统一捕获：Android 走 AdbHelper（AdbHelperError），
+# iOS 仍抛 AdbError（非越狱限制），端点 catch 用这个联合
+AdbOpError = (AdbError, AdbHelperError)
+
+
+def _safe_serial(serial: str) -> str:
+    """serial 转安全文件名片段（serial 可能含 ``:`` ``.`` 等路径危险字符）。"""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", serial or "")
+
+
+class DeviceSession:
+    """单台设备的独立会话：设备句柄 + 独立锁 + 模板 + 观察状态 + 截图缓存。
+
+    多设备并行（v4）：adb 命令只在本设备的锁下串行（adb server 对同一设备
+    不擅长并发，AGENTS §2.4）；不同设备的命令经 adb server 多路复用可并行、
+    互不阻塞——这是多台设备同时识别、单台延迟保持 ≤400ms 的关键。
+    """
+
+    def __init__(self, serial: str, platform: str = "android") -> None:
+        self.serial = serial
+        self.platform = platform
+        self.lock = threading.RLock()
+        # Android 统一走 AdbHelper（跨平台封装；server.py 不再维护平行 AdbDevice）
+        self.device = (
+            IosDevice(serial) if platform == "ios"
+            else AdbHelper(serial, adb_path=ADB_EXE, project_root=ROOT)
+        )
+        # 模板/截图临时文件按 serial 隔离（多设备同时用互不覆盖）
+        safe = _safe_serial(serial)
+        self.marker_path = Path(tempfile.gettempdir()) / f"_cst_marker_{safe}.png"
+        self.skip_dir = Path(tempfile.gettempdir()) / f"_cst_skips_{safe}"
+
         self._last_shot: Optional[Path] = None
         self._last_shot_at: float = 0.0
         # 截图诊断统计（让前端能看到后端工作是否正常，不再是黑盒）
@@ -833,6 +533,11 @@ class Session:
         # 启动成功模板（cv2.matchTemplate 用，详见 set_marker_template / check_marker）
         self._marker_template: Optional[Path] = None  # 模板图路径（None=未设）
         self._marker_img = None                        # 内存缓存（BGR ndarray），避免每次 imread
+        self._marker_matcher = None                    # TemplateMatcher 缓存（图片元素识别封装，见 adb_helper）
+        # 模板匹配阈值（审核 E-P1-3：可调，每设备独立；重启还原默认值——与模板本身一致）
+        self.marker_threshold: float = MARKER_MATCH_THRESHOLD
+        # 设模板时的屏幕分辨率（审核 F-P1-4：分辨率变化检测用；None=未知，跳过检查）
+        self._marker_res: Optional[tuple] = None
         self._marker_w: int = 0                        # 模板像素宽
         self._marker_h: int = 0                        # 模板像素高
         self._marker_cx: float = 0.5                   # 模板中心归一化坐标（运行时搜索用）
@@ -857,7 +562,7 @@ class Session:
         含义见模块常量旁注释 / AGENTS——杀进程后不可能还停在「启动成功」页，
         若仍从 False 起算，二次冷启动首帧就已过阈时会永远等不到「先低于再升高」。
         """
-        with self._lock:
+        with self.lock:
             self._marker_hit_streak = 0
             # 上升沿：必须先见过低于阈值的帧，再过阈才停表（防桌面残留一上来就误停）。
             # force_stop 之后视为已经「离开成功态」，等价于见过 below。
@@ -865,7 +570,11 @@ class Session:
             self._skip_fired_ids.clear()
 
     def set_marker_image(self, img) -> None:
-        """写入启动模板内存缓存（拷贝，避免后续被改）。img 为 None 则清空。"""
+        """写入启动模板内存缓存（拷贝，避免后续被改）。img 为 None 则清空。
+
+        模板图变化时同时失效 matcher 缓存（下次匹配惰性重建）。
+        """
+        self._marker_matcher = None
         if img is None:
             self._marker_img = None
         else:
@@ -883,35 +592,26 @@ class Session:
             self._marker_img = im
         return self._marker_img
 
-    def select(self, serial: Optional[str], platform: str = "android") -> dict:
-        with self._lock:
-            self._serial = serial
-            self._platform = platform
-            if platform == "ios":
-                self._device = IosDevice(serial) if serial else None
-            else:
-                self._device = AdbDevice(serial)
-            self._last_shot = None
-            return {"serial": serial, "ready": self._device is not None, "platform": platform}
+    def ensure_marker_matcher(self):
+        """返回 TemplateMatcher（图片元素识别封装，见 adb_helper）。
 
-    def current(self) -> dict:
-        return {"serial": self._serial, "ready": self._device is not None, "platform": getattr(self, '_platform', 'android')}
-
-    @property
-    def device(self):
-        if self._device is None:
-            raise AdbError("未选择设备，请先在左上角连接设备")
-        return self._device
-
-    @contextmanager
-    def device_op(self):
-        """设备操作统一入口：在同一把锁下执行 ADB I/O（adb server 不擅长并发）。
-
-        所有会触发 adb 命令的端点都应用 ``with SESSION.device_op() as dev:`` 包住，
-        替代裸 ``SESSION.device`` 访问，避免直播截图/OCR/自动测速/卸装操作并发竞争。
+        惰性构造：模板图/坐标变更时由 set_marker_image / 模板设置处清缓存重建。
+        matchTemplate + 纯色拒绝 + 帧太小兜底都在 TemplateMatcher 内部，
+        端点不再裸用 cv2（同一套逻辑被 tests/test_adb_helper.py 覆盖）。
         """
-        with self._lock:
-            yield self.device
+        if self._marker_matcher is not None:
+            return self._marker_matcher
+        img = self.ensure_marker_image()
+        if img is None:
+            return None
+        self._marker_matcher = TemplateMatcher(
+            img,
+            self._marker_cx,
+            self._marker_cy,
+            padding=MARKER_SEARCH_PADDING,
+            threshold=self.marker_threshold,
+        )
+        return self._marker_matcher
 
     def screenshot_bytes(self, *, use_cache: bool = True) -> tuple[bytes, dict]:
         """截图并返回 (PNG bytes, 诊断元信息)。
@@ -926,7 +626,7 @@ class Session:
           - cache：是否命中缓存
           - shot_at：截图时刻（perf_counter 秒）
         """
-        with self._lock:
+        with self.lock:
             now = time.perf_counter()
             cache_age = now - self._last_shot_at
             if (
@@ -942,7 +642,9 @@ class Session:
                     "shot_at": self._last_shot_at, "cache_age_ms": round(cache_age * 1000, 1),
                 }
 
-            target = Path(tempfile.gettempdir()) / f"_cst_live_{os.getpid()}.png"
+            target = Path(tempfile.gettempdir()) / (
+                f"_cst_live_{os.getpid()}_{_safe_serial(self.serial)}.png"
+            )
             t0 = time.perf_counter()
             try:
                 self.device.screenshot(target)
@@ -958,11 +660,11 @@ class Session:
             self.shot_total += 1
             self.shot_last_ms = elapsed
             w = min(self.shot_total, 20)
-            self.shot_avg_ms = self.shot_avg_ms * (1 - 1/w) + elapsed / w
+            self.shot_avg_ms = self.shot_avg_ms * (1 - 1 / w) + elapsed / w
 
             # 后端日志（让用户在黑窗口能看到工作状态）
             print(
-                f"[shot] #{self.shot_total} {len(data)//1024}KB {elapsed:.0f}ms"
+                f"[shot:{self.serial}] #{self.shot_total} {len(data)//1024}KB {elapsed:.0f}ms"
                 f" (avg {self.shot_avg_ms:.0f}ms, cache_hits={self.shot_cache_hits})",
                 flush=True,
             )
@@ -974,12 +676,14 @@ class Session:
                 "shot_at": self._last_shot_at,
             }
 
-    def ocr(self) -> dict:
-        with self._lock:
-            shot = Path(tempfile.gettempdir()) / f"_cst_ocr_{os.getpid()}.png"
+    def ocr(self, engine: OcrEngine) -> dict:
+        with self.lock:
+            shot = Path(tempfile.gettempdir()) / (
+                f"_cst_ocr_{os.getpid()}_{_safe_serial(self.serial)}.png"
+            )
             self.device.screenshot(shot)
             try:
-                items = self._ocr.recognize(shot)
+                items = engine.recognize(shot)
             finally:
                 try:
                     shot.unlink()
@@ -988,7 +692,7 @@ class Session:
             # 同步把屏幕尺寸更新到 _last_size，后续 tap_norm 用
             try:
                 w, h = self.device.screen_size()
-            except AdbError:
+            except AdbOpError:
                 # wm size 失败时用图像尺寸兜底
                 import cv2
                 img = cv2.imread(str(self._last_shot)) if self._last_shot else None
@@ -1021,6 +725,85 @@ class Session:
             }
 
 
+class Session:
+    """全局会话：设备注册表 + 当前选中指针（多设备状态各自在 DeviceSession 里）。
+
+    兼容层：老端点代码里 ``SESSION._lock`` / ``SESSION.device`` / ``SESSION.shot_total``
+    等访问会被委托到「当前选中的 DeviceSession」，单设备流程语义与 v3 完全一致；
+    带 serial 的请求则直接路由到对应 DeviceSession（不抢全局选中，并行安全）。
+    """
+
+    def __init__(self) -> None:
+        # 仅保护注册表 dict（不持锁做 adb I/O）。用 RLock：select() 持锁内还会
+        # 调 session_for()（同样取这把锁），普通 Lock 会死锁（实测踩过）。
+        self._registry_lock = threading.RLock()
+        self._devices: dict[str, DeviceSession] = {}
+        self._serial: Optional[str] = None
+        self._platform = "android"
+        self._ocr = OcrEngine()
+        self._empty_lock = threading.RLock()     # 未选设备时的空锁（兼容老语义）
+
+    # ── 注册表 ──
+    def session_for(self, serial: str, platform: Optional[str] = None) -> DeviceSession:
+        """按 serial 取设备会话，不存在则创建（惰性）。platform 只在创建时生效。"""
+        with self._registry_lock:
+            ds = self._devices.get(serial)
+            if ds is None:
+                ds = DeviceSession(serial, platform or "android")
+                self._devices[serial] = ds
+            return ds
+
+    def select(self, serial: Optional[str], platform: str = "android") -> dict:
+        """切换「当前选中」设备（UI 语义：直播/手动操作作用于选中设备）。"""
+        with self._registry_lock:
+            self._serial = serial
+            self._platform = platform
+            if serial:
+                self.session_for(serial, platform)
+        return {"serial": serial, "ready": serial is not None, "platform": platform}
+
+    def current(self) -> dict:
+        return {
+            "serial": self._serial,
+            "ready": self.current_session is not None,
+            "platform": self._platform,
+        }
+
+    # ── 当前设备委托（老端点代码兼容）──
+    @property
+    def current_session(self) -> Optional[DeviceSession]:
+        return self._devices.get(self._serial) if self._serial else None
+
+    @property
+    def _lock(self):
+        """当前选中设备的锁；未选设备时返回空锁（老代码 with SESSION._lock: 语义不变）。"""
+        ds = self.current_session
+        return ds.lock if ds else self._empty_lock
+
+    @property
+    def device(self):
+        ds = self.current_session
+        if ds is None:
+            raise AdbError("未选择设备，请先在左上角连接设备")
+        return ds.device
+
+    @contextmanager
+    def device_op(self):
+        """设备操作统一入口：在当前选中设备的锁下执行 ADB I/O（adb server 不擅长并发）。
+
+        所有会触发 adb 命令的端点都应用 ``with SESSION.device_op() as dev:`` 包住，
+        替代裸 ``SESSION.device`` 访问，避免直播截图/OCR/自动测速/卸装操作并发竞争。
+        """
+        with self._lock:
+            yield self.device
+
+    def __getattr__(self, name):
+        """老端点代码里 SESSION.shot_total / SESSION._marker_* 等字段 → 委托当前设备会话。"""
+        ds = self.current_session
+        if ds is None:
+            raise AttributeError(f"SESSION.{name}：未选择设备")
+        return getattr(ds, name)
+
 SESSION = Session()
 
 
@@ -1044,6 +827,9 @@ def _cleanup_stale_temp_files() -> None:
     v3 新增：清理 _cst_marker.png（启动成功模板）。Session._marker_template 是
     内存变量，重启后必然丢失，文件留着也用不上（check_marker 会返回"未设模板"），
     所以清掉保持一致。
+
+    v4 新增：模板按设备隔离（_cst_marker_<serial>.png / _cst_skips_<serial>/），
+    一并清理；老的单文件 glob 保留兼容历史残留。
     """
     import glob
     import shutil
@@ -1051,15 +837,18 @@ def _cleanup_stale_temp_files() -> None:
     # 老的单数文件（兼容历史）
     for pattern in ("_cst_live_*.png", "_cst_ocr_*.png", "_cst_upload.apk",
                     "_cst_marker.png", "_cst_marker_src_*.png", "_cst_marker_chk_*.png",
-                    "_cst_skip_*.png"):
+                    "_cst_skip_*.png",
+                    # v4：按设备隔离的模板/截图
+                    "_cst_marker_*.png", "_cst_marker_src_*.png",
+                    "_cst_marker_chk_*.png", "_cst_skip_src_*.png"):
         for path in glob.glob(str(Path(tempdir) / pattern)):
             try:
                 Path(path).unlink()
             except OSError:
                 pass  # 文件可能正被占用
-    # 跳过模板目录（通知权限等）
-    if SKIP_TEMPLATE_DIR.exists():
-        shutil.rmtree(SKIP_TEMPLATE_DIR, ignore_errors=True)
+    # 跳过模板目录（通知权限等）：老单目录 + v4 按设备隔离的 _cst_skips_* 目录
+    for skip_dir in glob.glob(str(Path(tempdir) / "_cst_skips*")):
+        shutil.rmtree(skip_dir, ignore_errors=True)
     # 新的 APK 上传目录：只确保目录存在，**不在启动时清空**。
     # 清空会导致前端 localStorage 里的 apkPath 失效，自动循环卡在「卸装重装」
     # 或秒失败「APK 不存在」——测速会话跨重启必须还能用同一份 APK。
@@ -1105,16 +894,19 @@ class SetMarkerReq(BaseModel):
 
     cx/cy 是归一化坐标（0~1），来自前端点画面或点 OCR 框。
     box_w/box_h 可选：若来自 OCR 框就用框的归一化尺寸换算像素；否则用默认。
+    serial 可选：指定设备（默认当前选中），多设备各设各的模板。
     """
     cx: float = Field(ge=0.0, le=1.0)
     cy: float = Field(ge=0.0, le=1.0)
     box_w: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化宽（0~1）
     box_h: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化高（0~1）
+    serial: Optional[str] = None
 
 
 class ClearSkipReq(BaseModel):
     """清除跳过模板。id 为 None 时清空全部；指定 id 只删一条。"""
     id: Optional[int] = None
+    serial: Optional[str] = None
 
 
 class ProjectCreateReq(BaseModel):
@@ -1184,46 +976,55 @@ def _preview_b64_from_path(path: Path) -> tuple[str, str]:
 
 
 def _apply_project_to_session(pid: str) -> dict:
-    """从磁盘项目加载模板到 Session（运行时内存），返回给前端的摘要。"""
+    """从磁盘项目加载模板到当前选中设备的会话（运行时内存），返回给前端的摘要。
+
+    多设备：每次「加载项目」只作用于当前选中设备（每台设备模板独立，见
+    DeviceSession.marker_path/skip_dir）；多设备并行时每台设备各自加载一次即可。
+    项目磁盘格式暂不变（marker.png/skip_<id>.png 存当前设备一份）。
+    """
     import shutil
 
     meta = _read_project_meta(pid)
     pdir = _project_dir(pid)
+    ds = SESSION.current_session
+    if ds is None:
+        raise AdbError("未选择设备，请先在左上角连接设备")
 
-    with SESSION._lock:
-        # 清当前跳过模板
-        for t in SESSION._skip_templates:
+    with ds.lock:
+        # 清当前设备跳过模板
+        for t in ds._skip_templates:
             try:
                 Path(t["path"]).unlink(missing_ok=True)
             except OSError:
                 pass
-        SESSION._skip_templates.clear()
-        SKIP_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+        ds._skip_templates.clear()
+        ds.skip_dir.mkdir(parents=True, exist_ok=True)
 
         marker_src = pdir / "marker.png"
         if marker_src.is_file():
-            shutil.copy2(marker_src, MARKER_TEMPLATE_PATH)
-            SESSION._marker_template = MARKER_TEMPLATE_PATH
+            shutil.copy2(marker_src, ds.marker_path)
+            ds._marker_template = ds.marker_path
+            ds._marker_res = None  # 项目 meta 无分辨率字段 → 未知，跳过分辨率检查（不误报）
             m = meta.get("marker") or {}
-            SESSION._marker_w = int(m.get("w") or 0)
-            SESSION._marker_h = int(m.get("h") or 0)
-            SESSION._marker_cx = float(m.get("cx") if m.get("cx") is not None else 0.5)
-            SESSION._marker_cy = float(m.get("cy") if m.get("cy") is not None else 0.5)
+            ds._marker_w = int(m.get("w") or 0)
+            ds._marker_h = int(m.get("h") or 0)
+            ds._marker_cx = float(m.get("cx") if m.get("cx") is not None else 0.5)
+            ds._marker_cy = float(m.get("cy") if m.get("cy") is not None else 0.5)
             import cv2
-            im = cv2.imread(str(MARKER_TEMPLATE_PATH))
+            im = cv2.imread(str(ds.marker_path))
             if im is not None:
-                SESSION.set_marker_image(im)
-                if SESSION._marker_w <= 0 or SESSION._marker_h <= 0:
-                    SESSION._marker_h, SESSION._marker_w = im.shape[:2]
+                ds.set_marker_image(im)
+                if ds._marker_w <= 0 or ds._marker_h <= 0:
+                    ds._marker_h, ds._marker_w = im.shape[:2]
             else:
-                SESSION.set_marker_image(None)
-            SESSION.reset_marker_watch()
-            marker_preview, marker_mime = _preview_b64_from_path(MARKER_TEMPLATE_PATH)
+                ds.set_marker_image(None)
+            ds.reset_marker_watch()
+            marker_preview, marker_mime = _preview_b64_from_path(ds.marker_path)
         else:
-            SESSION._marker_template = None
-            SESSION.set_marker_image(None)
-            SESSION._marker_w = SESSION._marker_h = 0
-            SESSION.reset_marker_watch()
+            ds._marker_template = None
+            ds.set_marker_image(None)
+            ds._marker_w = ds._marker_h = 0
+            ds.reset_marker_watch()
             marker_preview, marker_mime = "", "image/jpeg"
 
         skip_out = []
@@ -1232,7 +1033,7 @@ def _apply_project_to_session(pid: str) -> dict:
             src = pdir / f"skip_{sid}.png"
             if not src.is_file():
                 continue
-            dst = SKIP_TEMPLATE_DIR / f"skip_{sid}.png"
+            dst = ds.skip_dir / f"skip_{sid}.png"
             shutil.copy2(src, dst)
             prev, mime = _preview_b64_from_path(dst)
             import cv2
@@ -1245,11 +1046,12 @@ def _apply_project_to_session(pid: str) -> dict:
                 "w": int(s.get("w") or 0),
                 "h": int(s.get("h") or 0),
                 "img": skip_img,  # 内存缓存，check_auto 免重复 imread
+                "matcher": None,  # TemplateMatcher 惰性构造（图片元素识别封装）
                 "last_tap_at": 0.0,
                 "preview_base64": prev,
                 "preview_mime": mime,
             }
-            SESSION._skip_templates.append(entry)
+            ds._skip_templates.append(entry)
             skip_out.append({
                 "id": sid,
                 "width": entry["w"],
@@ -1270,11 +1072,11 @@ def _apply_project_to_session(pid: str) -> dict:
         "tap_y": meta.get("tap_y"),
         "platform": meta.get("platform") or "gp",
         "apk_hint": meta.get("apk_hint") or "",
-        "marker_ready": SESSION._marker_template is not None,
-        "marker_width": SESSION._marker_w,
-        "marker_height": SESSION._marker_h,
-        "marker_center_x": round(SESSION._marker_cx, 5) if SESSION._marker_template else None,
-        "marker_center_y": round(SESSION._marker_cy, 5) if SESSION._marker_template else None,
+        "marker_ready": ds._marker_template is not None,
+        "marker_width": ds._marker_w,
+        "marker_height": ds._marker_h,
+        "marker_center_x": round(ds._marker_cx, 5) if ds._marker_template else None,
+        "marker_center_y": round(ds._marker_cy, 5) if ds._marker_template else None,
         "marker_preview_base64": marker_preview,
         "marker_preview_mime": marker_mime,
         "skips": skip_out,
@@ -1286,10 +1088,12 @@ class TapReq(BaseModel):
     x: float
     y: float
     norm: bool = True
+    serial: Optional[str] = None
 
 
 class KeyReq(BaseModel):
     code: int
+    serial: Optional[str] = None
 
 
 class SwipeReq(BaseModel):
@@ -1299,6 +1103,7 @@ class SwipeReq(BaseModel):
     y2: float
     norm: bool = True
     dur_ms: int = 200
+    serial: Optional[str] = None
 
 
 class LaunchPkgReq(BaseModel):
@@ -1323,6 +1128,20 @@ class ReinstallReq(BaseModel):
 
 class ApkParseReq(BaseModel):
     apk_path: str
+
+
+class MarkerThresholdReq(BaseModel):
+    """模板匹配阈值设置（审核 E-P1-3）。校验 0.5~0.99，每设备独立，重启还原默认。"""
+    threshold: float = Field(ge=0.5, le=0.99)
+    serial: Optional[str] = None
+
+
+class SysBaselineReq(BaseModel):
+    """系统对照模式（am start -W 交叉验证）。package 必填，rounds/cooldown_s 可选。"""
+    package: str = Field(min_length=1, max_length=200)
+    rounds: int = Field(default=5, ge=1, le=10)
+    cooldown_s: float = Field(default=3.0, ge=0.0, le=10.0)
+    serial: Optional[str] = None
 
 
 class ColdStartReq(BaseModel):
@@ -1352,6 +1171,20 @@ def _err(status: int, msg: str) -> HTTPException:
     return HTTPException(status_code=status, detail=msg)
 
 
+def _target_session(serial: Optional[str]) -> DeviceSession:
+    """带 serial 的请求路由到对应设备会话；未传 serial 用当前选中。
+
+    多设备并行：不调用 SESSION.select()（那会抢全局选中，并行时互相干扰），
+    直接按 serial 从注册表取/建会话。已有会话优先（保留其平台类型，如 iOS）。
+    """
+    if serial:
+        return SESSION.session_for(serial)
+    ds = SESSION.current_session
+    if ds is None:
+        raise AdbError("未选择设备，请先在左上角连接设备")
+    return ds
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "adb": ADB_EXE, "version": "2.0"}
@@ -1362,14 +1195,19 @@ def list_devices() -> dict:
     """列出所有连接的设备（Android + iOS 合并返回）。
 
     Android 设备有 platform="android"，iOS 设备有 platform="ios"。
-    前端选择设备时带上 platform，后端据此创建 AdbDevice 或 IosDevice。
+    前端选择设备时带上 platform，后端据此创建 AdbHelper 或 IosDevice。
     """
     try:
-        devices = AdbDevice.devices()
-        # 给 Android 设备补 platform 字段（兼容前端）
-        for d in devices:
-            d.setdefault("platform", "android")
-    except AdbError as e:
+        devices = [
+            {
+                "serial": d.serial,
+                "state": d.state,
+                "model": d.model,
+                "platform": "android",
+            }
+            for d in AdbHelper.devices(adb_path=ADB_EXE, project_root=ROOT)
+        ]
+    except AdbHelperError as e:
         devices = []
         adb_error = str(e)
     else:
@@ -1392,16 +1230,14 @@ def select_device(req: DeviceSelectReq) -> dict:
 
 
 @app.get("/api/apps")
-def list_apps() -> dict:
-    """列出当前设备上的第三方包名，供前端下拉选择。
-
-    复用 Session.device（已选设备）；未选设备时返回空列表 + error。
-    """
+def list_apps(serial: Optional[str] = None) -> dict:
+    """列出指定设备（默认当前选中）上的第三方包名，供前端下拉选择。"""
     try:
-        with SESSION.device_op() as dev:
-            pkgs = dev.list_packages()
+        ds = _target_session(serial)
+        with ds.lock:
+            pkgs = ds.device.list_packages()
         return {"apps": pkgs}
-    except AdbError as e:
+    except AdbOpError as e:
         return {"apps": [], "error": str(e)}
 
 
@@ -1471,7 +1307,7 @@ def parse_apk(req: ApkParseReq) -> dict:
 
 
 @app.get("/api/screenshot")
-def screenshot(manual: int = 0) -> Response:
+def screenshot(manual: int = 0, serial: Optional[str] = None) -> Response:
     """截屏 PNG。
 
     `?manual=1` 跳过缓存（用于「手动截图」按钮，确保拿到最新画面）。
@@ -1479,19 +1315,22 @@ def screenshot(manual: int = 0) -> Response:
       - X-Shot-Ms: 本次截图耗时（毫秒）
       - X-Shot-Cache: 1=命中缓存 0=新截图
       - X-Shot-Bytes: 字节数
-      - X-Shot-Total: 后端累计截图次数
+      - X-Shot-Total: 该设备累计截图次数
     """
+    ds = None
     try:
-        data, meta = SESSION.screenshot_bytes(use_cache=manual == 0)
-    except AdbError as e:
-        SESSION.shot_errors += 1
+        ds = _target_session(serial)
+        data, meta = ds.screenshot_bytes(use_cache=manual == 0)
+    except AdbOpError as e:
+        if ds is not None:
+            ds.shot_errors += 1
         raise _err(400, str(e))
     headers = {
         "X-Shot-Ms": str(meta["ms"]),
         "X-Shot-Cache": "1" if meta["cache"] else "0",
         "X-Shot-Bytes": str(meta["bytes"]),
-        "X-Shot-Total": str(SESSION.shot_total),
-        "X-Shot-Avg-Ms": str(round(SESSION.shot_avg_ms, 1)),
+        "X-Shot-Total": str(ds.shot_total),
+        "X-Shot-Avg-Ms": str(round(ds.shot_avg_ms, 1)),
         # 用 no-store 防止浏览器/中间代理缓存这个响应（很重要！否则永远同一张图）
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
@@ -1501,24 +1340,32 @@ def screenshot(manual: int = 0) -> Response:
 
 
 @app.get("/api/shot_stats")
-def shot_stats() -> dict:
-    """后端截图累计统计，让前端诊断"轮询到底有没有在工作"。"""
+def shot_stats(serial: Optional[str] = None) -> dict:
+    """截图累计统计（指定设备或当前选中），让前端诊断"轮询到底有没有在工作"。"""
+    ds = _target_session(serial) if serial else SESSION.current_session
+    if ds is None:
+        return {
+            "total": 0, "cache_hits": 0, "errors": 0,
+            "last_ms": 0.0, "avg_ms": 0.0,
+            "device": SESSION._serial, "ready": False,
+        }
     return {
-        "total": SESSION.shot_total,
-        "cache_hits": SESSION.shot_cache_hits,
-        "errors": SESSION.shot_errors,
-        "last_ms": round(SESSION.shot_last_ms, 1),
-        "avg_ms": round(SESSION.shot_avg_ms, 1),
-        "device": SESSION._serial,
-        "ready": SESSION._device is not None,
+        "total": ds.shot_total,
+        "cache_hits": ds.shot_cache_hits,
+        "errors": ds.shot_errors,
+        "last_ms": round(ds.shot_last_ms, 1),
+        "avg_ms": round(ds.shot_avg_ms, 1),
+        "device": ds.serial,
+        "ready": True,
     }
 
 
 @app.get("/api/ocr")
-def ocr() -> dict:
+def ocr(serial: Optional[str] = None) -> dict:
     try:
-        return SESSION.ocr()
-    except AdbError as e:
+        ds = _target_session(serial)
+        return ds.ocr(SESSION._ocr)
+    except AdbOpError as e:
         raise _err(400, str(e))
 
 
@@ -1540,11 +1387,12 @@ def set_marker_template(req: SetMarkerReq) -> dict:
     try:
         import cv2
 
-        with SESSION._lock:
+        ds = _target_session(req.serial)
+        with ds.lock:
             # 1) 截当前屏（不复用缓存，确保是用户当前看到的画面）
-            shot = Path(tempfile.gettempdir()) / f"_cst_marker_src_{os.getpid()}.png"
+            shot = Path(tempfile.gettempdir()) / f"_cst_marker_src_{os.getpid()}_{_safe_serial(ds.serial)}.png"
             try:
-                SESSION.device.screenshot(shot)
+                ds.device.screenshot(shot)
                 img = cv2.imread(str(shot))
             finally:
                 try:
@@ -1595,19 +1443,22 @@ def set_marker_template(req: SetMarkerReq) -> dict:
                     f"请点画面上有文字/图标/边缘的区域。"
                 )
 
-            # 4) 存模板（覆盖式，单文件）
-            cv2.imwrite(str(MARKER_TEMPLATE_PATH), template)
+            # 4) 存模板（覆盖式，按设备隔离的单文件）
+            cv2.imwrite(str(ds.marker_path), template)
 
-            # 5) 记录到 session（运行时 check_marker 用）
+            # 4.5) 记录设模板时的屏幕分辨率（审核 F-P1-4：后续分辨率变化检测基准）
+            ds._marker_res = (w_px, h_px)
+
+            # 5) 记录到设备会话（运行时 check_marker 用）
             actual_h, actual_w = template.shape[:2]
-            SESSION._marker_template = MARKER_TEMPLATE_PATH
-            SESSION._marker_w = actual_w
-            SESSION._marker_h = actual_h
+            ds._marker_template = ds.marker_path
+            ds._marker_w = actual_w
+            ds._marker_h = actual_h
             # 中心归一化坐标（实际截取后的中心，可能与请求的 cx/cy 略有偏差——因越界裁剪）
-            SESSION._marker_cx = (x1 + actual_w / 2) / w_px
-            SESSION._marker_cy = (y1 + actual_h / 2) / h_px
-            SESSION.set_marker_image(template)
-            SESSION.reset_marker_watch()
+            ds._marker_cx = (x1 + actual_w / 2) / w_px
+            ds._marker_cy = (y1 + actual_h / 2) / h_px
+            ds.set_marker_image(template)
+            ds.reset_marker_watch()
 
             # 6) 返回预览（base64 JPG，体积小，前端 <img> 直接显示）
             ok, buf = cv2.imencode(".jpg", template, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -1617,17 +1468,17 @@ def set_marker_template(req: SetMarkerReq) -> dict:
                 "ok": True,
                 "width": actual_w,
                 "height": actual_h,
-                "center_x": round(SESSION._marker_cx, 5),
-                "center_y": round(SESSION._marker_cy, 5),
+                "center_x": round(ds._marker_cx, 5),
+                "center_y": round(ds._marker_cy, 5),
                 "preview_base64": preview_b64,
                 "preview_mime": "image/jpeg",
             }
-    except AdbError as e:
+    except AdbOpError as e:
         raise _err(400, str(e))
 
 
 @app.get("/api/check_marker")
-def check_marker() -> dict:
+def check_marker(serial: Optional[str] = None) -> dict:
     """截当前屏 + 在模板坐标周围搜索模板，返回是否命中 + 置信度。
 
     高频轮询用（前端 50-100ms 调一次）。设计要点：
@@ -1642,16 +1493,20 @@ def check_marker() -> dict:
     t0 = time.perf_counter()
     try:
         import cv2
-        import numpy as np
 
-        with SESSION._lock:
-            if SESSION._marker_template is None or not SESSION._marker_template.exists():
+        ds = _target_session(serial)
+        with ds.lock:
+            # 分辨率变化检测（审核 F-P1-4）：未知或未预热时跳过，仅提示不阻塞
+            res_mismatch = False
+            if ds._marker_res is not None and getattr(ds.device, "_last_size", None) is not None:
+                res_mismatch = tuple(ds.device._last_size) != tuple(ds._marker_res)
+            if ds._marker_template is None or not ds._marker_template.exists():
                 return {"hit": False, "confidence": 0.0, "ms": 0.0, "error": "未设模板"}
 
             # 1) 截当前屏
-            shot = Path(tempfile.gettempdir()) / f"_cst_marker_chk_{os.getpid()}.png"
+            shot = Path(tempfile.gettempdir()) / f"_cst_marker_chk_{os.getpid()}_{_safe_serial(ds.serial)}.png"
             try:
-                SESSION.device.screenshot(shot)
+                ds.device.screenshot(shot)
                 scene = cv2.imread(str(shot))
             finally:
                 try:
@@ -1661,44 +1516,25 @@ def check_marker() -> dict:
             if scene is None:
                 return {"hit": False, "confidence": 0.0, "ms": 0.0, "error": "截图失败"}
 
-            scene_h, scene_w = scene.shape[:2]
-            template = cv2.imread(str(SESSION._marker_template))
-            if template is None:
+            # 2) 图片元素识别（TemplateMatcher 封装：ROI matchTemplate + 纯色拒绝 + 帧太小兜底）
+            matcher = ds.ensure_marker_matcher()
+            if matcher is None:
                 return {"hit": False, "confidence": 0.0, "ms": 0.0, "error": "模板读失败"}
-            th, tw = template.shape[:2]
-
-            # 2) 算搜索区域：模板中心 ± padding（裁剪到画面内）
-            cx_px = int(SESSION._marker_cx * scene_w)
-            cy_px = int(SESSION._marker_cy * scene_h)
-            pad = MARKER_SEARCH_PADDING
-            sx1 = max(0, cx_px - tw // 2 - pad)
-            sy1 = max(0, cy_px - th // 2 - pad)
-            sx2 = min(scene_w, cx_px + tw // 2 + pad)
-            sy2 = min(scene_h, cy_px + th // 2 + pad)
-
-            # 搜索区域必须不小于模板尺寸，否则 matchTemplate 报错
-            if sx2 - sx1 < tw or sy2 - sy1 < th:
-                # padding 不够时退化成全图搜（保证能跑，只是慢一点）
-                sx1, sy1, sx2, sy2 = 0, 0, scene_w, scene_h
-
-            roi = scene[sy1:sy2, sx1:sx2]
-
-            # 3) matchTemplate（TM_CCOEFF_NORMED：归一化相关系数）
-            res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(res)
+            mr = matcher.match(scene)
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
-            SESSION.marker_check_total += 1
-            SESSION.marker_check_last_ms = elapsed_ms
-            SESSION.marker_check_last_conf = float(max_val)
+            ds.marker_check_total += 1
+            ds.marker_check_last_ms = elapsed_ms
+            ds.marker_check_last_conf = mr.confidence
 
             return {
-                "hit": bool(max_val >= MARKER_MATCH_THRESHOLD),
-                "confidence": round(float(max_val), 4),
-                "threshold": MARKER_MATCH_THRESHOLD,
+                "hit": bool(mr.hit),
+                "confidence": round(mr.confidence, 4),
+                "threshold": ds.marker_threshold,
                 "ms": round(elapsed_ms, 1),
+                "res_mismatch": res_mismatch,
             }
-    except AdbError as e:
+    except AdbOpError as e:
         return {"hit": False, "confidence": 0.0, "ms": 0.0, "error": str(e)}
     except Exception as e:
         # cv2/numpy 出错不抛 500，让前端能继续轮询（按未命中处理）
@@ -1706,45 +1542,59 @@ def check_marker() -> dict:
 
 
 @app.get("/api/marker_status")
-def marker_status() -> dict:
-    """查询启动成功模板是否已设（供前端刷新后恢复 markerTemplateReady，无需再截屏匹配）。"""
+def marker_status(serial: Optional[str] = None) -> dict:
+    """查询指定设备（默认当前选中）启动成功模板是否已设。"""
+    try:
+        ds = _target_session(serial)
+    except AdbOpError as e:
+        raise _err(400, str(e))
     ready = (
-        SESSION._marker_template is not None
-        and Path(SESSION._marker_template).exists()
+        ds._marker_template is not None
+        and Path(ds._marker_template).exists()
     )
     return {
         "ready": ready,
-        "width": SESSION._marker_w if ready else 0,
-        "height": SESSION._marker_h if ready else 0,
-        "center_x": round(SESSION._marker_cx, 5) if ready else None,
-        "center_y": round(SESSION._marker_cy, 5) if ready else None,
+        "width": ds._marker_w if ready else 0,
+        "height": ds._marker_h if ready else 0,
+        "center_x": round(ds._marker_cx, 5) if ready else None,
+        "center_y": round(ds._marker_cy, 5) if ready else None,
+        "threshold": ds.marker_threshold,           # 审核 E-P1-3：可调阈值
+        "threshold_default": MARKER_MATCH_THRESHOLD,
     }
 
 
 @app.post("/api/preflight_auto")
 def preflight_auto(req: ReinstallReq) -> dict:
-    """自动循环开跑前自检：设备、APK 文件、包名非空。不占设备锁、不做 adb 卸装。"""
+    """自动循环开跑前自检（目标设备、APK 文件、包名非空）。不占设备锁、不做 adb 卸装。
+
+    多设备：前端逐台调用，每台各自检查模板是否已设（serial 指定设备）。
+    """
     errors: list[str] = []
-    if SESSION._device is None:
-        errors.append("未选择设备")
+    ds = None
+    try:
+        ds = _target_session(req.serial)
+    except AdbError as e:
+        errors.append(str(e))
     if not (req.package or "").strip():
         errors.append("包名为空")
     apk = Path(req.apk_path or "")
     if not apk.is_file():
         errors.append(f"APK 不存在：{req.apk_path}（请重新上传）")
-    marker_ok = (
-        SESSION._marker_template is not None
-        and Path(SESSION._marker_template).exists()
-    )
-    if not marker_ok:
-        errors.append("未设启动元素模板")
+    marker_ok = False
+    if ds is not None:
+        marker_ok = (
+            ds._marker_template is not None
+            and Path(ds._marker_template).exists()
+        )
+        if not marker_ok:
+            errors.append("未设启动元素模板（该设备需各自设置）")
     return {
         "ok": len(errors) == 0,
         "errors": errors,
         "apk_name": apk.name if apk.is_file() else "",
         "apk_size_mb": round(apk.stat().st_size / 1048576, 1) if apk.is_file() else 0,
         "marker_ready": marker_ok,
-        "device": SESSION._serial,
+        "device": ds.serial if ds else None,
     }
 
 
@@ -1826,9 +1676,11 @@ def load_project(pid: str) -> dict:
 
 @app.put("/api/projects/{pid}")
 def save_project(pid: str, req: ProjectSaveReq) -> dict:
-    """手动保存：把当前 Session 模板 + 请求里的表单配置写入 projects/<id>/。
+    """手动保存：把当前选中设备的模板 + 请求里的表单配置写入 projects/<id>/。
 
     不复制 APK——只记 apk_hint 文件名提醒用户下次再传。
+    多设备：每台设备各自「加载项目 + 设模板 + 保存」时，保存的是当前选中设备
+    的那份模板（每台设备模板独立，项目磁盘格式保持单份，后续如需多设备并存再扩展）。
     """
     import shutil
 
@@ -1841,20 +1693,23 @@ def save_project(pid: str, req: ProjectSaveReq) -> dict:
 
         old = _read_project_meta(pid)
         display_name = (req.name or "").strip() or old.get("name") or pid
+        ds = SESSION.current_session
+        if ds is None:
+            raise AdbError("未选择设备，请先在左上角连接设备")
 
-        with SESSION._lock:
+        with ds.lock:
             marker_meta = None
             marker_dst = pdir / "marker.png"
             if (
-                SESSION._marker_template is not None
-                and Path(SESSION._marker_template).is_file()
+                ds._marker_template is not None
+                and Path(ds._marker_template).is_file()
             ):
-                shutil.copy2(SESSION._marker_template, marker_dst)
+                shutil.copy2(ds._marker_template, marker_dst)
                 marker_meta = {
-                    "cx": SESSION._marker_cx,
-                    "cy": SESSION._marker_cy,
-                    "w": SESSION._marker_w,
-                    "h": SESSION._marker_h,
+                    "cx": ds._marker_cx,
+                    "cy": ds._marker_cy,
+                    "w": ds._marker_w,
+                    "h": ds._marker_h,
                 }
             else:
                 marker_dst.unlink(missing_ok=True)
@@ -1865,7 +1720,7 @@ def save_project(pid: str, req: ProjectSaveReq) -> dict:
                 except OSError:
                     pass
             skips_meta = []
-            for t in SESSION._skip_templates:
+            for t in ds._skip_templates:
                 src = Path(t["path"])
                 if not src.is_file():
                     continue
@@ -1936,26 +1791,6 @@ def delete_project(pid: str) -> dict:
         raise _err(400, str(e))
 
 
-def _match_template_in_scene(scene, template, cx: float, cy: float, pad: int) -> float:
-    """在 scene 上以 (cx,cy) 为中心、pad 为边距做 matchTemplate，返回最高置信度。"""
-    import cv2
-
-    scene_h, scene_w = scene.shape[:2]
-    th, tw = template.shape[:2]
-    cx_px = int(cx * scene_w)
-    cy_px = int(cy * scene_h)
-    sx1 = max(0, cx_px - tw // 2 - pad)
-    sy1 = max(0, cy_px - th // 2 - pad)
-    sx2 = min(scene_w, cx_px + tw // 2 + pad)
-    sy2 = min(scene_h, cy_px + th // 2 + pad)
-    if sx2 - sx1 < tw or sy2 - sy1 < th:
-        sx1, sy1, sx2, sy2 = 0, 0, scene_w, scene_h
-    roi = scene[sy1:sy2, sx1:sx2]
-    res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, _ = cv2.minMaxLoc(res)
-    return float(max_val)
-
-
 @app.post("/api/set_skip_template")
 def set_skip_template(req: SetMarkerReq) -> dict:
     """添加一条跳过弹窗模板（通知权限按钮等）。最多 SKIP_TEMPLATE_MAX 条。
@@ -1968,13 +1803,14 @@ def set_skip_template(req: SetMarkerReq) -> dict:
     try:
         import cv2
 
-        with SESSION._lock:
-            if len(SESSION._skip_templates) >= SKIP_TEMPLATE_MAX:
+        ds = _target_session(req.serial)
+        with ds.lock:
+            if len(ds._skip_templates) >= SKIP_TEMPLATE_MAX:
                 raise AdbError(f"跳过模板已满（最多 {SKIP_TEMPLATE_MAX} 个），请先清除再添加")
 
-            shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}.png"
+            shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}_{_safe_serial(ds.serial)}.png"
             try:
-                SESSION.device.screenshot(shot)
+                ds.device.screenshot(shot)
                 img = cv2.imread(str(shot))
             finally:
                 try:
@@ -2020,10 +1856,10 @@ def set_skip_template(req: SetMarkerReq) -> dict:
                     f"请点「允许/不允许/跳过」等按钮文字区域。"
                 )
 
-            SKIP_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+            ds.skip_dir.mkdir(parents=True, exist_ok=True)
             # id 用递增：已有 max+1，避免删中间后撞名
-            next_id = (max((t["id"] for t in SESSION._skip_templates), default=0) + 1)
-            path = SKIP_TEMPLATE_DIR / f"skip_{next_id}.png"
+            next_id = (max((t["id"] for t in ds._skip_templates), default=0) + 1)
+            path = ds.skip_dir / f"skip_{next_id}.png"
             cv2.imwrite(str(path), template)
             actual_h, actual_w = template.shape[:2]
             cx_n = (x1 + actual_w / 2) / w_px
@@ -2040,12 +1876,13 @@ def set_skip_template(req: SetMarkerReq) -> dict:
                 "w": actual_w,
                 "h": actual_h,
                 "img": template.copy(),  # 内存缓存
+                "matcher": None,          # TemplateMatcher 惰性构造（图片元素识别封装）
                 "last_tap_at": 0.0,
                 "preview_base64": preview_b64,
                 "preview_mime": "image/jpeg",
             }
-            SESSION._skip_templates.append(entry)
-            print(f"[skip] 添加模板 #{next_id} {actual_w}x{actual_h} @({cx_n:.3f},{cy_n:.3f})", flush=True)
+            ds._skip_templates.append(entry)
+            print(f"[skip:{ds.serial}] 添加模板 #{next_id} {actual_w}x{actual_h} @({cx_n:.3f},{cy_n:.3f})", flush=True)
 
             return {
                 "ok": True,
@@ -2054,19 +1891,20 @@ def set_skip_template(req: SetMarkerReq) -> dict:
                 "height": actual_h,
                 "center_x": round(cx_n, 5),
                 "center_y": round(cy_n, 5),
-                "count": len(SESSION._skip_templates),
+                "count": len(ds._skip_templates),
                 "preview_base64": preview_b64,
                 "preview_mime": "image/jpeg",
             }
-    except AdbError as e:
+    except AdbOpError as e:
         raise _err(400, str(e))
 
 
 @app.get("/api/skip_templates")
-def list_skip_templates() -> dict:
-    """列出当前跳过模板（含预览），供前端刷新列表。"""
+def list_skip_templates(serial: Optional[str] = None) -> dict:
+    """列出指定设备（默认当前选中）的跳过模板（含预览），供前端刷新列表。"""
+    ds = _target_session(serial)
     items = []
-    for t in SESSION._skip_templates:
+    for t in ds._skip_templates:
         items.append({
             "id": t["id"],
             "width": t["w"],
@@ -2082,18 +1920,22 @@ def list_skip_templates() -> dict:
 @app.post("/api/clear_skip_templates")
 def clear_skip_templates(req: ClearSkipReq) -> dict:
     """清除跳过模板：指定 id 删一条，否则清空全部。"""
-    with SESSION._lock:
+    try:
+        ds = _target_session(req.serial)
+    except AdbOpError as e:
+        raise _err(400, str(e))
+    with ds.lock:
         if req.id is None:
-            for t in SESSION._skip_templates:
+            for t in ds._skip_templates:
                 try:
                     Path(t["path"]).unlink(missing_ok=True)
                 except OSError:
                     pass
-            SESSION._skip_templates.clear()
+            ds._skip_templates.clear()
             return {"ok": True, "count": 0}
         kept = []
         removed = False
-        for t in SESSION._skip_templates:
+        for t in ds._skip_templates:
             if t["id"] == req.id:
                 try:
                     Path(t["path"]).unlink(missing_ok=True)
@@ -2102,7 +1944,7 @@ def clear_skip_templates(req: ClearSkipReq) -> dict:
                 removed = True
             else:
                 kept.append(t)
-        SESSION._skip_templates = kept
+        ds._skip_templates = kept
         if not removed:
             raise _err(400, f"找不到跳过模板 id={req.id}")
         return {"ok": True, "count": len(kept)}
@@ -2113,6 +1955,10 @@ def check_auto(
     check_skips: bool = Query(
         True,
         description="是否匹配跳过弹窗模板。二次冷启动应传 false（首次装后不会再弹允许类弹窗）",
+    ),
+    serial: Optional[str] = Query(
+        None,
+        description="目标设备 serial；不传用当前选中。多设备并行时各自带 serial 轮询",
     ),
 ) -> dict:
     """自动测速轮询（一次截图）：可选先跳过弹窗，再判定启动成功。
@@ -2132,12 +1978,19 @@ def check_auto(
     try:
         import cv2
 
-        with SESSION._lock:
+        ds = _target_session(serial)
+        with ds.lock:
+            # 0) 分辨率变化检测（审核 F-P1-4）：模板按设模板时分辨率绑定；
+            #    仅提示不阻塞停表；_marker_res 未知（项目加载）或 _last_size 未预热时跳过
+            res_mismatch = False
+            if ds._marker_res is not None and getattr(ds.device, "_last_size", None) is not None:
+                res_mismatch = tuple(ds.device._last_size) != tuple(ds._marker_res)
+
             # 1) 截当前屏（热路径：raw|gzip → BGR，免落盘）
             t_shot0 = time.perf_counter()
             try:
-                scene, shot_via = SESSION.device.screenshot_bgr()
-            except AdbError as e:
+                scene, shot_via = ds.device.screenshot_bgr()
+            except AdbOpError as e:
                 shot_ms = (time.perf_counter() - t_shot0) * 1000
                 return {
                     "skipped": False, "hit": False, "confidence": 0.0,
@@ -2161,31 +2014,37 @@ def check_auto(
             #    命中且过冷却 → tap；打断 marker 连续帧
             #    本轮已点过的 skip id 跳过，避免反复 return skipped 堵死启动模板识别
             if check_skips:
-                for t in SESSION._skip_templates:
-                    if t["id"] in SESSION._skip_fired_ids:
+                for t in ds._skip_templates:
+                    if t["id"] in ds._skip_fired_ids:
                         continue
-                    template = t.get("img")
-                    if template is None:
-                        path = Path(t["path"])
-                        if path.exists():
-                            template = cv2.imread(str(path))
-                            t["img"] = template
-                    if template is None:
-                        continue
-                    conf = _match_template_in_scene(
-                        scene, template, t["cx"], t["cy"], SKIP_SEARCH_PADDING
-                    )
+                    matcher = t.get("matcher")
+                    if matcher is None:
+                        # 惰性构造 TemplateMatcher（图片元素识别封装，见 adb_helper）
+                        template = t.get("img")
+                        if template is None:
+                            path = Path(t["path"])
+                            if path.exists():
+                                template = cv2.imread(str(path))
+                                t["img"] = template
+                        if template is None:
+                            continue
+                        matcher = TemplateMatcher(
+                            template, t["cx"], t["cy"],
+                            padding=SKIP_SEARCH_PADDING, threshold=SKIP_MATCH_THRESHOLD,
+                        )
+                        t["matcher"] = matcher
+                    conf = matcher.match(scene).confidence
                     if conf < SKIP_MATCH_THRESHOLD:
                         continue
                     if now - float(t.get("last_tap_at") or 0) < SKIP_TAP_COOLDOWN_S:
                         continue
-                    SESSION.device.tap_norm(t["cx"], t["cy"])
+                    ds.device.tap_norm(t["cx"], t["cy"])
                     t["last_tap_at"] = now
-                    SESSION._skip_fired_ids.add(t["id"])
-                    SESSION._marker_hit_streak = 0
+                    ds._skip_fired_ids.add(t["id"])
+                    ds._marker_hit_streak = 0
                     # 弹窗屏 ≠ 启动成功态：视为已见过「低于成功阈值」，避免点完后
                     # 首页已就绪时上升沿永远充不上能（R5 死锁：conf 一直 100% 等上升沿）
-                    SESSION._marker_seen_below = True
+                    ds._marker_seen_below = True
                     match_ms = (time.perf_counter() - t_match0) * 1000
                     elapsed_ms = (time.perf_counter() - t0) * 1000
                     print(
@@ -2208,9 +2067,9 @@ def check_auto(
                         "shot_via": shot_via,
                     }
 
-            # 3) 启动成功模板（内存缓存 + 连续确认 + 上升沿）
-            template = SESSION.ensure_marker_image()
-            if template is None:
+            # 3) 启动成功模板（TemplateMatcher 封装 + 连续确认 + 上升沿）
+            matcher = ds.ensure_marker_matcher()
+            if matcher is None:
                 match_ms = (time.perf_counter() - t_match0) * 1000
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 return {
@@ -2221,50 +2080,47 @@ def check_auto(
                     "error": "未设模板",
                 }
 
-            conf = _match_template_in_scene(
-                scene, template,
-                SESSION._marker_cx, SESSION._marker_cy,
-                MARKER_SEARCH_PADDING,
-            )
+            conf = matcher.match(scene).confidence
             match_ms = (time.perf_counter() - t_match0) * 1000
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
-            above = conf >= MARKER_MATCH_THRESHOLD
+            above = conf >= ds.marker_threshold
             if not above:
-                SESSION._marker_seen_below = True
-                SESSION._marker_hit_streak = 0
+                ds._marker_seen_below = True
+                ds._marker_hit_streak = 0
             else:
-                if MARKER_REQUIRE_RISING_EDGE and not SESSION._marker_seen_below:
+                if MARKER_REQUIRE_RISING_EDGE and not ds._marker_seen_below:
                     # 开跑时桌面/残留已过高：等掉下去再上来，避免误停
-                    SESSION._marker_hit_streak = 0
+                    ds._marker_hit_streak = 0
                 else:
-                    SESSION._marker_hit_streak += 1
+                    ds._marker_hit_streak += 1
 
             hit = (
                 above
-                and SESSION._marker_hit_streak >= MARKER_CONFIRM_FRAMES
-                and (not MARKER_REQUIRE_RISING_EDGE or SESSION._marker_seen_below)
+                and ds._marker_hit_streak >= MARKER_CONFIRM_FRAMES
+                and (not MARKER_REQUIRE_RISING_EDGE or ds._marker_seen_below)
             )
 
-            SESSION.marker_check_total += 1
-            SESSION.marker_check_last_ms = elapsed_ms
-            SESSION.marker_check_last_conf = conf
+            ds.marker_check_total += 1
+            ds.marker_check_last_ms = elapsed_ms
+            ds.marker_check_last_conf = conf
             return {
                 "skipped": False,
                 "hit": bool(hit),
                 "confidence": round(conf, 4),
-                "threshold": MARKER_MATCH_THRESHOLD,
+                "threshold": ds.marker_threshold,
                 "above": bool(above),
-                "streak": SESSION._marker_hit_streak,
+                "streak": ds._marker_hit_streak,
                 "confirm_need": MARKER_CONFIRM_FRAMES,
-                "rising_ready": bool(SESSION._marker_seen_below) or (not MARKER_REQUIRE_RISING_EDGE),
+                "rising_ready": bool(ds._marker_seen_below) or (not MARKER_REQUIRE_RISING_EDGE),
                 "check_skips": bool(check_skips),
                 "ms": round(elapsed_ms, 1),
                 "shot_ms": round(shot_ms, 1),
                 "match_ms": round(match_ms, 1),
                 "shot_via": shot_via,
+                "res_mismatch": res_mismatch,
             }
-    except AdbError as e:
+    except AdbOpError as e:
         return {
             "skipped": False, "hit": False, "confidence": 0.0,
             "check_skips": bool(check_skips), "shot_via": shot_via,
@@ -2279,26 +2135,35 @@ def check_auto(
 
 
 @app.post("/api/marker_watch_reset")
-def marker_watch_reset() -> dict:
-    """测速开始前清零连续确认/上升沿（cold_start 成功时也会自动清）。"""
-    SESSION.reset_marker_watch()
+def marker_watch_reset(req: Optional[dict] = None) -> dict:
+    """测速开始前清零连续确认/上升沿（cold_start 成功时也会自动清）。
+
+    body 可选：{"serial": "..."} 指定设备，默认当前选中。
+    """
+    serial = (req or {}).get("serial") if isinstance(req, dict) else None
+    try:
+        ds = _target_session(serial)
+    except AdbOpError as e:
+        raise _err(400, str(e))
+    ds.reset_marker_watch()
     return {
         "ok": True,
         "confirm_need": MARKER_CONFIRM_FRAMES,
         "rising_edge": MARKER_REQUIRE_RISING_EDGE,
-        "threshold": MARKER_MATCH_THRESHOLD,
+        "threshold": ds.marker_threshold,
     }
 
 
 @app.post("/api/tap")
 def tap(req: TapReq) -> dict:
     try:
-        with SESSION.device_op() as dev:
+        ds = _target_session(req.serial)
+        with ds.lock:
             if req.norm:
-                dev.tap_norm(req.x, req.y)
+                ds.device.tap_norm(req.x, req.y)
             else:
-                dev.tap_pixel(int(req.x), int(req.y))
-    except AdbError as e:
+                ds.device.tap_pixel(int(req.x), int(req.y))
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
 
@@ -2306,9 +2171,10 @@ def tap(req: TapReq) -> dict:
 @app.post("/api/key")
 def key(req: KeyReq) -> dict:
     try:
-        with SESSION.device_op() as dev:
-            dev.keyevent(req.code)
-    except AdbError as e:
+        ds = _target_session(req.serial)
+        with ds.lock:
+            ds.device.keyevent(req.code)
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
 
@@ -2316,39 +2182,38 @@ def key(req: KeyReq) -> dict:
 @app.post("/api/swipe")
 def swipe(req: SwipeReq) -> dict:
     try:
-        with SESSION.device_op() as dev:
+        ds = _target_session(req.serial)
+        with ds.lock:
             if req.norm:
-                w, h = dev.screen_size()
+                w, h = ds.device.screen_size()
                 x1, y1 = int(req.x1 * w), int(req.y1 * h)
                 x2, y2 = int(req.x2 * w), int(req.y2 * h)
             else:
                 x1, y1, x2, y2 = int(req.x1), int(req.y1), int(req.x2), int(req.y2)
-            dev.swipe(x1, y1, x2, y2, req.dur_ms)
-    except AdbError as e:
+            ds.device.swipe(x1, y1, x2, y2, req.dur_ms)
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
 
 
 @app.post("/api/launch_pkg")
 def launch_pkg(req: LaunchPkgReq) -> dict:
-    if req.serial and req.serial != SESSION._serial:
-        SESSION.select(req.serial)
     try:
-        with SESSION.device_op() as dev:
-            dev.launch_pkg(req.package)
-    except AdbError as e:
+        ds = _target_session(req.serial)
+        with ds.lock:
+            ds.device.launch_package(req.package)
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
 
 
 @app.post("/api/force_stop")
 def force_stop(req: ForceStopReq) -> dict:
-    if req.serial and req.serial != SESSION._serial:
-        SESSION.select(req.serial)
     try:
-        with SESSION.device_op() as dev:
-            dev.force_stop(req.package)
-    except AdbError as e:
+        ds = _target_session(req.serial)
+        with ds.lock:
+            ds.device.force_stop(req.package)
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
 
@@ -2357,21 +2222,44 @@ def force_stop(req: ForceStopReq) -> dict:
 def kill_all(req: Optional[KillAllReq] = None) -> dict:
     """测速间隔清后台：am kill-all（方案 A，温和）。"""
     body = req or KillAllReq()
-    if body.serial and body.serial != SESSION._serial:
-        SESSION.select(body.serial)
     try:
-        with SESSION.device_op() as dev:
-            out = dev.kill_all()
-    except AdbError as e:
+        ds = _target_session(body.serial)
+        with ds.lock:
+            out = ds.device.kill_all()
+    except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True, "log": out or "(ok)"}
 
 
+def _apk_info(path: Path) -> Optional[dict]:
+    """APK 文件指纹（审核 B-P0-2：首冷样本跨版本可比性字段）。
+
+    只用于报告按 APK 版本分组；不叠加时间戳/指纹等「可信度增强」（教训三）。
+    计算失败返回 None（不阻塞安装流程）。sha256 前 12 位 hex，流式读防大文件内存峰值。
+    """
+    try:
+        size = path.stat().st_size
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            while chunk := f.read(1024 * 1024):
+                h.update(chunk)
+        return {
+            "name": path.name,
+            "size_bytes": size,
+            "sha256_prefix": h.hexdigest()[:12],
+        }
+    except OSError:
+        return None
+
+
 @app.post("/api/reinstall")
 def reinstall(req: ReinstallReq) -> dict:
-    if req.serial and req.serial != SESSION._serial:
-        SESSION.select(req.serial)
-    # 锁外先查 APK：否则直播截图占着 device_op 锁时，连「文件不存在」都要干等十几秒，
+    try:
+        ds = _target_session(req.serial)
+    except AdbOpError as e:
+        # 前端按 {ok:false} 结构处理（与其它错误路径一致，避免 500）
+        return {"ok": False, "error": str(e), "log": [], "apk_info": None}
+    # 锁外先查 APK：否则直播截图占着设备锁时，连「文件不存在」都要干等十几秒，
     # 前端只看到「卸装重装」一行日志，像没执行。
     apk = Path(req.apk_path)
     if not apk.is_file():
@@ -2380,16 +2268,117 @@ def reinstall(req: ReinstallReq) -> dict:
             "error": f"APK 文件不存在：{req.apk_path}（若刚重启过后端，请重新上传 APK）",
             "log": [],
         }
-    print(f"[reinstall] 开始 pkg={req.package} apk={apk.name} size={apk.stat().st_size}", flush=True)
+    # 锁外算 APK 指纹（百 MB 级哈希数百 ms，不占设备锁）
+    apk_info = _apk_info(apk)
+    print(f"[reinstall:{ds.serial}] 开始 pkg={req.package} apk={apk.name} size={apk.stat().st_size}", flush=True)
     try:
-        with SESSION.device_op() as dev:
+        with ds.lock:
             print("[reinstall] 已拿到设备锁，执行 uninstall…", flush=True)
-            log = dev.reinstall(req.package, req.apk_path)
-    except AdbError as e:
+            log = ds.device.reinstall(req.package, req.apk_path)
+    except AdbOpError as e:
         print(f"[reinstall] 失败：{e}", flush=True)
-        return {"ok": False, "error": str(e), "log": []}
+        return {"ok": False, "error": str(e), "log": [], "apk_info": apk_info}
     print("[reinstall] 完成", flush=True)
-    return {"ok": True, "log": log}
+    return {"ok": True, "log": log, "apk_info": apk_info}
+
+
+@app.post("/api/marker_threshold")
+def set_marker_threshold(req: MarkerThresholdReq) -> dict:
+    """设置指定设备（默认当前选中）的模板匹配阈值（审核 E-P1-3）。
+
+    每设备独立（不同分辨率/UI 风格设备可不同阈值）；内存变量，重启还原默认 0.85
+    （与模板本身行为一致，前端 UI 有提示）。阈值变化时失效 matcher 缓存（重建）。
+    """
+    try:
+        ds = _target_session(req.serial)
+    except AdbOpError as e:
+        raise _err(400, str(e))
+    with ds.lock:
+        ds.marker_threshold = req.threshold
+        ds._marker_matcher = None  # matcher 带阈值参数，必须重建
+    return {"ok": True, "threshold": ds.marker_threshold, "default": MARKER_MATCH_THRESHOLD}
+
+
+@app.post("/api/sys_baseline")
+def sys_baseline(req: SysBaselineReq) -> dict:
+    """系统对照模式：am start -W 连跑 N 轮，输出 TotalTime 均值/中位数。
+
+    目的（审核 A-P0-1）：与工具模板停表口径做交叉验证。注意口径差异——
+    am start -W 的 TotalTime 终点是系统首帧绘制，模板停表终点是启动成功页
+    元素就绪；两者并排看趋势一致性，差值表述为「口径偏差」而非「精度偏差」。
+    只读打点：不写 records、不影响任何现有统计。全程持目标设备锁（对齐 §2.4）。
+    """
+    ds = _target_session(req.serial)
+    try:
+        with ds.lock:
+            # 1) 解析可启动组件（resolve-activity --brief 输出形如 com.pkg/.MainActivity）
+            out = ds.device.run(
+                ["shell", "cmd", "package", "resolve-activity", "--brief", req.package],
+                timeout=10.0,
+            )
+            lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
+            component = lines[-1] if lines else ""
+            if not component or "/" not in component:
+                raise AdbError(
+                    f"解析不到可启动 Activity：pkg={req.package}"
+                    + (f"（adb 输出：{out.strip()!r}）" if out.strip() else "（空输出，设备可能离线）")
+                )
+
+            # 2) 连跑 N 轮：force-stop → 冷却 → am start -W
+            samples: list[dict] = []
+            errors: list[str] = []
+            for i in range(req.rounds):
+                ds.device.force_stop(req.package)
+                if req.cooldown_s > 0:
+                    time.sleep(req.cooldown_s)
+                try:
+                    raw = ds.device.run(
+                        ["shell", "am", "start", "-W", component],
+                        timeout=30.0,
+                    )
+                except AdbOpError as e:
+                    errors.append(f"第 {i + 1} 轮 am start 失败：{e}（已跳过）")
+                    continue
+                m_this = re.search(r"ThisTime:\s*(\d+)", raw)
+                m_total = re.search(r"TotalTime:\s*(\d+)", raw)
+                m_wait = re.search(r"WaitTime:\s*(\d+)", raw)
+                if not m_total:
+                    errors.append(f"第 {i + 1} 轮解析失败（无 TotalTime）：{raw.strip()[:80]}（已跳过）")
+                    continue
+                samples.append({
+                    "idx": i + 1,
+                    "this_ms": int(m_this.group(1)) if m_this else 0,
+                    "total_ms": int(m_total.group(1)),
+                    "wait_ms": int(m_wait.group(1)) if m_wait else 0,
+                    "raw": raw.strip(),
+                })
+
+            if not samples:
+                raise AdbError(f"全部 {req.rounds} 轮均无有效样本：" + ("；".join(errors) or "未知原因"))
+
+            totals = [s["total_ms"] for s in samples]
+            n = len(totals)
+            ordered = sorted(totals)
+            if n % 2:
+                median = ordered[n // 2]
+            else:
+                median = (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+            return {
+                "ok": True,
+                "package": req.package,
+                "component": component,
+                "rounds": req.rounds,
+                "samples": samples,
+                "errors": errors,
+                "stats": {
+                    "total_mean_ms": round(sum(totals) / n, 1),
+                    "total_median_ms": round(median, 1),
+                    "n": n,
+                },
+            }
+    except AdbOpError as e:
+        raise _err(400, str(e))
 
 
 @app.post("/api/cold_start")
@@ -2399,20 +2388,18 @@ def cold_start(req: ColdStartReq) -> dict:
     计时由前端完成（v1 单一 performance.now() 方案，详见 ColdStartReq docstring）。
     本端点不自动回主页 —— 用户需确保启动前已在桌面。独立的回主页能力在
     前端"回主页"按钮 + /api/key 端点，与启动流程解耦。
-    全程在 device_op() 锁下执行（审核高3：force_stop + tap 必须串行，避免并发竞争）。
+    全程在目标设备锁下执行（审核高3：force_stop + tap 必须串行，避免并发竞争）。
     """
-    if req.serial and req.serial != SESSION._serial:
-        SESSION.select(req.serial)
-
     try:
-        with SESSION.device_op() as dev:
+        ds = _target_session(req.serial)
+        with ds.lock:
             # 1) 先把上一次的同包进程杀掉，确保冷启动
             if req.package:
-                dev.force_stop(req.package)
+                ds.device.force_stop(req.package)
 
             # 2) 预热 screen_size（如果还没缓存），避免它计入 tap_norm 的执行
-            if dev._last_size is None:
-                dev.screen_size()
+            if getattr(ds.device, "_last_size", None) is None:
+                ds.device.screen_size()
 
             # 3) 在 tap/monkey 命令实际发出前一刻记录 wall 时间（仅供诊断/将来用）
             start_wall = time.time()
@@ -2420,27 +2407,27 @@ def cold_start(req: ColdStartReq) -> dict:
             if req.mode == "tap":
                 if req.x is None or req.y is None:
                     raise _err(400, "tap 模式需要 x, y 坐标")
-                dev.tap_norm(req.x, req.y)
+                ds.device.tap_norm(req.x, req.y)
             elif req.mode == "pkg":
                 if not req.package:
                     raise _err(400, "pkg 模式需要 package")
-                dev.launch_pkg(req.package)
+                ds.device.launch_package(req.package)
             else:
                 raise _err(400, f"未知 mode：{req.mode}")
 
         # 新一次启动观察：清零 streak / 已点跳过；
         # after_force_stop=True：上面若杀过包（或本就无包可杀），视为已离开成功页，种上升沿
-        SESSION.reset_marker_watch(after_force_stop=True)
+        ds.reset_marker_watch(after_force_stop=True)
 
         return {
             "ok": True,
             "start_wall": start_wall,   # unix epoch 秒，仅供诊断；前端计时用 performance.now() 不消费此字段
             "marker_confirm_frames": MARKER_CONFIRM_FRAMES,
             "marker_rising_edge": MARKER_REQUIRE_RISING_EDGE,
-            "marker_threshold": MARKER_MATCH_THRESHOLD,
+            "marker_threshold": ds.marker_threshold,
             "marker_rising_seeded": True,  # 诊断：本趟上升沿已因 force_stop 预置
         }
-    except AdbError as e:
+    except AdbOpError as e:
         raise _err(400, str(e))
 
 
