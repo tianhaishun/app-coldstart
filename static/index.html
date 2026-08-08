@@ -454,7 +454,7 @@
     <div class="glass-panel p-2 rounded flex items-center gap-3 shrink-0">
       <span class="text-[10px] font-mono font-bold text-on-surface-variant">平台</span>
       <label class="flex items-center gap-1 text-xs font-mono cursor-pointer"><input type="radio" name="platform" value="gp" checked class="text-primary"> GP（安卓）</label>
-      <label class="flex items-center gap-1 text-xs font-mono cursor-pointer"><input type="radio" name="platform" value="ios" class="text-primary"> iOS（-1s）</label>
+      <label class="flex items-center gap-1 text-xs font-mono cursor-pointer"><input type="radio" name="platform" value="ios" class="text-primary"> iOS（-1s）<input id="iosAdjSec" type="number" min="0" max="5" step="0.5" value="1" title="iOS 首次冷启动调整秒数（TestFlight 弹窗扣减，可配置，0=关闭，默认 1s）" class="w-12 bg-surface-container-high border border-outline-variant rounded px-1 py-0.5 text-[10px] font-mono"></label>
     </div>
 
     <!-- 启动方式 + 辅助操作 -->
@@ -493,7 +493,11 @@
               </div>
               <div id="markerPreviewWrap" class="hidden w-[72px] h-[44px] bg-surface-container-lowest border border-outline-variant rounded overflow-hidden flex items-center justify-center text-[9px] text-on-surface-variant">无</div>
             </div>
-            <div id="markerStatus" class="mt-1 text-[10px] font-mono text-on-surface-variant">未设模板 · 请先手动启动 App 到首页，再点上面按钮选定元素</div>
+            <div id="markerStatus" class="mt-1 text-[10px] font-mono text-on-surface-variant">未设模板 · 请先手动启动 App 到首页，再点上面按钮选定元素
+              <span class="ml-1 inline-flex items-center gap-0.5 align-middle" title="模板匹配阈值（0.5~0.99，不同分辨率/UI 风格设备可不同）；重启还原默认 0.85">阈值
+                <input id="markerThreshold" type="number" step="0.01" min="0.5" max="0.99" value="0.85" class="w-14 bg-surface-container-high border border-outline-variant rounded px-1 py-0.5 text-[10px] font-mono focus:ring-primary focus:border-primary">
+              </span>
+            </div>
           </div>
 
           <details class="border-t border-outline-variant/60 pt-1.5">
@@ -526,11 +530,30 @@
             <input id="autoKillCool" type="number" min="0" max="10" step="0.5" value="1.5" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
           </div>
         </div>
+        <!-- 测速项：首次/二次多选（调试用；默认全选=原行为；选中态由 JS 切 border-tertiary/text-tertiary，零新增 CSS 类） -->
+        <div class="flex gap-1.5 shrink-0">
+          <label id="optFirstLabel" class="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-surface-container-high border border-tertiary rounded text-xs font-mono font-bold text-tertiary cursor-pointer select-none transition" title="卸装重装后测首次冷启动（干净安装）">
+            <input type="checkbox" id="optFirst" checked style="width:13px;height:13px;accent-color:var(--primary)"> 首次冷启动
+          </label>
+          <label id="optSecondLabel" class="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-surface-container-high border border-tertiary rounded text-xs font-mono font-bold text-tertiary cursor-pointer select-none transition" title="杀进程后测二次冷启动（不卸装）">
+            <input type="checkbox" id="optSecond" checked style="width:13px;height:13px;accent-color:var(--primary)"> 二次冷启动
+          </label>
+        </div>
         <div id="autoLaunchHint" class="text-[10px] font-mono text-on-surface-variant leading-relaxed shrink-0"></div>
         <div class="grid grid-cols-2 gap-1.5 shrink-0">
           <button id="autoStartBtn" class="py-2 bg-tertiary text-on-tertiary rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">▶ 开始自动循环</button>
           <button id="autoStopBtn" class="py-2 bg-surface-container-high border border-danger/20 text-on-surface rounded font-mono text-xs font-bold hover:bg-danger/10 transition active:scale-95" disabled>■ 停止</button>
         </div>
+
+        <!-- 系统对照（am start -W 交叉验证）：折叠 details，展开时才占空间，布局零影响 -->
+        <details class="shrink-0 border-t border-outline-variant/60 pt-1.5">
+          <summary class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1 cursor-pointer hover:text-primary select-none">📊 系统对照（am start -W 交叉验证）▶</summary>
+          <div class="flex gap-1.5 mb-1.5 mt-1.5">
+            <input id="sysBaseRounds" type="number" min="1" max="10" value="5" title="连跑轮数" class="w-20 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1 px-2 focus:ring-primary focus:border-primary">
+            <button id="sysBaseBtn" type="button" class="flex-1 py-1.5 bg-surface-container-high border border-primary/20 text-on-surface hover:bg-primary/10 rounded text-xs font-mono font-bold transition active:scale-95">📊 系统对照（跑 N 轮）</button>
+          </div>
+          <pre id="sysBaseOut" class="bg-surface-container-lowest border-l-2 border-primary rounded p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-on-surface-variant hidden"></pre>
+        </details>
 
         <!-- 开跑检查：可折叠；与下方日志交界可拖高日志 -->
         <div id="autoCheckPanel" class="shrink-0 collapsed">
@@ -910,6 +933,10 @@ function loadConfig() {
   if ($('liveGap') && config.liveGap != null) {
     $('liveGap').value = String(config.liveGap);
   }
+  // iOS 首冷调整秒数（审核 C-P1-1：可配置，默认 1.0）
+  if ($('iosAdjSec')) {
+    $('iosAdjSec').value = String(iosFirstAdjustSec());
+  }
   updateAutoLaunchHint();
   // APK：有本地路径则视为本机会话还在用；否则显示「请上传」提醒
   if (($('apkPath').value || '').trim()) {
@@ -929,9 +956,15 @@ function saveConfig(opts) {
   if (checkedPlatform) config.platform = checkedPlatform.value;
   if ($('liveToggle')) config.liveOn = !!$('liveToggle').checked;
   if ($('liveGap')) config.liveGap = parseInt($('liveGap').value, 10) || 300;
+  if ($('iosAdjSec')) config.iosFirstAdjustSec = parseFloat($('iosAdjSec').value) || 0;  // 审核 C-P1-1
   localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
   if (!opts || !opts.quiet) markProjectDirty();
   refreshAutoChecklist();
+}
+// iOS 首冷调整秒数（审核 C-P1-1：可配置，默认 1.0，0 关闭；所有 -1s 使用点统一走这里）
+function iosFirstAdjustSec() {
+  const v = parseFloat(config.iosFirstAdjustSec);
+  return (v >= 0 && v <= 5) ? v : 1.0;
 }
 function updateAutoLaunchHint() {
   const el = $('autoLaunchHint');
@@ -951,6 +984,8 @@ $('launchMode').addEventListener('change', () => { saveConfig(); updateAutoLaunc
 document.querySelectorAll('input[name="platform"]').forEach(r => {
   r.addEventListener('change', () => { saveConfig(); renderStats(); renderHistory(); });
 });
+// iOS 调整秒数变更 → 保存 + 重算统计（审核 C-P1-1）
+$('iosAdjSec')?.addEventListener('change', () => { saveConfig(); renderStats(); renderHistory(); });
 
 // ── 项目：手动保存模板/配置；历史按项目分桶；不存 APK ──
 function apiDetail(j, fallback) {
@@ -1626,7 +1661,7 @@ async function startTimer() {
   try {
     const body = { mode, package: pkg || null };
     if (mode === 'tap') { body.x = x; body.y = y; }
-    const r = await fetch(API + '/api/cold_start', {
+    const r = await apiFetch(API + '/api/cold_start', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
     });
     const j = await r.json();
@@ -1705,7 +1740,11 @@ function computeStatsGrouped() {
   const first = [], second = [];
   records.forEach((r, i) => {
     const displayIdx = i + 1;
-    if (displayIdx % 2 === 1) first.push({ ...r, displayIdx });
+    // 分组以记录真实类型为准（自动记录带 type；测速项可选「仅首次/仅二次」后
+    // 序号奇偶不再与类型交替，必须用 type）。手动记录无 type → 回退序号奇偶
+    // （保持 v3 约定：手动模式按「卸装→首次→二次」节奏采集）。
+    const type = r.type || (displayIdx % 2 === 1 ? 'first' : 'second');
+    if (type === 'first') first.push({ ...r, displayIdx });
     else second.push({ ...r, displayIdx });
   });
 
@@ -1726,18 +1765,20 @@ function computeStatsGrouped() {
         dropped_min: { idx: group[minIdx].displayIdx, value: min },
         kept: kept.map(g => g.time),
         mean: mean,
+        // 审核 D-P1-2：3≤n<5 截尾后仅剩 1~3 值，标注样本较少（n>=5 无标记）
+        warning: group.length < 5 ? `样本较少（n=${group.length}）` : undefined,
       };
     } else if (group.length > 0) {
-      // 不足 3 条，全量平均（不剔）
+      // 不足 3 条，全量平均（不剔）；审核 D-P1-2：显式标注样本不足
       const mean = values.reduce((s, v) => s + v, 0) / values.length;
-      return { raw: values, dropped_max: null, dropped_min: null, kept: values, mean, warning: '不足 3 条，未去极值' };
+      return { raw: values, dropped_max: null, dropped_min: null, kept: values, mean, warning: `样本不足（n=${group.length}），未去极值` };
     }
     return null;
   }
 
   const firstResult = trimMean(first);
   const secondResult = trimMean(second);
-  const firstAdjustMs = platform === 'ios' ? -1000 : 0;  // iOS 首次 -1 秒
+  const firstAdjustMs = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;  // iOS 首次调整（审核 C 可配置）
   const secondAdjustMs = 0;
 
   return {
@@ -1793,8 +1834,12 @@ function renderStats() {
   }
 
   // 下一条提示（帮用户保持"卸装→测→测"节奏）
+  // 有显式 type 的记录（自动）按「与最后一条交替」推导；无 type（手动）回退奇偶约定
   const nextIdx = records.length + 1;       // 下一条的显示序号
-  const nextIsFirst = nextIdx % 2 === 1;
+  const lastRec = records[records.length - 1];
+  const nextIsFirst = lastRec && lastRec.type
+    ? lastRec.type !== 'first'
+    : nextIdx % 2 === 1;
   const hintEl = $('nextHint');
   if (nextIsFirst) {
     hintEl.className = 'next-hint first';
@@ -1823,7 +1868,10 @@ function renderHistory() {
   el.innerHTML = records.map((r, i) => {
     const displayIdx = i + 1;
     const isOdd = displayIdx % 2 === 1;
-    const typeTag = isOdd
+    // 与 computeStatsGrouped 同规则：自动记录用真实 type（仅首次/仅二次调试时
+    // 序号奇偶不再交替），手动记录回退奇偶。typeTag 只由固定常量生成，无用户数据。
+    const rType = r.type || (isOdd ? 'first' : 'second');
+    const typeTag = rType === 'first'
       ? '<span class="tag-type tag-first">首</span>'
       : '<span class="tag-type tag-second">二</span>';
     // 分组剔除标记（优先显示，比老的一锅烩 MAX/MIN 更准确）
@@ -1868,7 +1916,7 @@ async function reinstall() {
   btn.disabled = true; btn.textContent = '处理中...';
   log.className = 'install-log show'; log.textContent = '正在卸载旧版本...';
   try {
-    const r = await fetch(API + '/api/reinstall', {
+    const r = await apiFetch(API + '/api/reinstall', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({package: pkg, apk_path: apkPath})
     });
@@ -1889,7 +1937,7 @@ async function forceStop() {
   const pkg = $('apkPkg').value.trim();
   if (!pkg) { setState('err', '⚠ 请先填包名'); return; }
   try {
-    await fetch(API + '/api/force_stop', {
+    await apiFetch(API + '/api/force_stop', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({package: pkg})
     });
     setState('ok', `已杀进程：${pkg}`);
@@ -2001,7 +2049,7 @@ $('csvBtn').addEventListener('click', () => {
   L.push('# 数据说明,起点漏 adb input 执行(~150-250ms); 终点含人工反应(偏高~0.3s)');
   L.push('# 可比性,同设备同APK横向对比有效; 差异<~0.3s视为噪声');
   L.push('');
-  L.push('序号,类型,耗时(s),采集时间,状态');
+  L.push('序号,类型,耗时(s),采集时间,状态,APK版本');
   // 建分组剔除查找表
   const droppedMap = {};
   if (gs.first && gs.first.dropped_max) droppedMap[gs.first.dropped_max.idx] = '剔除(首次最大)';
@@ -2010,9 +2058,12 @@ $('csvBtn').addEventListener('click', () => {
   if (gs.second && gs.second.dropped_min) droppedMap[gs.second.dropped_min.idx] = '剔除(二次最小)';
   records.forEach((r, i) => {
     const displayIdx = i + 1;
-    const type = displayIdx % 2 === 1 ? '首次' : '二次';
+    // 类型以真实 type 为准（自动记录；手动记录回退奇偶），与 computeStatsGrouped 同规则
+    const type = r.type === 'first' ? '首次'
+      : r.type === 'second' ? '二次'
+      : (displayIdx % 2 === 1 ? '首次' : '二次');
     const st = droppedMap[displayIdx] || '有效';
-    L.push(`${displayIdx},${type},${fmt(r.time)},${new Date(r.date).toLocaleString('zh-CN')},${st}`);
+    L.push(`${displayIdx},${type},${fmt(r.time)},${new Date(r.date).toLocaleString('zh-CN')},${st},${(r.apk && r.apk.sha256_prefix) || '未记录版本'}`);
   });
   L.push('');
   L.push('# 首次冷启动统计');
@@ -2023,6 +2074,19 @@ $('csvBtn').addEventListener('click', () => {
     L.push(`# 首次_去极值均值,${fmt(gs.first.mean)}s`);
     L.push(`# 首次_平台调整,${gs.first.adjustment/1000}s`);
     L.push(`# 首次_最终值,${fmt(gs.first.final)}s`);
+    // 审核 B-P0-2：按 APK 版本分组（跨版本可比性；旧记录归「未记录版本」）
+    const firstApkGroups = {};
+    records.forEach(r => {
+      if (r.type !== 'first') return;
+      const key = (r.apk && r.apk.sha256_prefix) || '未记录版本';
+      if (!firstApkGroups[key]) firstApkGroups[key] = [];
+      firstApkGroups[key].push(r.time);
+    });
+    Object.keys(firstApkGroups).forEach(key => {
+      const vals = firstApkGroups[key];
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      L.push(`# 首次_分版本_${key},${vals.length}样本,均值${fmt(mean)}s`);
+    });
   }
   L.push('');
   L.push('# 二次冷启动统计');
@@ -2188,6 +2252,49 @@ let projectDirty = false;         // 相对已保存项目有未保存改动
 let autoGateReady = false;        // 开跑闸门是否全绿
 
 // 刷新/重启后前端 flag 会丢，但后端 Session 可能还留着模板——启动前同步一次
+// 阈值输入框（审核 E-P1-3）：markerStatus 的 innerHTML 覆盖会丢 input，统一用此函数重建
+function appendThresholdInput(initVal) {
+  const st = $('markerStatus');
+  if (!st || document.getElementById('markerThreshold')) return;
+  const span = document.createElement('span');
+  span.className = 'ml-1 inline-flex items-center gap-0.5 align-middle';
+  span.title = '模板匹配阈值（0.5~0.99，不同分辨率/UI 风格设备可不同）；重启还原默认 0.85';
+  span.textContent = '阈值';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.id = 'markerThreshold';
+  input.step = '0.01';
+  input.min = '0.5';
+  input.max = '0.99';
+  input.value = String(initVal ?? 0.85);
+  input.className = 'w-14 bg-surface-container-high border border-outline-variant rounded px-1 py-0.5 text-[10px] font-mono focus:ring-primary focus:border-primary';
+  span.appendChild(input);
+  st.appendChild(span);
+  bindMarkerThreshold();
+}
+function bindMarkerThreshold() {
+  const input = $('markerThreshold');
+  if (!input || input.dataset.bound) return;
+  input.dataset.bound = '1';
+  input.addEventListener('change', async () => {
+    const v = parseFloat(input.value);
+    if (!(v >= 0.5 && v <= 0.99)) {
+      uiAlert('阈值需在 0.5~0.99 之间', '已还原为默认 0.85', 'warning');
+      input.value = '0.85';
+      return;
+    }
+    try {
+      const r = await apiFetch(API + '/api/marker_threshold', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threshold: v })
+      });
+      const j = await r.json();
+      if (!r.ok) { uiAlert('设置失败', j.detail || `HTTP ${r.status}`, 'error'); return; }
+      setState('ok', `模板阈值已设为 ${j.threshold}`);
+    } catch (e) { uiAlert('设置失败', e.message, 'error'); }
+  });
+}
+
 async function syncMarkerReadyFromServer() {
   try {
     const r = await fetch(API + '/api/marker_status');
@@ -2203,11 +2310,14 @@ async function syncMarkerReadyFromServer() {
     } else {
       markerTemplateReady = false;
     }
+    // 阈值输入框同步（innerHTML 覆盖会丢 input → 兜底重建；已存在则不打扰用户输入）
+    appendThresholdInput(j.threshold ?? 0.85);
   } catch (e) {
     console.warn('syncMarkerReadyFromServer', e);
   }
   refreshAutoChecklist();
 }
+bindMarkerThreshold();  // 页面初始 HTML 里的阈值输入框绑定
 
 // ── 运行审计日志（结构化：时间 · 级别 · 阶段 · 正文）──
 function formatAuditTs(d = new Date()) {
@@ -2405,6 +2515,7 @@ function refreshAutoChecklist() {
     { ok: !!pkg, label: '已填 APK 包名', req: true },
     { ok: !!apkPath, label: '本会话已上传 APK（项目不存安装包）', req: true },
     { ok: !!markerTemplateReady, label: '已设启动成功模板', req: true },
+    { ok: $('optFirst')?.checked || $('optSecond')?.checked, label: '已选测速项（首次/二次至少一项）', req: true },
     { ok: tapOk, label: mode === 'tap' ? '已设图标点击坐标' : '启动方式=包名（无需坐标）', req: mode === 'tap' },
     { ok: !!currentProjectId, label: currentProjectId ? '已选项目（历史按项目分开）' : '未选项目（可选，建议新建）', req: false },
     { ok: skipTemplateCount > 0, label: skipTemplateCount > 0 ? `跳过弹窗模板 ×${skipTemplateCount}` : '跳过弹窗模板（可选）', req: false },
@@ -2423,6 +2534,20 @@ function refreshAutoChecklist() {
     return `<div class="${cls}">${mark} ${escapeHtml(it.label)}</div>`;
   }).join('');
 }
+
+// 测速项勾选：切换 label 高亮（只切已编译类，不新增 CSS）
+function syncOptLabel() {
+  [['optFirst', 'optFirstLabel'], ['optSecond', 'optSecondLabel']].forEach(([id, labelId]) => {
+    const lb = $(labelId);
+    const on = $(id).checked;
+    lb.classList.toggle('border-tertiary', on);
+    lb.classList.toggle('text-tertiary', on);
+    lb.classList.toggle('border-outline-variant', !on);
+  });
+}
+$('optFirst').addEventListener('change', syncOptLabel);
+$('optSecond').addEventListener('change', syncOptLabel);
+syncOptLabel();
 
 // 开跑检查折叠（点标题行或 ▶/▼ 均可）
 $('autoCheckHead')?.addEventListener('click', e => {
@@ -2491,6 +2616,7 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
   let lastLogAt = 0;
   let warnedWeird = false;
+  let warnedResMismatch = false;  // 审核 F-P1-4：分辨率变化只警告一次
   let pollCount = 0;
   // 只有明确传 true 才匹配跳过模板；false/undefined 均直接走启动模板。
   const doSkips = checkSkips === true;
@@ -2506,7 +2632,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
     }
     try {
       const qs = doSkips ? '' : '?check_skips=false';
-      const r = await fetch(API + '/api/check_auto' + qs);
+      const r = await apiFetch(API + '/api/check_auto' + qs);
       if (r.ok) {
         const j = await r.json();
         pollCount += 1;
@@ -2524,6 +2650,11 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
         if (j.error && elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
           autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`);
+        }
+        // 审核 F-P1-4：分辨率与设模板时不一致 → 警告一次（仅提示，不停表）
+        if (j.res_mismatch && !warnedResMismatch) {
+          warnedResMismatch = true;
+          autoLog('WARN', 'WAIT', '⚠ 设备分辨率已变化（模板按旧分辨率设定），识别可能不准——建议停止后重设启动模板');
         }
         if (j.hit) {
           // 终点补偿：成功画面在「截图命令开始」时已在屏上；拿到图之前的 shot_ms 不应计入冷启
@@ -2571,13 +2702,30 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── apiFetch：带超时的 fetch 封装（审核 G-P1-5）──
+// adb 卡死/后端进程崩溃时 fetch 会无限挂起，自动循环因此卡死。
+// 超时抛 Error（走调用方现有 catch 路径）。直播轮询（/api/screenshot 的 Image 加载）
+// 已有独立 SHOT_TIMEOUT_MS 机制，不在此列。
+async function apiFetch(url, opts = {}, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`请求超时（${timeoutMs}ms）：${url.split('?')[0]}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 测启动前：am kill-all 清后台 + force_stop 目标包 + 冷却
  *  任一步失败必须抛错中止——否则可能测到温启动，污染冷启样本。
  */
 async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   autoLog('STEP', phase, '准备冷启动环境：先清后台进程 (am kill-all)，再强制停止目标包 (force-stop)');
   autoLog('STEP', phase, '执行 am kill-all（清后台，腾内存）…');
-  const kr = await fetch(API + '/api/kill_all', {
+  const kr = await apiFetch(API + '/api/kill_all', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
   });
@@ -2588,7 +2736,7 @@ async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   autoLog('OK', phase, `am kill-all 完成 · ${kj.log || 'ok'}`);
 
   autoLog('STEP', phase, `执行 force-stop 目标包 ${pkg}（确保进程被杀干净，才算冷启动）…`);
-  const fr = await fetch(API + '/api/force_stop', {
+  const fr = await apiFetch(API + '/api/force_stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ package: pkg })
   });
@@ -2671,58 +2819,80 @@ async function runAutoLoop() {
   const projName = ($('projectSel').selectedOptions[0]?.textContent || '').split(' · ')[0] || (currentProjectId || '（未选项目）');
   const apkName = apkPath.split(/[/\\]/).pop();
 
+  // 测速项多选（首次/二次；调试用，默认全选=原行为）
+  const doFirst = $('optFirst')?.checked !== false;
+  const doSecond = $('optSecond')?.checked !== false;
+  const typesLabel = doFirst && doSecond ? '首次+二次' : doFirst ? '仅首次' : '仅二次';
+  if (!doFirst && !doSecond) {
+    uiAlert('请至少勾选一个测速项', '首次/二次冷启动至少选一项才能开始', 'warning');
+    return;
+  }
+
   autoLog('INFO', 'RUN', `项目=${projName}`);
   autoLog('INFO', 'RUN', `设备=${deviceLabel}`);
   autoLog('INFO', 'RUN', `包名=${pkg} · ${modeLabel} · 计划 ${rounds} 轮 · 异常阈值 ${weirdMs / 1000}s（超时不中止，只标记）· 轮询间隔 ${gapMs}ms · 清进程冷却 ${killCoolMs / 1000}s`);
+  autoLog('INFO', 'RUN', `测速项=${typesLabel}${doFirst ? '（首次=卸装重装后测，干净安装）' : ''}${doSecond ? '（二次=杀进程后测，不卸装）' : ''}`);
   autoLog('INFO', 'RUN', `APK=${apkName}` + (preflight?.apk_size_mb != null ? ` ${preflight.apk_size_mb}MB` : ''));
   autoLog('INFO', 'RUN', '计时：cold_start 返回后起表；停表：启动成功模板连续 1 帧≥0.85；命中帧扣掉当次截图耗时；上升沿在 force_stop 后已预置；跳过仅首次；每轮启动前清进程');
   autoLog('INFO', 'PRE', `开跑自检通过 · 设备=${preflight?.device || '—'} · 启动模板=${markerTemplateReady ? '已就绪' : '未设'} · 跳过弹窗模板×${skipTemplateCount}`);
   autoLog('INFO', 'RUN', '已关闭直播截图，adb 专供本轮自动循环');
 
   try {
+    // 本轮 APK 指纹（审核 B-P0-2：报告按 APK 版本分组用；仅首次更新，二次沿用；
+    // 仅二次模式无卸装 → null，旧记录无 apk 字段 → 归「未记录版本」组）
+    let curApkInfo = null;
     for (let round = 1; round <= targetRounds; round++) {
       if (autoAbortFlag) throw new Error('用户中断');
       const phase = `R${round}`;
       let roundAbnormal = false;
 
-      autoLog('STEP', phase, `第 ${round} 轮：开始卸装重装（保证首次冷启动是干净安装）…`);
-      const tRe = performance.now();
-      const reinstallResp = await fetch(API + '/api/reinstall', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ package: pkg, apk_path: apkPath })
-      });
-      let reinstallData;
-      try {
-        reinstallData = await reinstallResp.json();
-      } catch (e) {
-        throw new Error(`卸装响应不是 JSON（HTTP ${reinstallResp.status}）`);
+      if (doFirst) {
+        autoLog('STEP', phase, `第 ${round} 轮：开始卸装重装（保证首次冷启动是干净安装）…`);
+        const tRe = performance.now();
+        const reinstallResp = await apiFetch(API + '/api/reinstall', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ package: pkg, apk_path: apkPath })
+        });
+        let reinstallData;
+        try {
+          reinstallData = await reinstallResp.json();
+        } catch (e) {
+          throw new Error(`卸装响应不是 JSON（HTTP ${reinstallResp.status}）`);
+        }
+        const reMs = performance.now() - tRe;
+        if (reinstallData.log && reinstallData.log.length) {
+          reinstallData.log.forEach(line => autoLog('INFO', 'ADB', `adb 原始输出：${String(line).trim()}`));
+        }
+        if (!reinstallData.ok) {
+          throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
+        }
+        curApkInfo = reinstallData.apk_info || null;
+        autoLog('OK', phase, `卸装重装成功 · 耗时 ${(reMs / 1000).toFixed(1)}s` + (curApkInfo ? ` · APK ${curApkInfo.name}（${curApkInfo.sha256_prefix}）` : ''));
+      } else {
+        autoLog('INFO', phase, `第 ${round} 轮：测速项=仅二次，跳过卸装重装（复用已装应用，快速调试）`);
       }
-      const reMs = performance.now() - tRe;
-      if (reinstallData.log && reinstallData.log.length) {
-        reinstallData.log.forEach(line => autoLog('INFO', 'ADB', `adb 原始输出：${String(line).trim()}`));
-      }
-      if (!reinstallData.ok) {
-        throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
-      }
-      autoLog('OK', phase, `卸装重装成功 · 耗时 ${(reMs / 1000).toFixed(1)}s`);
 
-      if (autoAbortFlag) throw new Error('用户中断');
-      autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`);
-      await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`);
-      const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round);
-      if (first.abnormal) roundAbnormal = true;
-      records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal });
-      saveRecords(); renderHistory(); renderStats();
-      autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 首次冷启动 = ${fmt(first.time)}s · 第 ${round} 轮` + (first.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+      if (doFirst) {
+        if (autoAbortFlag) throw new Error('用户中断');
+        autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`);
+        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`);
+        const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round);
+        if (first.abnormal) roundAbnormal = true;
+        records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal, apk: curApkInfo });
+        saveRecords(); renderHistory(); renderStats();
+        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 首次冷启动 = ${fmt(first.time)}s · 第 ${round} 轮` + (first.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+      }
 
-      if (autoAbortFlag) throw new Error('用户中断');
-      autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`);
-      await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`);
-      const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round);
-      if (second.abnormal) roundAbnormal = true;
-      records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal });
-      saveRecords(); renderHistory(); renderStats();
-      autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 二次冷启动 = ${fmt(second.time)}s · 第 ${round} 轮` + (second.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+      if (doSecond) {
+        if (autoAbortFlag) throw new Error('用户中断');
+        autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`);
+        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`);
+        const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round);
+        if (second.abnormal) roundAbnormal = true;
+        records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal, apk: curApkInfo });
+        saveRecords(); renderHistory(); renderStats();
+        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 二次冷启动 = ${fmt(second.time)}s · 第 ${round} 轮` + (second.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+      }
 
       if (roundAbnormal && extraGranted < MAX_EXTRA_ROUNDS) {
         extraGranted += 1;
@@ -2748,7 +2918,9 @@ async function runAutoLoop() {
       return kept.reduce((a, b) => a + b, 0) / kept.length;
     }
     const fm = quickTrim(firsts), sm = quickTrim(seconds);
-    autoLog('OK', 'SUMMARY', `全部完成 · 墙钟 ${totalSec}s · 首次均值 ${fm != null ? fmt(fm) + 's' : '—'}（n=${firsts.length}）· 二次均值 ${sm != null ? fmt(sm) + 's' : '—'}（n=${seconds.length}）` + (abnN ? ` · 异常样本 ${abnN}` : '') + (extraGranted ? ` · 补跑 ${extraGranted} 轮` : ''));
+    // 审核 D-P1-2：样本不足/较少标记（n<3 不足，3≤n<5 较少）
+    const nMark = n => n < 3 ? `样本不足(n=${n})` : n < 5 ? `样本较少(n=${n})` : `n=${n}`;
+    autoLog('OK', 'SUMMARY', `全部完成 · 墙钟 ${totalSec}s · 首次均值 ${fm != null ? fmt(fm) + 's' : '—'}（${nMark(firsts.length)}）· 二次均值 ${sm != null ? fmt(sm) + 's' : '—'}（${nMark(seconds.length)}）` + (abnN ? ` · 异常样本 ${abnN}` : '') + (extraGranted ? ` · 补跑 ${extraGranted} 轮` : ''));
     lastRunAuditLog = auditLogLines.slice();
     renderAutoReport({ success: true, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, runStartIndex, launchMode });
 
@@ -2779,7 +2951,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   const checkSkips = isFirst && skipTemplateCount > 0;  // 仅首次且确有模板时扫描跳过弹窗；二次不扫
   const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
   autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…');
-  const r = await fetch(API + '/api/cold_start', {
+  const r = await apiFetch(API + '/api/cold_start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
@@ -2830,14 +3002,16 @@ function renderAutoReport(ctx) {
       return {
         mean: kept.reduce((a, b) => a + b, 0) / kept.length,
         max, min, maxIdx, minIdx, raw: vals,
+        // 审核 D-P1-2：样本不足/较少标记
+        warning: vals.length < 3 ? `样本不足（n=${vals.length}），未去极值` : (vals.length < 5 ? `样本较少（n=${vals.length}）` : undefined),
       };
     }
-    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals };
+    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals, warning: `样本不足（n=${vals.length}），未去极值` };
   }
 
   const fr = trimMean(firsts);
   const sr = trimMean(seconds);
-  const firstAdjust = platform === 'ios' ? -1000 : 0;  // iOS 首次 -1s（§2.3）
+  const firstAdjust = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;  // iOS 首次调整（审核 C 可配置）
   const firstFinal = fr ? fr.mean + firstAdjust : null;
   const secondFinal = sr ? sr.mean : null;
 
@@ -2881,6 +3055,23 @@ function renderAutoReport(ctx) {
   }
   L.push('');
   L.push(`── 首次冷启动（${firsts.length} 样本）──`);
+  if (fr && fr.warning) L.push(`⚠ ${fr.warning}`);  // 审核 D-P1-2
+  // 审核 B-P0-2：按 APK 版本分组展示首冷均值（跨版本可比性；旧记录归「未记录版本」）
+  const firstApkGroups = {};
+  firsts.forEach(r => {
+    const key = (r.apk && r.apk.sha256_prefix) || '未记录版本';
+    if (!firstApkGroups[key]) firstApkGroups[key] = { label: (r.apk && r.apk.name) ? `${r.apk.name}（${key}）` : '未记录版本', list: [] };
+    firstApkGroups[key].list.push(r);
+  });
+  const apkKeys = Object.keys(firstApkGroups);
+  if (apkKeys.length > 1) {
+    L.push(`分版本：`);
+    apkKeys.forEach(key => {
+      const g = firstApkGroups[key];
+      const vals = g.list.map(r => r.time);
+      L.push(`  · ${g.label}：均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)}s（n=${g.list.length}）`);
+    });
+  }
   L.push(`明细  ${detail(firsts, fr)}`);
   if (fr && fr.max !== null) L.push(`剔极值  MAX ${fmt(fr.max)}s / MIN ${fmt(fr.min)}s`);
   L.push(`均值    ${fr ? fmt(fr.mean) + 's' : '—'}`);
@@ -2888,6 +3079,7 @@ function renderAutoReport(ctx) {
   L.push(`最终    ${firstFinal !== null ? fmt(firstFinal) + 's' : '—'}`);
   L.push('');
   L.push(`── 二次冷启动（${seconds.length} 样本）──`);
+  if (sr && sr.warning) L.push(`⚠ ${sr.warning}`);  // 审核 D-P1-2
   L.push(`明细  ${detail(seconds, sr)}`);
   if (sr && sr.max !== null) L.push(`剔极值  MAX ${fmt(sr.max)}s / MIN ${fmt(sr.min)}s`);
   L.push(`均值    ${sr ? fmt(sr.mean) + 's' : '—'}`);
@@ -3019,6 +3211,52 @@ $('reportCsvBtn').addEventListener('click', () => {
   a.click();
   URL.revokeObjectURL(url);
 });
+
+// ── 系统对照（am start -W 交叉验证，审核 A-P0-1）──
+// 展示系统打点均值/中位数，与工具记录均值并排；纯展示，不写 records。
+async function sysBaseline() {
+  const pkg = $('apkPkg').value.trim();
+  if (!pkg) { uiAlert('请先填 APK 包名', '系统对照需要 package 参数', 'warning'); return; }
+  const rounds = Math.min(10, Math.max(1, parseInt($('sysBaseRounds').value) || 5));
+  const btn = $('sysBaseBtn');
+  const out = $('sysBaseOut');
+  btn.disabled = true; btn.textContent = `⏳ 跑 ${rounds} 轮中…`;
+  out.classList.remove('hidden');
+  out.textContent = `正在执行 am start -W × ${rounds}（每轮 force-stop + 2s 冷却，请勿操作设备）…`;
+  try {
+    const r = await fetch(API + '/api/sys_baseline', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package: pkg, rounds, cooldown_s: 2 })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      out.textContent = '✗ ' + (j.detail || j.error || `HTTP ${r.status}`);
+      return;
+    }
+    const st = j.stats;
+    const lines = [];
+    lines.push(`系统打点（am start -W · 首帧）  ${j.package}`);
+    lines.push(`  组件：${j.component}`);
+    lines.push(`  TotalTime（ms）：${j.samples.map(s => s.total_ms).join(' / ')}`);
+    lines.push(`  均值 ${st.total_mean_ms}ms · 中位数 ${st.total_median_ms}ms · 有效 ${st.n}/${j.rounds} 轮`);
+    if (j.errors && j.errors.length) lines.push(`  跳过轮：${j.errors.join('；')}`);
+    // 工具对照（当前项目记录，模板停表口径）
+    const gs = computeStatsGrouped();
+    const toolFirst = gs.first ? gs.first.mean : null;
+    const toolSecond = gs.second ? gs.second.mean : null;
+    lines.push(`工具记录（模板停表 · 就绪页）  当前项目`);
+    lines.push(`  首次均值 ${toolFirst != null ? fmt(toolFirst) + 's' : '—'}${toolFirst != null ? `（差 ${(toolFirst * 1000 - st.total_mean_ms).toFixed(0)}ms）` : ''}`);
+    lines.push(`  二次均值 ${toolSecond != null ? fmt(toolSecond) + 's' : '—'}${toolSecond != null ? `（差 ${(toolSecond * 1000 - st.total_mean_ms).toFixed(0)}ms）` : ''}`);
+    lines.push(`⚠ 口径说明：系统终点=首帧绘制，工具终点=启动成功页就绪——并排看趋势一致性，差值含口径差异`);
+    out.textContent = lines.join('\n');
+  } catch (e) {
+    out.textContent = '✗ ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📊 系统对照（跑 N 轮）';
+  }
+}
+$('sysBaseBtn').addEventListener('click', sysBaseline);
 
 // ── 启停按钮绑定 ──
 $('autoStartBtn').addEventListener('click', () => {
