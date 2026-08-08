@@ -704,7 +704,7 @@ let deviceReady = false;
 let tick = 0, ocrTick = 0;
 let running = false;
 // 计时核心（v1 逻辑，已验证 correct）：
-//   按 Space → fetch('/api/cold_start') 让服务端编排点击 → 响应回来后
+//   点击主按钮 → fetch('/api/cold_start') 让服务端编排点击 → 响应回来后
 //   startTs = performance.now() → loop() elapsed = performance.now() - startTs
 //
 // 计时起点 = 服务端 tap 命令执行完 + 网络返回之后（漏掉了 tap 执行时间 ~200ms，
@@ -1636,10 +1636,10 @@ async function startTimer() {
     running = true;
     $('display').classList.add('running');
     $('timerCard').classList.add('running');
-    $('mainBtn').textContent = '按 SPACE 停止';
+    $('mainBtn').textContent = '停止';
     $('mainBtn').classList.add('stop');
     $('mainBtn').disabled = false;
-    setState('running', '计时中 · 看到关卡按钮再按 Space');
+    setState('running', '计时中 · 看到关卡按钮后点「停止」');
     loop();
   } catch(e) {
     setState('err', '✗ ' + e.message);
@@ -1654,8 +1654,8 @@ function stopTimer() {
   $('display').classList.remove('running');
   $('timerCard').classList.remove('running');
   $('mainBtn').classList.remove('stop');
-  $('mainBtn').textContent = '按 SPACE 启动';
-  setState('ok', `已记录 ${fmt(elapsedMs)}s · 按 Space 继续`);
+  $('mainBtn').textContent = '开始计时';
+  setState('ok', `已记录 ${fmt(elapsedMs)}s · 点按钮继续`);
   records.push({ time: elapsedMs, date: new Date().toISOString() });
   saveRecords(); renderHistory(); renderStats();
 }
@@ -1798,10 +1798,10 @@ function renderStats() {
   const hintEl = $('nextHint');
   if (nextIsFirst) {
     hintEl.className = 'next-hint first';
-    hintEl.innerHTML = '<span class="tag-first">首次</span> 下一条应是 <b>首次冷启动</b> · 请先卸载重装，再按 Space';
+    hintEl.innerHTML = '<span class="tag-first">首次</span> 下一条应是 <b>首次冷启动</b> · 请先卸载重装，再点「开始计时」';
   } else {
     hintEl.className = 'next-hint second';
-    hintEl.innerHTML = '<span class="tag-second">二次</span> 下一条应是 <b>二次冷启动</b> · 杀进程后按 Space（不要卸载）';
+    hintEl.innerHTML = '<span class="tag-second">二次</span> 下一条应是 <b>二次冷启动</b> · 杀进程后点「开始计时」（不要卸载）';
   }
 }
 function renderHistory() {
