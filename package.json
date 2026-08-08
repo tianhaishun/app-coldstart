@@ -18,7 +18,7 @@
     "electron-builder": "^25.0.0"
   },
   "build": {
-    "appId": "com.app-coldstart.desktop",
+    "appId": "com.tianhaishun.appcoldstart",
     "productName": "AppColdStart",
     "directories": {
       "output": "release",
@@ -28,12 +28,30 @@
       "electron/**/*"
     ],
     "extraResources": [
-      { "from": "server.py", "to": "backend/server.py" },
-      { "from": "adb_helper.py", "to": "backend/adb_helper.py" },
-      { "from": "requirements.txt", "to": "backend/requirements.txt" },
-      { "from": "static/", "to": "backend/static/" },
-      { "from": "scripts/warmup.py", "to": "backend/scripts/warmup.py" },
-      { "from": "CHANGELOG.md", "to": "CHANGELOG.md" }
+      {
+        "from": "server.py",
+        "to": "backend/server.py"
+      },
+      {
+        "from": "adb_helper.py",
+        "to": "backend/adb_helper.py"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "backend/requirements.txt"
+      },
+      {
+        "from": "static/",
+        "to": "backend/static/"
+      },
+      {
+        "from": "scripts/warmup.py",
+        "to": "backend/scripts/warmup.py"
+      },
+      {
+        "from": "CHANGELOG.md",
+        "to": "CHANGELOG.md"
+      }
     ],
     "afterPack": "scripts/after-pack.js",
     "win": {
@@ -43,10 +61,25 @@
       "icon": "build/icon.ico",
       "artifactName": "${productName}-${version}-setup.${ext}",
       "extraResources": [
-        { "from": "adb/", "to": "backend/adb/" },
-        { "from": "ios/", "to": "backend/ios/" },
-        { "from": "scrcpy/", "to": "scrcpy/" },
-        { "from": "python-embed/", "to": "python-embed/", "filter": ["**/*"] }
+        {
+          "from": "adb/",
+          "to": "backend/adb/"
+        },
+        {
+          "from": "ios/",
+          "to": "backend/ios/"
+        },
+        {
+          "from": "scrcpy/",
+          "to": "scrcpy/"
+        },
+        {
+          "from": "python-embed/",
+          "to": "python-embed/",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "mac": {
@@ -63,5 +96,6 @@
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh"
     }
-  }
+  },
+  "productName": "AppColdStart"
 }

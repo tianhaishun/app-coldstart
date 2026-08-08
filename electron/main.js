@@ -20,6 +20,7 @@
 
 'use strict';
 
+
 const { app, BrowserWindow, shell, Menu, dialog, ipcMain, nativeImage } = require('electron');
 const { execFileSync, spawn } = require('child_process');
 const path = require('path');
@@ -682,8 +683,11 @@ async function handleBackendCrash(reason) {
 const gotLock = app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  // 已有实例在运行，直接退出
-  app.quit();
+  // 单实例锁获取失败：不退出，降级继续运行。
+  // 原因：macOS 具名信号量在实例被强杀（SIGKILL）后可能残留，新实例拿不到锁
+  // （打包实测 gotLock=false 导致 app 静默退出）。本地工具场景下多开窗口共用
+  // 同一后端是可接受的（python-manager 的 checkHealth 复用机制兜底防端口冲突）。
+  console.error('[warn] 单实例锁获取失败（可能残留），降级继续运行');
 } else {
   app.on('second-instance', () => {
     // 有人尝试打开第二个实例，聚焦已有窗口

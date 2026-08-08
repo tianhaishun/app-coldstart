@@ -70,7 +70,12 @@ class PythonManager {
 
   /** .venv 目录绝对路径 */
   get venvDir() {
-    return path.join(this.backendRoot, '.venv');
+    // 打包模式：venv 放 userData（可写）——公证后的签名 app Resources 只读，
+    // 在 backend/.venv 建虚拟环境会失败（与 CST_PROJECTS_DIR 同一思路）。
+    // 开发模式：项目根 .venv（与 Start.bat 共用，零回归）。
+    return app.isPackaged
+      ? path.join(app.getPath('userData'), 'venv')
+      : path.join(this.backendRoot, '.venv');
   }
 
   /** .venv 内的 python 可执行文件路径 */
