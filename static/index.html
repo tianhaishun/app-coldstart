@@ -2073,7 +2073,7 @@ if (isElectron && window.electronAPI.onMenuCommand) {
   });
 }
 
-// ── scrcpy 镜像 / 录屏（仅 Electron，借鉴 XYLog Viewer）──
+// ── scrcpy 镜像 / 录屏（仅 Electron）──
 // 镜像走独立 SDL 窗口（置顶），不抢 adb 命令锁，与截图轮询/模板比对并存。
 async function initScrcpy() {
   if (!isElectron || !window.electronAPI.getScrcpyStatus) return;

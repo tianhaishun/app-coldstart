@@ -57,7 +57,7 @@ else:
     except (AdbHelperError, OSError):
         ADB_EXE = "adb"
 
-# 内置 iOS 工具链（同目录 ios\\idevice_id.exe），借鉴 XYLog 的 resolveIosBinaryPath 模式
+# 内置 iOS 工具链（同目录 ios\\idevice_id.exe）
 # 打包后 ROOT 落在 resources/backend，ios/ 在 extraResources 里
 _BUNDLED_IDEVICE_ID = ROOT / "ios" / "idevice_id.exe"
 IDEVICE_ID_EXE = str(_BUNDLED_IDEVICE_ID) if _BUNDLED_IDEVICE_ID.exists() else None
@@ -220,7 +220,7 @@ class OcrEngine:
 # ── ADB 设备 ───────────────────────────────────────────────────────────
 
 
-# adb install 失败错误码中文翻译（借鉴 XYLog Viewer）。
+# adb install 失败错误码中文翻译。
 # adb 输出形如 "Failure [INSTALL_FAILED_OLDER_SDK]"，匹配后附加中文解释，
 # 让用户不用查文档就能知道为什么装不上。
 _INSTALL_ERROR_CN: dict[str, str] = {
@@ -563,7 +563,7 @@ def _raw_screencap_to_bgr(raw: bytes):
 
 
 def _check_amds() -> dict:
-    """检测 Apple Mobile Device Service 状态（借鉴 XYLog Viewer 自检工具）。
+    """检测 Apple Mobile Device Service 状态。
 
     Windows 上 iOS USB 通信依赖 AMDS（本质是 usbmuxd）。服务缺失或未运行时
     idevice_id / pymobiledevice3 都无法发现设备。返回诊断信息供前端展示。
@@ -617,12 +617,11 @@ class IosDevice:
         from pymobiledevice3.lockdown import create_using_usbmux
         return await create_using_usbmux(serial=self.udid)
 
-    # ── 设备列表（借鉴 XYLog：idevice_id -l CLI，同步简单可靠）──
+    # ── 设备列表（idevice_id -l CLI，同步简单可靠）──
     @staticmethod
     def devices() -> list[dict]:
         """列出通过 USB 连接的 iOS 设备。
 
-        借鉴 XYLog Viewer 的 IosMuxManager._pollDevices：
         直接调 idevice_id -l（同步 CLI），不依赖 pymobiledevice3 异步 API。
         UDID 列表拿到后，尝试用 pymobiledevice3 取设备名（失败则显示 UDID）。
         """
@@ -633,7 +632,7 @@ class IosDevice:
                 [IDEVICE_ID_EXE, "-l"],
                 capture_output=True, timeout=3,
             )
-            # XYLog 的 UDID 正则：^[0-9a-fA-F-]{8,}$
+            # UDID 正则：^[0-9a-fA-F-]{8,}$
             udids = [
                 line.strip()
                 for line in cp.stdout.decode("utf-8", "replace").splitlines()
@@ -1069,7 +1068,7 @@ def _cleanup_stale_temp_files() -> None:
 
 
 def _kill_adb_server() -> None:
-    """退出前关闭 adb daemon（借鉴 XYLog Viewer AdbManager._killServerSync）。
+    """退出前关闭 adb daemon。
 
     adb daemon 是常驻进程，后端退出后 adb.exe 继续运行，导致：
       - 升级安装时 adb.exe 文件被锁 → NSIS 安装器报「应用仍在运行」

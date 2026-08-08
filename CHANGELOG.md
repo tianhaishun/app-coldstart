@@ -50,7 +50,7 @@
 
 ## 2026-07-29 · scrcpy 镜像 + iOS 支持 + OC-2 主题 + 工程加固（`867b33a`）
 
-### scrcpy 实时镜像 / 录屏（借鉴 XYLog Viewer）
+### scrcpy 实时镜像 / 录屏
 - 新增 `electron/scrcpy-manager.js`：独立置顶窗口镜像 + 后台录屏（720p/30fps）
 - 环境变量 `ADB` + `SCRCPY_SERVER_PATH` 复用后端同一 adb-server，不抢命令锁
 - UI 左栏加镜像/录屏按钮，菜单栏加入口
@@ -61,7 +61,7 @@
 - `/api/devices` 合并返回 Android + iOS 双平台设备（`platform` 字段）
 - Session 平台感知路由（AdbDevice / IosDevice 鸭子类型）
 - 前端设备下拉框区分平台（🤖 Android / 🍎 iOS 图标）
-- AMDS 服务检测（`sc query`，借鉴 XYLog 自检工具）
+- AMDS 服务检测（`sc query`）
 
 ### OC-2 主题精简化
 - 主色从蓝 `#034cff` 改为暖桃 `#fab283`，对齐 OpenCode 品牌视觉
@@ -73,7 +73,7 @@
 - 左栏精简：直播开关移至顶栏，删除截图诊断条和缩放控件
 - 删除标题栏 Logo 文字（被工具栏遮挡）
 
-### 工程加固（借鉴 XYLog Viewer）
+### 工程加固
 - `adb kill-server` 退出清理（防 adb.exe 残留文件锁）
 - 全局异常兜底 `uncaughtException` / `unhandledRejection` + `main-error.log`
 - `adb track-devices` 设备热插拔即时感知（替代 5s 轮询，降为 15s 兜底）

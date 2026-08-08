@@ -1,7 +1,7 @@
 /**
  * scrcpy 镜像 / 录屏管理器。
  *
- * 借鉴 XYLog Viewer 的 ScrcpyManager（同技术栈 Electron + 内置 adb）：
+ * 与后端同一 Electron + 内置 adb 技术栈：
  *   - 镜像：scrcpy -s <serial> --always-on-top --window-title ...
  *     → 弹独立 SDL 窗口，始终置顶，不嵌入 Electron（零渲染开销）
  *   - 录屏：scrcpy -s <serial> --no-window --no-playback --record <file>

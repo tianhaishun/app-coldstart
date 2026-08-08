@@ -168,7 +168,7 @@ const scrcpyManager = new ScrcpyManager((eventName, payload) => {
   mainWindow?.webContents.send(eventName, payload);
 });
 
-// ── 全局异常兜底（借鉴 XYLog Viewer logMainFault）──
+// ── 全局异常兜底 ──
 // 未捕获的异常不能让 Electron 静默崩溃——写入 userData/main-error.log，
 // 用户报 bug 时有日志可查。放在 app.whenReady() 之前以捕获最早期错误。
 process.on('uncaughtException', (err) => logMainFault('uncaughtException', err));
@@ -570,7 +570,7 @@ function createErrorWindow(title, detail) {
   });
 }
 
-// ── 设备热插拔监听（adb track-devices，借鉴 XYLog Viewer）──
+// ── 设备热插拔监听（adb track-devices）──
 // track-devices 是流式命令：先输出当前设备列表，之后设备插拔时实时输出变化。
 // 我们只把它当"有变化"的触发器——不做复杂解析，检测到变化就 IPC 通知前端刷新。
 // 前端收到通知后调 /api/devices 拉取最新列表（复用现有逻辑）。
@@ -730,7 +730,7 @@ if (!gotLock) {
     scrcpyManager.dispose();
     pyManager.stop();
     // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
-    // 借鉴 XYLog Viewer AdbManager._killServerSync，防止 adb.exe 残留导致升级文件锁）
+    // 防止 adb.exe 残留导致升级文件锁
     const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
     try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
   });
