@@ -268,8 +268,12 @@ def test_ios_launch_pkg_uses_process_control(monkeypatch):
             return {"processToken": {"processIdentifier": 12345}}
 
     class FakeTunnel:
+        def __init__(self):
+            self.rsd = object()
+        async def aopen(self):
+            return self.rsd
         async def __aenter__(self):
-            return object()  # rsd
+            return self.rsd
         async def __aexit__(self, *a):
             return False
     monkeypatch.setattr(

@@ -276,6 +276,38 @@ def _ios_async(coro):
     return asyncio.run(coro)
 
 
+class IosLoop:
+    """iOS 操作常驻 event loop（单例，后台线程）。
+
+    tunnel 复用（真机实测优化）的前提：asyncio 对象（套接字/连接）绑定创建它的
+    event loop——asyncio.run 每次新建 loop，跨调用复用会失败。常驻 loop 让
+    tunnel 在多次截图/启动调用间存活，省掉每次重建的开销（实测基线 ~400ms/帧）。
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._loop = asyncio.new_event_loop()
+                cls._instance._thread = threading.Thread(
+                    target=cls._instance._run, name="ios-loop", daemon=True,
+                )
+                cls._instance._thread.start()
+            return cls._instance
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def run(self, coro, timeout: float = 120.0):
+        """把协程提交到常驻 loop 并阻塞等待结果（线程安全）。"""
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return fut.result(timeout=timeout)
+
+
 class IosDevice:
     """iOS 设备操作（通过 pymobiledevice3 / lockdown 协议）。
 
@@ -289,6 +321,9 @@ class IosDevice:
     def __init__(self, udid: str) -> None:
         self.udid = udid
         self._last_size: Optional[tuple[int, int]] = None
+        # iOS 隧道缓存（tunnel 复用：常驻 loop 内建立，跨调用存活；失效自动重建）
+        self._ios_rsd = None
+        self._ios_tunnel = None
 
     async def _get_lockdown(self):
         """创建到设备的 lockdown 连接。"""
@@ -343,18 +378,44 @@ class IosDevice:
     # ── 截图 ──
     # iOS 26 起 lockdown screenshotr 服务被移除/禁用（InvalidService），截图必须走
     # DVT（instruments）服务 + RSD tunnel（userspace 免 root，iOS 17+ 开发者服务标配）。
-    # 每次调用新建 tunnel（约 170ms 建立 + 截图，单次 ~700ms）——功能正确优先，
-    # 轮询性能优化（tunnel 复用）列为后续项。
-    async def _dvt_shot(self) -> bytes:
-        """DVT 截图（UserspaceRsdTunnel → DvtProvider → Screenshot）。"""
+    # tunnel 复用（真机实测基线 ~400ms/帧）：隧道在常驻 loop 内建立并缓存，
+    # 多次调用复用；连接失效（设备重连）时自动重建一次。实测对比见 git 提交说明。
+
+    def _ensure_ios_rsd(self):
+        """返回缓存的 RSD（tunnel 复用）；无缓存则新建。须在常驻 loop 内调用。"""
+        if self._ios_rsd is not None:
+            return self._ios_rsd
         from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+        tunnel = UserspaceRsdTunnel(serial=self.udid)
+        self._ios_rsd = IosLoop().run(tunnel.aopen())
+        self._ios_tunnel = tunnel
+        return self._ios_rsd
+
+    def _invalidate_ios_tunnel(self) -> None:
+        """tunnel 失效（连接失败/设备重连）：清缓存，下次调用重建。"""
+        self._ios_rsd = None
+        self._ios_tunnel = None
+
+    def _dvt_shot(self) -> bytes:
+        """DVT 截图（tunnel 复用；连接失败清缓存重建一次）。"""
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
 
-        async with UserspaceRsdTunnel(serial=self.udid) as rsd:
+        async def _inner(rsd):
             async with DvtProvider(rsd) as dvt:
                 async with Screenshot(dvt) as shot:
                     return await shot.get_screenshot()
+
+        def _do():
+            rsd = self._ensure_ios_rsd()
+            return IosLoop().run(_inner(rsd))
+
+        try:
+            return _do()
+        except Exception:
+            # 隧道可能已失效（设备重连/系统睡眠）：重建一次，仍失败则如实抛错
+            self._invalidate_ios_tunnel()
+            return _do()
 
     def screenshot(self, target: Optional[Path] = None) -> Path:
         """截图（PNG），保存到 target 或临时文件。"""
@@ -363,7 +424,7 @@ class IosDevice:
             os.close(fd)
             target = Path(name)
 
-        data = _ios_async(self._dvt_shot())
+        data = self._dvt_shot()
         if not data or len(data) < 1024:
             raise AdbError("iOS 截图失败：返回数据为空")
         target.write_bytes(data)
@@ -378,7 +439,7 @@ class IosDevice:
         import cv2
         import numpy as np
 
-        data = _ios_async(self._dvt_shot())
+        data = self._dvt_shot()
         if not data or len(data) < 1024:
             raise AdbError("iOS 截图失败：返回数据为空")
         arr = np.frombuffer(data, dtype=np.uint8)
@@ -448,26 +509,35 @@ class IosDevice:
         无法 force_stop，这是唯一保证「进程不存在时启动」（真冷启动语义）的途径，
         且画面渲染正常。
         """
-        async def _launch():
-            from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
-            from pymobiledevice3.remote.core_device.app_service import AppServiceService
-            async with UserspaceRsdTunnel(serial=self.udid) as rsd:
-                async with AppServiceService(rsd) as apps:
-                    result = await apps.launch_application(bundle_id, kill_existing=True)
-                    pid = int(result.get("processToken", {}).get("processIdentifier") or 0)
-                    if pid <= 0:
-                        raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
+        from pymobiledevice3.remote.core_device.app_service import AppServiceService
+
+        async def _launch(rsd):
+            async with AppServiceService(rsd) as apps:
+                result = await apps.launch_application(bundle_id, kill_existing=True)
+                pid = int(result.get("processToken", {}).get("processIdentifier") or 0)
+                if pid <= 0:
+                    raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
+
+        def _do():
+            rsd = self._ensure_ios_rsd()
+            IosLoop().run(_launch(rsd))
+
         try:
-            _ios_async(_launch())
+            _do()
         except AdbError:
             raise
         except Exception as e:
-            raise AdbError(
-                f"iOS 启动失败：{e}。可能原因："
-                f"1) 未开启开发者模式（设置→隐私与安全→开发者模式）"
-                f"2) App 未安装或 bundle id 错误"
-                f"3) 设备未信任此电脑"
-            ) from e
+            # 隧道可能已失效：重建一次，仍失败则如实报错
+            self._invalidate_ios_tunnel()
+            try:
+                _do()
+            except Exception as e2:
+                raise AdbError(
+                    f"iOS 启动失败：{e2}。可能原因："
+                    f"1) 未开启开发者模式（设置→隐私与安全→开发者模式）"
+                    f"2) App 未安装或 bundle id 错误"
+                    f"3) 设备未信任此电脑"
+                ) from e2
 
     def force_stop(self, pkg: str) -> None:
         """iOS 非越狱无法程序化杀进程——记日志，用户需手动上滑关闭。"""
