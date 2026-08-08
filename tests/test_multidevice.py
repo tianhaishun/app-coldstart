@@ -241,6 +241,12 @@ def test_ios_launch_pkg_uses_process_control(monkeypatch):
         def __init__(self, dvt):
             pass
 
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
         async def launch(self, bundle_id, kill_existing=True):
             calls["launch"] = (bundle_id, kill_existing)
             return 12345
@@ -260,12 +266,17 @@ def test_ios_launch_pkg_uses_process_control(monkeypatch):
         "pymobiledevice3.services.dvt.instruments.process_control.ProcessControl",
         FakePC,
     )
+
+    class FakeTunnel:
+        async def __aenter__(self):
+            return object()  # rsd
+        async def __aexit__(self, *a):
+            return False
+    monkeypatch.setattr(
+        "pymobiledevice3.remote.userspace_tunnel.UserspaceRsdTunnel",
+        lambda serial=None, **kw: FakeTunnel(),
+    )
     dev = IosDevice("UDID")
-
-    async def fake_lockdown():
-        return object()
-    monkeypatch.setattr(dev, "_get_lockdown", fake_lockdown)
-
     dev.launch_pkg("com.example.app")
     assert calls["launch"] == ("com.example.app", True)  # kill_existing=True：等效杀进程+冷启动
 

@@ -335,6 +335,21 @@ class IosDevice:
             return []
 
     # ── 截图 ──
+    # iOS 26 起 lockdown screenshotr 服务被移除/禁用（InvalidService），截图必须走
+    # DVT（instruments）服务 + RSD tunnel（userspace 免 root，iOS 17+ 开发者服务标配）。
+    # 每次调用新建 tunnel（约 170ms 建立 + 截图，单次 ~700ms）——功能正确优先，
+    # 轮询性能优化（tunnel 复用）列为后续项。
+    async def _dvt_shot(self) -> bytes:
+        """DVT 截图（UserspaceRsdTunnel → DvtProvider → Screenshot）。"""
+        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+
+        async with UserspaceRsdTunnel(serial=self.udid) as rsd:
+            async with DvtProvider(rsd) as dvt:
+                async with Screenshot(dvt) as shot:
+                    return await shot.get_screenshot()
+
     def screenshot(self, target: Optional[Path] = None) -> Path:
         """截图（PNG），保存到 target 或临时文件。"""
         if target is None:
@@ -342,14 +357,7 @@ class IosDevice:
             os.close(fd)
             target = Path(name)
 
-        async def _shot():
-            from pymobiledevice3.services.screenshot import ScreenshotService
-            ld = await self._get_lockdown()
-            ss = ScreenshotService(lockdown=ld)
-            data = await ss.take_screenshot()  # PNG bytes
-            return data
-
-        data = _ios_async(_shot())
+        data = _ios_async(self._dvt_shot())
         if not data or len(data) < 1024:
             raise AdbError("iOS 截图失败：返回数据为空")
         target.write_bytes(data)
@@ -358,27 +366,23 @@ class IosDevice:
     def screenshot_bgr(self) -> tuple[Any, str]:
         """截图 → BGR ndarray（自动测速热路径，模板比对用）。
 
-        iOS 截图直接返回 PNG，用 cv2.imdecode 解码。
-        比 Android 的 raw|gzip 多一步解码，但 iOS 没有等效的 raw 格式。
+        iOS 截图返回 PNG（DVT 路径为 16-bit RGB），cv2.imdecode 后统一转 8-bit，
+        保证与 Android 路径的模板/匹配/预览链路一致（imencode JPG 只支持 8-bit）。
         """
         import cv2
         import numpy as np
 
-        async def _shot():
-            from pymobiledevice3.services.screenshot import ScreenshotService
-            ld = await self._get_lockdown()
-            ss = ScreenshotService(lockdown=ld)
-            return await ss.take_screenshot()
-
-        data = _ios_async(_shot())
+        data = _ios_async(self._dvt_shot())
         if not data or len(data) < 1024:
             raise AdbError("iOS 截图失败：返回数据为空")
         arr = np.frombuffer(data, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if bgr is None:
             raise AdbError("iOS 截图 PNG 解码失败")
+        if bgr.dtype == np.uint16:
+            bgr = (bgr // 256).astype(np.uint8)  # 16-bit → 8-bit（模板匹配链路一致）
         self._last_size = (bgr.shape[1], bgr.shape[0])  # (w, h)
-        return bgr, "png"
+        return bgr, "dvt"
 
     def screen_size(self) -> tuple[int, int]:
         """获取屏幕分辨率。"""
@@ -420,27 +424,32 @@ class IosDevice:
         raise AdbError("iOS 不支持 keyevent（Android 按键码）。")
 
     # ── App 生命周期 ──
+    def launch_package(self, bundle_id: str) -> None:
+        """与 AdbHelper.launch_package 对齐的接口名（冷启动端点统一调用，真机验证发现）。"""
+        self.launch_pkg(bundle_id)
+
     def launch_pkg(self, bundle_id: str) -> None:
         """通过 DVT（instruments）服务启动 App（pymobiledevice3 10.x 官方路径）。
 
         严格性（对齐教训七）：启动是关键操作，失败必须抛错，不能静默吞。
 
         - DvtProvider 是 async context manager，负责连接 DTX transport；
-          iOS 17+ 走 RSD tunnel，旧版走 lockdown——需要设备开启「开发者模式」
+          iOS 17+ 必须经 RSD tunnel（userspace 免 root，与截图同路径）
         - ProcessControl.launch(bundle_id, kill_existing=True)：先杀已运行实例再启动。
           非越狱设备 force_stop 不可用，kill_existing 等效「杀进程 + 冷启动」，
           正好补上 iOS 冷启动的关键环节（进程被杀后启动即冷启动）
-        - 返回 PID；falsy PID 库内抛 AssertionError，这里再校验一次并转中文错误
+        - 返回 PID；falsy PID 校验后转中文错误
         """
         async def _launch():
+            from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
             from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
             from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
-            ld = await self._get_lockdown()
-            async with DvtProvider(ld) as dvt:
-                pc = ProcessControl(dvt)
-                pid = await pc.launch(bundle_id, kill_existing=True)
-                if not pid or int(pid) <= 0:
-                    raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
+            async with UserspaceRsdTunnel(serial=self.udid) as rsd:
+                async with DvtProvider(rsd) as dvt:
+                    async with ProcessControl(dvt) as pc:
+                        pid = await pc.launch(bundle_id, kill_existing=True)
+                        if not pid or int(pid) <= 0:
+                            raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
         try:
             _ios_async(_launch())
         except AdbError:
@@ -462,13 +471,17 @@ class IosDevice:
         return "(iOS 不支持 kill-all)"
 
     def list_packages(self) -> list[str]:
-        """列出已安装 App 的 bundle id。"""
+        """列出已安装 App 的 bundle id。
+
+        10.x 的 get_apps() 返回 dict（bundle_id → info），迭代 dict 得到 key 字符串——
+        旧写法 a.get('CFBundleIdentifier') 对 str 调用会 AttributeError（真机验证发现）。
+        """
         async def _list():
             ld = await self._get_lockdown()
             from pymobiledevice3.services.installation_proxy import InstallationProxyService
             ip = InstallationProxyService(lockdown=ld)
-            apps = await ip.get_apps()  # list of dicts with CFBundleIdentifier
-            return [a.get('CFBundleIdentifier', '') for a in apps if a.get('CFBundleIdentifier')]
+            apps = await ip.get_apps()  # dict keyed by bundle id
+            return sorted(bid for bid in apps)
         try:
             return _ios_async(_list())
         except Exception:
