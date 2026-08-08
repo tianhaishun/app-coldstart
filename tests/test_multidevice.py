@@ -258,14 +258,14 @@ def test_ios_launch_pkg_uses_process_control(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-    monkeypatch.setattr(
-        "pymobiledevice3.services.dvt.instruments.dvt_provider.DvtProvider",
-        lambda ld: FakeDvt(),
-    )
-    monkeypatch.setattr(
-        "pymobiledevice3.services.dvt.instruments.process_control.ProcessControl",
-        FakePC,
-    )
+    class FakeApps:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def launch_application(self, bundle_id, kill_existing=True):
+            calls["launch"] = (bundle_id, kill_existing)
+            return {"processToken": {"processIdentifier": 12345}}
 
     class FakeTunnel:
         async def __aenter__(self):
@@ -276,17 +276,21 @@ def test_ios_launch_pkg_uses_process_control(monkeypatch):
         "pymobiledevice3.remote.userspace_tunnel.UserspaceRsdTunnel",
         lambda serial=None, **kw: FakeTunnel(),
     )
+    monkeypatch.setattr(
+        "pymobiledevice3.remote.core_device.app_service.AppServiceService",
+        lambda rsd: FakeApps(),
+    )
     dev = IosDevice("UDID")
     dev.launch_pkg("com.example.app")
     assert calls["launch"] == ("com.example.app", True)  # kill_existing=True：等效杀进程+冷启动
 
     # falsy PID → AdbError（启动失败必须抛错，不静默）
-    class FakePC0(FakePC):
-        async def launch(self, bundle_id, kill_existing=True):
-            return 0
+    class FakeApps0(FakeApps):
+        async def launch_application(self, bundle_id, kill_existing=True):
+            return {}
     monkeypatch.setattr(
-        "pymobiledevice3.services.dvt.instruments.process_control.ProcessControl",
-        FakePC0,
+        "pymobiledevice3.remote.core_device.app_service.AppServiceService",
+        lambda rsd: FakeApps0(),
     )
     with pytest.raises(AdbError, match="无效 PID"):
         dev.launch_pkg("com.example.app")

@@ -429,27 +429,28 @@ class IosDevice:
         self.launch_pkg(bundle_id)
 
     def launch_pkg(self, bundle_id: str) -> None:
-        """通过 DVT（instruments）服务启动 App（pymobiledevice3 10.x 官方路径）。
+        """通过 CoreDevice 框架启动 App（iOS 26 真机实测的正确路径）。
 
         严格性（对齐教训七）：启动是关键操作，失败必须抛错，不能静默吞。
 
-        - DvtProvider 是 async context manager，负责连接 DTX transport；
-          iOS 17+ 必须经 RSD tunnel（userspace 免 root，与截图同路径）
-        - ProcessControl.launch(bundle_id, kill_existing=True)：先杀已运行实例再启动。
-          非越狱设备 force_stop 不可用，kill_existing 等效「杀进程 + 冷启动」，
-          正好补上 iOS 冷启动的关键环节（进程被杀后启动即冷启动）
-        - 返回 PID；falsy PID 校验后转中文错误
+        实测对比（iPhone 17,2 / iOS 26.6，2026-08-09）：
+          - DVT ProcessControl.launch：进程启动但 window 未激活 → 画面黑屏 ✗
+          - devicectl process launch：同样黑屏 ✗
+          - CoreDevice launch_application（Xcode 同款框架）：画面正常渲染 ✓
+        因此启动走 CoreDevice：AppServiceService.launch_application(bundle_id,
+        kill_existing=True)。terminateExisting 先杀旧进程再启动——非越狱 iOS
+        无法 force_stop，这是唯一保证「进程不存在时启动」（真冷启动语义）的途径，
+        且画面渲染正常。
         """
         async def _launch():
             from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
-            from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
-            from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+            from pymobiledevice3.remote.core_device.app_service import AppServiceService
             async with UserspaceRsdTunnel(serial=self.udid) as rsd:
-                async with DvtProvider(rsd) as dvt:
-                    async with ProcessControl(dvt) as pc:
-                        pid = await pc.launch(bundle_id, kill_existing=True)
-                        if not pid or int(pid) <= 0:
-                            raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
+                async with AppServiceService(rsd) as apps:
+                    result = await apps.launch_application(bundle_id, kill_existing=True)
+                    pid = int(result.get("processToken", {}).get("processIdentifier") or 0)
+                    if pid <= 0:
+                        raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
         try:
             _ios_async(_launch())
         except AdbError:
