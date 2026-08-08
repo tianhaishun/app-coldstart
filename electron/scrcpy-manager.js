@@ -52,16 +52,24 @@ class ScrcpyManager {
       : ROOT;
   }
 
-  /** scrcpy 二进制路径 */
+  /** scrcpy 二进制路径（项目内置优先；macOS/Linux 回退 PATH——brew install scrcpy） */
   get scrcpyBin() {
     const exe = process.platform === 'win32' ? 'scrcpy.exe' : 'scrcpy';
     const p = app.isPackaged
       ? path.join(process.resourcesPath, 'scrcpy', exe)
       : path.join(ROOT, 'scrcpy', exe);
-    return fs.existsSync(p) ? p : null;
+    if (fs.existsSync(p)) return p;
+    // PATH 回退（brew 安装的 scrcpy 在 /opt/homebrew/bin 等位置）
+    if (process.platform !== 'win32') {
+      try {
+        const found = execFileSync('which', ['scrcpy'], { timeout: 3000 }).toString().trim();
+        if (found) return found;
+      } catch { /* PATH 里没有 scrcpy */ }
+    }
+    return null;
   }
 
-  /** scrcpy-server 路径（推到设备端的 Java 服务端） */
+  /** scrcpy-server 路径（推到设备端的 Java 服务端；brew 版无独立 server 文件） */
   get scrcpyServer() {
     const p = app.isPackaged
       ? path.join(process.resourcesPath, 'scrcpy', 'scrcpy-server')
@@ -69,16 +77,23 @@ class ScrcpyManager {
     return fs.existsSync(p) ? p : null;
   }
 
-  /** 内置 adb 路径（与 server.py ADB_EXE 一致） */
+  /** adb 路径（项目内置优先；macOS/Linux 回退 PATH——brew android-platform-tools） */
   get adbPath() {
     const exe = process.platform === 'win32' ? 'adb.exe' : 'adb';
     const p = path.join(this.backendRoot, 'adb', exe);
-    return fs.existsSync(p) ? p : null;
+    if (fs.existsSync(p)) return p;
+    if (process.platform !== 'win32') {
+      try {
+        const found = execFileSync('which', ['adb'], { timeout: 3000 }).toString().trim();
+        if (found) return found;
+      } catch { /* PATH 里没有 adb */ }
+    }
+    return null;
   }
 
   /** scrcpy 是否可用（二进制存在） */
   isAvailable() {
-    return !!this.scrcpyBin && !!this.scrcpyServer;
+    return !!this.scrcpyBin;
   }
 
   getStatus() {

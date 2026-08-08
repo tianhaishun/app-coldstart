@@ -576,9 +576,25 @@ function createErrorWindow(title, detail) {
 // 前端收到通知后调 /api/devices 拉取最新列表（复用现有逻辑）。
 let deviceTrackerProc = null;
 
+/**
+ * 解析可用的 adb 路径（跨平台）。
+ * Windows：项目内置 adb/adb.exe；macOS/Linux：项目内置 adb/adb（若有），
+ * 否则从 PATH 找（brew android-platform-tools 装的 adb）。找不到返回 null。
+ */
+function resolveAdbPath() {
+  const bundled = path.join(pyManager.backendRoot, 'adb',
+    process.platform === 'win32' ? 'adb.exe' : 'adb');
+  if (fs.existsSync(bundled)) return bundled;
+  try {
+    const found = execFileSync('which', ['adb'], { timeout: 3000 }).toString().trim();
+    if (found) return found;
+  } catch { /* PATH 里没有 adb */ }
+  return null;
+}
+
 function startDeviceTracker() {
-  const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
-  if (!fs.existsSync(adbPath)) return;
+  const adbPath = resolveAdbPath();
+  if (!adbPath) return;
 
   let initialized = false;
   let buffer = '';
@@ -731,8 +747,10 @@ if (!gotLock) {
     pyManager.stop();
     // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
     // 防止 adb.exe 残留导致升级文件锁
-    const adbPath = path.join(pyManager.backendRoot, 'adb', 'adb.exe');
-    try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
+    const adbPath = resolveAdbPath();
+    if (adbPath) {
+      try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
+    }
   });
 }
 
