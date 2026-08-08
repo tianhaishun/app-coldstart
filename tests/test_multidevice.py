@@ -322,3 +322,52 @@ def test_ios_reinstall_uses_install_from_local(monkeypatch, tmp_path):
     assert calls.get("uninstall") == "com.example.app"
     assert calls.get("install_from_local") == str(ipa)
     assert any("install" in line for line in log)
+
+
+def test_verify_launch_matches_foreground_pkg(monkeypatch):
+    """启动测试（审核新功能）：Android 前台包名与期望比对——一致/不一致/无法解析。"""
+    from server import VerifyLaunchReq, verify_launch
+
+    _reset_registry()
+    try:
+        fg = {"value": "mCurrentFocus=Window{abc u0 com.example/.MainActivity}"}
+
+        def fake_run(self, args, **kwargs):
+            joined = " ".join(args)
+            if "launch" in joined and "monkey" in joined:
+                return "Events injected: 1"
+            if "dumpsys" in joined:
+                return fg["value"]
+            return ""
+
+        monkeypatch.setattr(AdbHelper, "run", fake_run)
+        monkeypatch.setattr(AdbHelper, "launch_package", lambda self, pkg: None)
+
+        # 一致
+        r = verify_launch(VerifyLaunchReq(package="com.example", serial="DEV_A"))
+        assert r["match"] is True and r["foreground_pkg"] == "com.example"
+        # 不一致（装错包）
+        fg["value"] = "mFocusedApp=ActivityRecord{abc u0 com.other/.Main t1}"
+        r = verify_launch(VerifyLaunchReq(package="com.example", serial="DEV_A"))
+        assert r["match"] is False and r["foreground_pkg"] == "com.other"
+        # 无法解析（ROM 差异）
+        fg["value"] = "mCurrentFocus=Window{abc u0 (no package)}"
+        r = verify_launch(VerifyLaunchReq(package="com.example", serial="DEV_A"))
+        assert r["match"] is None and "note" in r
+    finally:
+        _reset_registry()
+
+
+def test_verify_launch_ios_returns_note(monkeypatch):
+    """启动测试 iOS 路径：launch 成功即返回 note（非越狱无前台检测）。"""
+    from server import VerifyLaunchReq, IosDevice, verify_launch
+    from fastapi import HTTPException
+
+    _reset_registry()
+    try:
+        SESSION.session_for("IOS_DEV", "ios")  # 预建 iOS 会话（platform 决定走 iOS 分支）
+        monkeypatch.setattr(IosDevice, "launch_package", lambda self, pkg: None)
+        r = verify_launch(VerifyLaunchReq(package="com.example", serial="IOS_DEV"))
+        assert r["ok"] is True and r["match"] is None and "iOS" in r["note"]
+    finally:
+        _reset_registry()

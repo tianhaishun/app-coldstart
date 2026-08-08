@@ -617,6 +617,7 @@
           <div class="flex gap-1.5">
             <input id="apkPkg" type="text" list="pkgList" placeholder="输入或选择已装应用" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
             <datalist id="pkgList"></datalist>
+            <button id="verifyLaunchBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary whitespace-nowrap" title="启动 App 并校验前台包名与期望一致（Android 自动比对；iOS 请确认画面）">▶ 启动测试</button>
             <button id="refreshAppsBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="刷新设备上的应用列表">↻</button>
           </div>
         </div>
@@ -3257,6 +3258,38 @@ async function sysBaseline() {
   }
 }
 $('sysBaseBtn').addEventListener('click', sysBaseline);
+
+// ── 启动测试：启动 App 并校验前台包名与期望一致 ──
+$('verifyLaunchBtn').addEventListener('click', async () => {
+  const pkg = $('apkPkg').value.trim();
+  if (!pkg) { uiAlert('请先填 APK 包名', '', 'warning'); return; }
+  const btn = $('verifyLaunchBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 校验中…';
+  try {
+    const r = await apiFetch(API + '/api/verify_launch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package: pkg })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      setState('err', `启动测试失败：${j.detail || j.error || `HTTP ${r.status}`}`);
+      return;
+    }
+    if (j.match === true) {
+      setState('ok', `✓ 启动成功 · 前台包名 ${j.foreground_pkg} 与期望一致`);
+    } else if (j.match === false) {
+      setState('err', `✗ 前台包名 ${j.foreground_pkg} ≠ 期望 ${j.expected}——包名填错了或装错包？`);
+    } else {
+      setState('ok', `✓ 启动成功 · ${j.note || '请确认画面中的 App'}`);
+    }
+  } catch (e) {
+    setState('err', `启动测试失败：${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ 启动测试';
+  }
+});
 
 // ── 启停按钮绑定 ──
 $('autoStartBtn').addEventListener('click', () => {

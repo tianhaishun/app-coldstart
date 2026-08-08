@@ -1167,6 +1167,12 @@ class MarkerThresholdReq(BaseModel):
     serial: Optional[str] = None
 
 
+class VerifyLaunchReq(BaseModel):
+    """启动测试：启动 App 并校验前台包名与期望一致（防包名填错/装错包）。"""
+    package: str = Field(min_length=1, max_length=200)
+    serial: Optional[str] = None
+
+
 class SysBaselineReq(BaseModel):
     """系统对照模式（am start -W 交叉验证）。package 必填，rounds/cooldown_s 可选。"""
     package: str = Field(min_length=1, max_length=200)
@@ -2311,6 +2317,49 @@ def reinstall(req: ReinstallReq) -> dict:
         return {"ok": False, "error": str(e), "log": [], "apk_info": apk_info}
     print("[reinstall] 完成", flush=True)
     return {"ok": True, "log": log, "apk_info": apk_info}
+
+
+@app.post("/api/verify_launch")
+def verify_launch(req: VerifyLaunchReq) -> dict:
+    """启动 App 并校验前台包名与期望一致（防包名填错/装错包）。
+
+    Android：launch 后查 ``dumpsys window`` 的 mCurrentFocus/mFocusedApp 解析前台
+    包名，与期望对比，返回 match 布尔值——自动校验，不用肉眼看。
+    iOS：非越狱无等效前台检测，launch 成功即返回并提示看画面确认。
+    """
+    ds = _target_session(req.serial)
+    try:
+        with ds.lock:
+            ds.device.launch_package(req.package)
+            if ds.platform == "ios":
+                return {
+                    "ok": True, "launched": True, "match": None,
+                    "note": "iOS 无法读取前台包名（非越狱），请确认画面中的 App",
+                }
+            # Android：等前台 Activity 稳定后解析前台包名
+            time.sleep(2.5)
+            out = ds.device.run(
+                ["shell", "sh", "-c", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"],
+                check=False, timeout=10.0,
+            )
+            fg: Optional[str] = None
+            for m in re.finditer(r"(?:mCurrentFocus|mFocusedApp)=.*?([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/", out):
+                fg = m.group(1)
+                break
+            if fg is None:
+                return {
+                    "ok": True, "launched": True, "match": None,
+                    "note": "无法解析前台包名（ROM 差异），请确认画面中的 App",
+                    "raw": out.strip()[:200],
+                }
+            return {
+                "ok": True, "launched": True,
+                "match": fg == req.package,
+                "foreground_pkg": fg,
+                "expected": req.package,
+            }
+    except AdbOpError as e:
+        raise _err(400, str(e))
 
 
 @app.post("/api/marker_threshold")
