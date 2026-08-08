@@ -421,19 +421,37 @@ class IosDevice:
 
     # ── App 生命周期 ──
     def launch_pkg(self, bundle_id: str) -> None:
-        """通过 lockdown 的 launch service 启动 App。"""
+        """通过 DVT（instruments）服务启动 App（pymobiledevice3 10.x 官方路径）。
+
+        严格性（对齐教训七）：启动是关键操作，失败必须抛错，不能静默吞。
+
+        - DvtProvider 是 async context manager，负责连接 DTX transport；
+          iOS 17+ 走 RSD tunnel，旧版走 lockdown——需要设备开启「开发者模式」
+        - ProcessControl.launch(bundle_id, kill_existing=True)：先杀已运行实例再启动。
+          非越狱设备 force_stop 不可用，kill_existing 等效「杀进程 + 冷启动」，
+          正好补上 iOS 冷启动的关键环节（进程被杀后启动即冷启动）
+        - 返回 PID；falsy PID 库内抛 AssertionError，这里再校验一次并转中文错误
+        """
         async def _launch():
+            from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+            from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
             ld = await self._get_lockdown()
-            from pymobiledevice3.services.diagnostics import DiagnosticsService
-            # 使用 ProcessControl service 启动 App
-            # pymobiledevice3 的 launch 接口
-            sc = ld.start_service("com.apple.instruments.remoteserver")
-            # 简单方案：用 ideviceinstaller 的 launch 功能
-            return None
+            async with DvtProvider(ld) as dvt:
+                pc = ProcessControl(dvt)
+                pid = await pc.launch(bundle_id, kill_existing=True)
+                if not pid or int(pid) <= 0:
+                    raise AdbError(f"iOS 启动失败：设备返回无效 PID（{pid}）。bundle_id={bundle_id}")
         try:
             _ios_async(_launch())
-        except Exception:
-            pass  # 启动失败不致命——用户可手动点开
+        except AdbError:
+            raise
+        except Exception as e:
+            raise AdbError(
+                f"iOS 启动失败：{e}。可能原因："
+                f"1) 未开启开发者模式（设置→隐私与安全→开发者模式）"
+                f"2) App 未安装或 bundle id 错误"
+                f"3) 设备未信任此电脑"
+            ) from e
 
     def force_stop(self, pkg: str) -> None:
         """iOS 非越狱无法程序化杀进程——记日志，用户需手动上滑关闭。"""
@@ -472,8 +490,8 @@ class IosDevice:
                 log.append(f"uninstall: {pkg}")
             except Exception as e:
                 log.append(f"uninstall: skipped ({e})")
-            # 安装
-            await ip.install(ipa_path)
+            # 安装（10.x API：install_from_local；旧的 ip.install 已移除，会 AttributeError）
+            await ip.install_from_local(Path(ipa_path))
             log.append(f"install: {ipa_path}")
 
         try:

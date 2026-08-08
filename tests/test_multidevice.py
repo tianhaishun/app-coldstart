@@ -228,3 +228,86 @@ def test_res_mismatch_detection(monkeypatch):
         assert r3["res_mismatch"] is False
     finally:
         _reset_registry()
+
+
+def test_ios_launch_pkg_uses_process_control(monkeypatch):
+    """审核修复：iOS launch_pkg 走 DvtProvider + ProcessControl（原占位不启动 App）。
+    mock pymobiledevice3，验证 launch 被调用（kill_existing=True）且 falsy PID 抛 AdbError。"""
+    from server import AdbError, IosDevice
+
+    calls = {}
+
+    class FakePC:
+        def __init__(self, dvt):
+            pass
+
+        async def launch(self, bundle_id, kill_existing=True):
+            calls["launch"] = (bundle_id, kill_existing)
+            return 12345
+
+    class FakeDvt:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        "pymobiledevice3.services.dvt.instruments.dvt_provider.DvtProvider",
+        lambda ld: FakeDvt(),
+    )
+    monkeypatch.setattr(
+        "pymobiledevice3.services.dvt.instruments.process_control.ProcessControl",
+        FakePC,
+    )
+    dev = IosDevice("UDID")
+
+    async def fake_lockdown():
+        return object()
+    monkeypatch.setattr(dev, "_get_lockdown", fake_lockdown)
+
+    dev.launch_pkg("com.example.app")
+    assert calls["launch"] == ("com.example.app", True)  # kill_existing=True：等效杀进程+冷启动
+
+    # falsy PID → AdbError（启动失败必须抛错，不静默）
+    class FakePC0(FakePC):
+        async def launch(self, bundle_id, kill_existing=True):
+            return 0
+    monkeypatch.setattr(
+        "pymobiledevice3.services.dvt.instruments.process_control.ProcessControl",
+        FakePC0,
+    )
+    with pytest.raises(AdbError, match="无效 PID"):
+        dev.launch_pkg("com.example.app")
+
+
+def test_ios_reinstall_uses_install_from_local(monkeypatch, tmp_path):
+    """审核修复：iOS reinstall 用 install_from_local（原 ip.install 在 10.x 不存在，
+    会 AttributeError——iOS 安装实际是坏的）。验证 uninstall+install_from_local 被调用。"""
+    from server import IosDevice
+
+    calls = {}
+
+    class FakeIP:
+        async def uninstall(self, pkg, **kw):
+            calls["uninstall"] = pkg
+
+        async def install_from_local(self, path, **kw):
+            calls["install_from_local"] = str(path)
+
+    monkeypatch.setattr(
+        "pymobiledevice3.services.installation_proxy.InstallationProxyService",
+        lambda lockdown=None: FakeIP(),
+    )
+    dev = IosDevice("UDID")
+
+    async def fake_lockdown():
+        return object()
+    monkeypatch.setattr(dev, "_get_lockdown", fake_lockdown)
+
+    ipa = tmp_path / "app.ipa"
+    ipa.write_bytes(b"PK")
+    log = dev.reinstall("com.example.app", str(ipa))
+    assert calls.get("uninstall") == "com.example.app"
+    assert calls.get("install_from_local") == str(ipa)
+    assert any("install" in line for line in log)
