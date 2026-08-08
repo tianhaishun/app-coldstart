@@ -1946,6 +1946,9 @@ async function clearAll() {
   if (!records.length) return;
   if (!await uiConfirm(`清空全部 ${records.length} 条？`, '', 'warning')) return;
   records = []; saveRecords(); renderHistory(); renderStats();
+  // 数据已清空：报告卡旧文本残留会让人误以为"数据还在"，一并隐藏并失效重算上下文
+  $('cardReport')?.classList.add('hidden');
+  lastReportCtx = null;
   setState('', '已清空');
 }
 $('clearBtn').addEventListener('click', clearAll);
