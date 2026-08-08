@@ -276,6 +276,13 @@ def _ios_async(coro):
     return asyncio.run(coro)
 
 
+# userspace tunnel 是进程级单例（PyTCP 栈全局，一个进程只能一个活跃隧道，
+# 实测报错 "a userspace tunnel is already active in this process"）——
+# 全局只维护一个活跃隧道，换设备（serial 不同）时关旧建新。
+_ios_tunnel_state: dict = {"rsd": None, "tunnel": None, "serial": None}
+_ios_tunnel_lock = threading.Lock()
+
+
 class IosLoop:
     """iOS 操作常驻 event loop（单例，后台线程）。
 
@@ -321,9 +328,7 @@ class IosDevice:
     def __init__(self, udid: str) -> None:
         self.udid = udid
         self._last_size: Optional[tuple[int, int]] = None
-        # iOS 隧道缓存（tunnel 复用：常驻 loop 内建立，跨调用存活；失效自动重建）
-        self._ios_rsd = None
-        self._ios_tunnel = None
+        # 注：tunnel 是进程级单例（_ios_tunnel_state），不再挂在实例上
 
     async def _get_lockdown(self):
         """创建到设备的 lockdown 连接。"""
@@ -382,19 +387,36 @@ class IosDevice:
     # 多次调用复用；连接失效（设备重连）时自动重建一次。实测对比见 git 提交说明。
 
     def _ensure_ios_rsd(self):
-        """返回缓存的 RSD（tunnel 复用）；无缓存则新建。须在常驻 loop 内调用。"""
-        if self._ios_rsd is not None:
-            return self._ios_rsd
-        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
-        tunnel = UserspaceRsdTunnel(serial=self.udid)
-        self._ios_rsd = IosLoop().run(tunnel.aopen())
-        self._ios_tunnel = tunnel
-        return self._ios_rsd
+        """返回进程级单例 RSD（tunnel 复用）；换设备/失效时关旧建新。
+
+        userspace tunnel 是进程级单例（PyTCP 栈全局），不能每会话一个——
+        实测 "a userspace tunnel is already active in this process"。加锁保护
+        多设备并发切换。须在常驻 loop 内调用。
+        """
+        with _ios_tunnel_lock:
+            st = _ios_tunnel_state
+            if st["rsd"] is not None and st["serial"] == self.udid:
+                return st["rsd"]
+            # 换设备或首次：关闭旧隧道（async with 语义 = aclose），建新
+            if st["tunnel"] is not None:
+                try:
+                    IosLoop().run(st["tunnel"].aclose())
+                except Exception:
+                    pass
+                st["rsd"] = st["tunnel"] = st["serial"] = None
+            from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+            tunnel = UserspaceRsdTunnel(serial=self.udid)
+            st["rsd"] = IosLoop().run(tunnel.aopen())
+            st["tunnel"] = tunnel
+            st["serial"] = self.udid
+            return st["rsd"]
 
     def _invalidate_ios_tunnel(self) -> None:
-        """tunnel 失效（连接失败/设备重连）：清缓存，下次调用重建。"""
-        self._ios_rsd = None
-        self._ios_tunnel = None
+        """tunnel 失效（连接失败/设备重连）：清全局缓存，下次调用重建。"""
+        with _ios_tunnel_lock:
+            _ios_tunnel_state["rsd"] = None
+            _ios_tunnel_state["tunnel"] = None
+            _ios_tunnel_state["serial"] = None
 
     def _dvt_shot(self) -> bytes:
         """DVT 截图（tunnel 复用；连接失败清缓存重建一次）。"""
