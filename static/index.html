@@ -3546,6 +3546,8 @@ function exportXlsx(ctx) {
     }
     return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals };
   }
+  // r.time 是毫秒；导出统一转秒显示（与界面 fmt() 一致：ms/1000）
+  const sec = ms => (ms / 1000).toFixed(3);
   const firstAdjust = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;
 
   // 按设备分组（多设备并行时各自独立统计/编号/剔极值，绝不混算）
@@ -3584,13 +3586,13 @@ function exportXlsx(ctx) {
     const sf = sr ? sr.mean : null;
     const diff = (ff !== null && sf !== null) ? ff - sf : null;
     const trimDesc = (fr && sr)
-      ? `首次 MAX ${fr.max ? fr.max.toFixed(3) : '—'}s/MIN ${fr.min ? fr.min.toFixed(3) : '—'}s；二次 MAX ${sr.max ? sr.max.toFixed(3) : '—'}s/MIN ${sr.min ? sr.min.toFixed(3) : '—'}s`
-      : (fr ? `首次 MAX ${fr.max ? fr.max.toFixed(3) : '—'}s/MIN ${fr.min ? fr.min.toFixed(3) : '—'}s` : (sr ? `二次 MAX ${sr.max ? sr.max.toFixed(3) : '—'}s/MIN ${sr.min ? sr.min.toFixed(3) : '—'}s` : '—'));
+      ? `首次 MAX ${fr.max != null ? sec(fr.max) : '—'}s/MIN ${fr.min != null ? sec(fr.min) : '—'}s；二次 MAX ${sr.max != null ? sec(sr.max) : '—'}s/MIN ${sr.min != null ? sec(sr.min) : '—'}s`
+      : (fr ? `首次 MAX ${fr.max != null ? sec(fr.max) : '—'}s/MIN ${fr.min != null ? sec(fr.min) : '—'}s` : (sr ? `二次 MAX ${sr.max != null ? sec(sr.max) : '—'}s/MIN ${sr.min != null ? sec(sr.min) : '—'}s` : '—'));
     summary.push([
       g.label,
-      ff !== null ? +ff.toFixed(3) : null,
-      sf !== null ? +sf.toFixed(3) : null,
-      diff !== null ? +Math.abs(diff).toFixed(3) + (diff > 0 ? '（首次慢）' : '（二次慢）') : null,
+      ff !== null ? +sec(ff) : null,
+      sf !== null ? +sec(sf) : null,
+      diff !== null ? +Math.abs(sec(diff)) + (diff > 0 ? '（首次慢）' : '（二次慢）') : null,
       `首次 ${g.firsts.length} · 二次 ${g.seconds.length}`,
       trimDesc,
     ]);
@@ -3616,7 +3618,7 @@ function exportXlsx(ctx) {
       const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
       const dropTag = drop.has(r) ? drop.get(r) + '（剔除）' : '';
       rows.push([g.label, n, r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
-        +r.time.toFixed(3), dropTag, r.abnormal ? '异常' : '',
+        +sec(r.time), dropTag, r.abnormal ? '异常' : '',
         new Date(r.date).toLocaleString('zh-CN'), (r.apk && r.apk.sha256_prefix) || '']);
     });
   });
