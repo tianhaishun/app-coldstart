@@ -6,6 +6,8 @@
 <title>App 冷启测速 · Cold Start Profiler</title>
 <!-- 离线 Tailwind CSS（编译产物，AGENTS.md §3.3）。零网络依赖，可断网运行 -->
 <link rel="stylesheet" href="/static.css">
+<!-- SheetJS（本地化，离线可用）：自动测速报告 Excel 导出 -->
+<script src="/vendor/xlsx.mini.min.js"></script>
 <!-- OpenCode OC-2：唯一色源（static/themes/oc-2.json → oc-2.css） -->
 <link rel="stylesheet" href="/themes/oc-2.css">
 <style>
@@ -697,6 +699,7 @@
           <button id="reportRegenBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="删除样本后重算均值与报告文本">⟳ 重算</button>
           <button id="reportCopyBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">复制</button>
           <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">CSV</button>
+          <button id="reportXlsxBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="导出 Excel（汇总/样本明细/审计日志 三个工作表）">Excel</button>
         </div>
       </div>
       <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
@@ -3134,18 +3137,11 @@ function renderAutoReport(ctx) {
       L.push(`  · ${g.label}：均值 ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)}s（n=${g.list.length}）`);
     });
   }
-  L.push(`明细  ${detail(firsts, fr)}`);
-  if (fr && fr.max !== null) L.push(`剔极值  MAX ${fmt(fr.max)}s / MIN ${fmt(fr.min)}s`);
-  L.push(`均值    ${fr ? fmt(fr.mean) + 's' : '—'}`);
-  if (firstAdjust !== 0 && fr) L.push(`平台调整  ${firstAdjust/1000}s`);
-  L.push(`最终    ${firstFinal !== null ? fmt(firstFinal) + 's' : '—'}`);
+  L.push(`最终    ${firstFinal !== null ? fmt(firstFinal) + 's' : '—'}` + (fr && fr.max !== null ? `（去极值均值 ${fmt(fr.mean)}s · 剔 1 MAX + 1 MIN）` : '') + (firstAdjust !== 0 && fr ? ` · 平台调整 ${firstAdjust/1000}s` : ''));
   L.push('');
   L.push(`── 二次冷启动（${seconds.length} 样本）──`);
   if (sr && sr.warning) L.push(`⚠ ${sr.warning}`);  // 审核 D-P1-2
-  L.push(`明细  ${detail(seconds, sr)}`);
-  if (sr && sr.max !== null) L.push(`剔极值  MAX ${fmt(sr.max)}s / MIN ${fmt(sr.min)}s`);
-  L.push(`均值    ${sr ? fmt(sr.mean) + 's' : '—'}`);
-  L.push(`最终    ${secondFinal !== null ? fmt(secondFinal) + 's' : '—'}`);
+  L.push(`最终    ${secondFinal !== null ? fmt(secondFinal) + 's' : '—'}` + (sr && sr.max !== null ? `（去极值均值 ${fmt(sr.mean)}s · 剔 1 MAX + 1 MIN）` : ''));
   L.push('');
   L.push('── 结论 ──');
   if (firstFinal !== null && secondFinal !== null) {
@@ -3157,18 +3153,7 @@ function renderAutoReport(ctx) {
     L.push('· 数据不足，无法给出结论');
   }
   L.push('');
-  L.push('说明：');
-  L.push('· 计时：单一 performance.now() 时钟，起点=服务端 cold_start 返回后，终点=模板连续确认命中');
-  L.push('· 终点：认出启动成功画面；记入耗时 = 墙钟 − 命中帧截图耗时；SKIP 仅首次');
-  L.push('· 测前：am kill-all 清后台 + force_stop 目标包 + 冷却，再 cold_start');
-  L.push('· 异常阈值：默认 35s，只标记不中止；出现异常可补跑（最多 +2 轮）；删除异常样本：报告上方列表点 ✕，自动重算');
-  L.push('· 单次检测耗时主要在 adb 截图（shot_ms），匹配本身通常 <10ms（见运行审计日志）');
-  if (reportMode === 'pkg') {
-    L.push('· 本轮为包名启动：绕过 Launcher 触摸，不依赖桌面图标位置');
-  } else {
-    L.push('· 本轮为模拟点击：含 Launcher 响应；卸装后图标若移位需重设坐标');
-  }
-  L.push('· 均值规则：n>=3 时去掉 1 个最大 + 1 个最小，剩余取均；n<3 时全量平均');
+  L.push('样本明细 / 剔极值详情 / 审计日志 → 点报告卡右上角「Excel」导出（汇总 · 样本明细 · 审计日志 三个工作表）');
 
   // 附本 run 审计日志（过程可信度）
   const audit = (lastRunAuditLog && lastRunAuditLog.length) ? lastRunAuditLog : auditLogLines;
@@ -3186,7 +3171,96 @@ function renderAutoReport(ctx) {
   lastReportCtx = ctx;
 }
 
-// ── 报告区按钮：重算 / 复制文本 / 下载 CSV ──
+// ── 导出 Excel（SheetJS 本地化）：汇总 / 样本明细 / 审计日志 三个工作表 ──
+// 报告文本已精简（去重叠）；详细数据在这里——Excel 形式方便阅读/分享
+function exportXlsx(ctx) {
+  if (typeof XLSX === 'undefined') { uiAlert('Excel 组件未加载', '请刷新页面重试', 'error'); return; }
+  const startIdx = (ctx && ctx.runStartIndex) || 0;
+  const runRecords = records.slice(startIdx).filter(r => r.source === 'auto');
+  const firsts = runRecords.filter(r => r.type === 'first');
+  const seconds = runRecords.filter(r => r.type === 'second');
+  const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
+  const now = new Date().toLocaleString('zh-CN', { hour12: false });
+  const device = $('deviceSel').selectedOptions[0]?.text || '—';
+  const pkg = $('apkPkg').value || '—';
+  const reportMode = (ctx && ctx.launchMode) || $('launchMode').value;
+
+  function trimMean(arr) {
+    if (!arr.length) return null;
+    const vals = arr.map(r => r.time);
+    if (vals.length >= 3) {
+      const max = Math.max(...vals), min = Math.min(...vals);
+      const maxIdx = vals.indexOf(max), minIdx = vals.indexOf(min);
+      const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
+      return { mean: kept.reduce((a, b) => a + b, 0) / kept.length, max, min, raw: vals };
+    }
+    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, raw: vals };
+  }
+  const fr = trimMean(firsts), sr = trimMean(seconds);
+  const firstAdjust = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;
+  const firstFinal = fr ? fr.mean + firstAdjust : null;
+  const secondFinal = sr ? sr.mean : null;
+  const diff = (firstFinal !== null && secondFinal !== null) ? firstFinal - secondFinal : null;
+  const abnN = runRecords.filter(r => r.abnormal).length;
+
+  const wb = XLSX.utils.book_new();
+
+  // Sheet1 汇总
+  const summary = [
+    ['冷启动自动测速报告'],
+    [],
+    ['测试时间', now],
+    ['设备', device],
+    ['应用包名', pkg],
+    ['启动方式', reportMode === 'pkg' ? '包名启动（monkey）' : '模拟点击图标'],
+    ['平台', platform === 'ios' ? `iOS（首次调整 ${iosFirstAdjustSec()}s）` : 'GP（安卓）'],
+    ['轮数', `计划 ${(ctx && (ctx.plannedRounds != null ? ctx.plannedRounds : ctx.rounds)) || '—'} 轮` + ((ctx && ctx.extraRounds) ? ` + 补跑 ${ctx.extraRounds}` : '')],
+    ['状态', (ctx && ctx.success === false) ? `中止：${ctx.error || ''}` : '全部完成'],
+    ['异常样本', abnN],
+    [],
+    ['首次冷启动 最终', firstFinal !== null ? +firstFinal.toFixed(3) : null, firstFinal !== null ? 's' : ''],
+    ['二次冷启动 最终', secondFinal !== null ? +secondFinal.toFixed(3) : null, secondFinal !== null ? 's' : ''],
+    ['差值（首−二）', diff !== null ? +Math.abs(diff).toFixed(3) : null, diff !== null ? 's' + (diff > 0 ? '（首次慢）' : '（二次慢）') : ''],
+    [],
+    ['样本数', `首次 ${firsts.length} · 二次 ${seconds.length}`],
+    ['剔极值（n≥3）', fr && fr.max !== null ? `首次 MAX ${fr.max.toFixed(3)}s / MIN ${fr.min.toFixed(3)}s` : '首次 —',
+      sr && sr.max !== null ? `二次 MAX ${sr.max.toFixed(3)}s / MIN ${sr.min.toFixed(3)}s` : '二次 —'],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '汇总');
+
+  // Sheet2 样本明细（含 MAX/MIN 剔除标记、异常标记）
+  const rows = [['序号', '类型', '耗时(s)', '剔除标记', '异常', '采集时间', 'APK版本']];
+  let fi = 0, si = 0;
+  runRecords.forEach((r, i) => {
+    const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
+    rows.push([n, r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
+      +r.time.toFixed(3), '', r.abnormal ? '异常' : '',
+      new Date(r.date).toLocaleString('zh-CN'), (r.apk && r.apk.sha256_prefix) || '']);
+  });
+  function markMaxMin(list) {
+    if (list.length < 3) return;
+    const vals = list.map(r => r.time);
+    const riMax = runRecords.indexOf(list[vals.indexOf(Math.max(...vals))]);
+    const riMin = runRecords.indexOf(list[vals.indexOf(Math.min(...vals))]);
+    if (riMax >= 0) rows[riMax + 1][3] = 'MAX（剔除）';
+    if (riMin >= 0) rows[riMin + 1][3] = 'MIN（剔除）';
+  }
+  markMaxMin(firsts);
+  markMaxMin(seconds);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), '样本明细');
+
+  // Sheet3 审计日志
+  const audit = (lastRunAuditLog && lastRunAuditLog.length) ? lastRunAuditLog : auditLogLines;
+  const logRows = [['运行审计日志']];
+  (audit || []).forEach(line => logRows.push([line]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(logRows), '审计日志');
+
+  const safePkg = pkg.replace(/[^A-Za-z0-9_.-]/g, '_') || 'app';
+  XLSX.writeFile(wb, `AppColdStart_${safePkg}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+// ── 报告区按钮：重算 / 复制文本 / 下载 CSV / 导出 Excel ──
+$('reportXlsxBtn').addEventListener('click', () => exportXlsx(lastReportCtx));
 $('reportRegenBtn').addEventListener('click', () => {
   if (!lastReportCtx) return;
   renderAutoReport(lastReportCtx);  // 删除样本后重算均值与报告文本
