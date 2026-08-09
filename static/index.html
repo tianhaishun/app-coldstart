@@ -3529,8 +3529,6 @@ function exportXlsx(ctx) {
   if (typeof XLSX === 'undefined') { uiAlert('Excel 组件未加载', '请刷新页面重试', 'error'); return; }
   const startIdx = (ctx && ctx.runStartIndex) || 0;
   const runRecords = records.slice(startIdx).filter(r => r.source === 'auto');
-  const firsts = runRecords.filter(r => r.type === 'first');
-  const seconds = runRecords.filter(r => r.type === 'second');
   const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
   const now = new Date().toLocaleString('zh-CN', { hour12: false });
   const device = $('deviceSel').selectedOptions[0]?.text || '—';
@@ -3544,20 +3542,28 @@ function exportXlsx(ctx) {
       const max = Math.max(...vals), min = Math.min(...vals);
       const maxIdx = vals.indexOf(max), minIdx = vals.indexOf(min);
       const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
-      return { mean: kept.reduce((a, b) => a + b, 0) / kept.length, max, min, raw: vals };
+      return { mean: kept.reduce((a, b) => a + b, 0) / kept.length, max, min, maxIdx, minIdx, raw: vals };
     }
-    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, raw: vals };
+    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals };
   }
-  const fr = trimMean(firsts), sr = trimMean(seconds);
   const firstAdjust = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;
-  const firstFinal = fr ? fr.mean + firstAdjust : null;
-  const secondFinal = sr ? sr.mean : null;
-  const diff = (firstFinal !== null && secondFinal !== null) ? firstFinal - secondFinal : null;
-  const abnN = runRecords.filter(r => r.abnormal).length;
+
+  // 按设备分组（多设备并行时各自独立统计/编号/剔极值，绝不混算）
+  // groupByDevice: serial -> { label, firsts:[], seconds:[], all:[] }
+  const devMap = new Map();
+  runRecords.forEach(r => {
+    const key = r.device || '__all__';
+    if (!devMap.has(key)) devMap.set(key, { label: r.deviceLabel || key, firsts: [], seconds: [], all: [] });
+    const g = devMap.get(key);
+    g.all.push(r);
+    if (r.type === 'first') g.firsts.push(r);
+    else if (r.type === 'second') g.seconds.push(r);
+  });
+  const groups = [...devMap.values()];
 
   const wb = XLSX.utils.book_new();
 
-  // Sheet1 汇总
+  // Sheet1 汇总（每设备独立首/二最终值）
   const summary = [
     ['冷启动自动测速报告'],
     [],
@@ -3568,37 +3574,52 @@ function exportXlsx(ctx) {
     ['平台', platform === 'ios' ? `iOS（首次调整 ${iosFirstAdjustSec()}s）` : 'GP（安卓）'],
     ['轮数', `计划 ${(ctx && (ctx.plannedRounds != null ? ctx.plannedRounds : ctx.rounds)) || '—'} 轮` + ((ctx && ctx.extraRounds) ? ` + 补跑 ${ctx.extraRounds}` : '')],
     ['状态', (ctx && ctx.success === false) ? `中止：${ctx.error || ''}` : '全部完成'],
-    ['异常样本', abnN],
+    ['异常样本', runRecords.filter(r => r.abnormal).length],
     [],
-    ['首次冷启动 最终', firstFinal !== null ? +firstFinal.toFixed(3) : null, firstFinal !== null ? 's' : ''],
-    ['二次冷启动 最终', secondFinal !== null ? +secondFinal.toFixed(3) : null, secondFinal !== null ? 's' : ''],
-    ['差值（首−二）', diff !== null ? +Math.abs(diff).toFixed(3) : null, diff !== null ? 's' + (diff > 0 ? '（首次慢）' : '（二次慢）') : ''],
-    [],
-    ['样本数', `首次 ${firsts.length} · 二次 ${seconds.length}`],
-    ['剔极值（n≥3）', fr && fr.max !== null ? `首次 MAX ${fr.max.toFixed(3)}s / MIN ${fr.min.toFixed(3)}s` : '首次 —',
-      sr && sr.max !== null ? `二次 MAX ${sr.max.toFixed(3)}s / MIN ${sr.min.toFixed(3)}s` : '二次 —'],
+    ['设备', '首次冷启动 最终', '二次冷启动 最终', '差值（首−二）', '样本数', '剔极值'],
   ];
+  groups.forEach(g => {
+    const fr = trimMean(g.firsts), sr = trimMean(g.seconds);
+    const ff = fr ? fr.mean + firstAdjust : null;
+    const sf = sr ? sr.mean : null;
+    const diff = (ff !== null && sf !== null) ? ff - sf : null;
+    const trimDesc = (fr && sr)
+      ? `首次 MAX ${fr.max ? fr.max.toFixed(3) : '—'}s/MIN ${fr.min ? fr.min.toFixed(3) : '—'}s；二次 MAX ${sr.max ? sr.max.toFixed(3) : '—'}s/MIN ${sr.min ? sr.min.toFixed(3) : '—'}s`
+      : (fr ? `首次 MAX ${fr.max ? fr.max.toFixed(3) : '—'}s/MIN ${fr.min ? fr.min.toFixed(3) : '—'}s` : (sr ? `二次 MAX ${sr.max ? sr.max.toFixed(3) : '—'}s/MIN ${sr.min ? sr.min.toFixed(3) : '—'}s` : '—'));
+    summary.push([
+      g.label,
+      ff !== null ? +ff.toFixed(3) : null,
+      sf !== null ? +sf.toFixed(3) : null,
+      diff !== null ? +Math.abs(diff).toFixed(3) + (diff > 0 ? '（首次慢）' : '（二次慢）') : null,
+      `首次 ${g.firsts.length} · 二次 ${g.seconds.length}`,
+      trimDesc,
+    ]);
+  });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '汇总');
 
-  // Sheet2 样本明细（含设备列、MAX/MIN 剔除标记、异常标记）
-  const rows = [['序号', '设备', '类型', '耗时(s)', '剔除标记', '异常', '采集时间', 'APK版本']];
-  let fi = 0, si = 0;
-  runRecords.forEach((r, i) => {
-    const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
-    rows.push([n, r.deviceLabel || '', r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
-      +r.time.toFixed(3), '', r.abnormal ? '异常' : '',
-      new Date(r.date).toLocaleString('zh-CN'), (r.apk && r.apk.sha256_prefix) || '']);
+  // Sheet2 样本明细（按设备分组：组内各自编号、各自剔极值；序号含设备前缀组号）
+  const rows = [['设备', '序号', '类型', '耗时(s)', '剔除标记', '异常', '采集时间', 'APK版本']];
+  groups.forEach(g => {
+    let fi = 0, si = 0;
+    // 组内 MAX/MIN 剔除标记（与界面 renderSampleList 口径一致：每设备每类型独立剔）
+    // 用记录引用 → 标签映射（子数组索引≠组内 all 索引，不能混用索引）
+    const drop = new Map();  // record -> 'MAX'|'MIN'
+    function markExtreme(list) {
+      if (list.length < 3) return;
+      const vals = list.map(r => r.time);
+      drop.set(list[vals.indexOf(Math.max(...vals))], 'MAX');
+      drop.set(list[vals.indexOf(Math.min(...vals))], 'MIN');
+    }
+    markExtreme(g.firsts);
+    markExtreme(g.seconds);
+    g.all.forEach((r, i) => {
+      const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
+      const dropTag = drop.has(r) ? drop.get(r) + '（剔除）' : '';
+      rows.push([g.label, n, r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
+        +r.time.toFixed(3), dropTag, r.abnormal ? '异常' : '',
+        new Date(r.date).toLocaleString('zh-CN'), (r.apk && r.apk.sha256_prefix) || '']);
+    });
   });
-  function markMaxMin(list) {
-    if (list.length < 3) return;
-    const vals = list.map(r => r.time);
-    const riMax = runRecords.indexOf(list[vals.indexOf(Math.max(...vals))]);
-    const riMin = runRecords.indexOf(list[vals.indexOf(Math.min(...vals))]);
-    if (riMax >= 0) rows[riMax + 1][3] = 'MAX（剔除）';
-    if (riMin >= 0) rows[riMin + 1][3] = 'MIN（剔除）';
-  }
-  markMaxMin(firsts);
-  markMaxMin(seconds);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), '样本明细');
 
   // Sheet3 审计日志
