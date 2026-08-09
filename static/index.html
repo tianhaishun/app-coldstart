@@ -3554,7 +3554,10 @@ function renderParallelDevices() {
   const cur = $('deviceSel').value;
   if (!ready.length) { box.innerHTML = ''; return; }
   box.innerHTML = ready.map(d => {
-    const on = (parallelDevChecked[d.serial] !== undefined) ? parallelDevChecked[d.serial] : (d.serial === cur);
+    // 勾选状态稳定持久：用户手动改过的用记忆值；未改过的默认勾选（多设备本就为并行）。
+    // 修复：不要绑定"当前选中设备"(d.serial===cur)——那会让切设备时勾选状态漂移
+    // （在 Pixel 界面看 moto 没勾，切到 moto 又变）。记忆值 undefined 时统一默认勾上。
+    const on = (parallelDevChecked[d.serial] !== undefined) ? parallelDevChecked[d.serial] : true;
     const icon = d.platform === 'ios' ? '🍎' : '🤖';
     const label = (d.model || d.serial).slice(0, 14);
     // 模板就绪标记占位：异步查回后填充（初始显示中性 ·）

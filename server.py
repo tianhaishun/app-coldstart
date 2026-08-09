@@ -684,6 +684,7 @@ class DeviceSession:
         self.marker_threshold: float = MARKER_MATCH_THRESHOLD
         # 设模板时的屏幕分辨率（审核 F-P1-4：分辨率变化检测用；None=未知，跳过检查）
         self._marker_res: Optional[tuple] = None
+        self._fallback_from: Optional[str] = None       # 回退共用模板的来源 serial（诊断用）
         self._marker_w: int = 0                        # 模板像素宽
         self._marker_h: int = 0                        # 模板像素高
         self._marker_cx: float = 0.5                   # 模板中心归一化坐标（运行时搜索用）
@@ -728,13 +729,86 @@ class DeviceSession:
         else:
             self._marker_img = img.copy()
 
+    def _load_fallback_marker(self):
+        """回退共用模板：本设备无自己的模板时，从其它同分辨率设备持久化模板加载运行时副本。
+
+        多台设备并行跑同一 App 时，各设备首页 UI 一致、分辨率不一致（Pixel 6a 1080x2400、
+        moto 1080x2400 等情况）时，模板可以共用——不要求每台设备都设模板。
+
+        规则：
+          1. 遍历其它设备的持久化模板（marker_<serial>.png + meta_<serial>.json）
+          2. 优先选与本设备屏幕分辨率（_last_size）一致的；未知时选分辨率最接近的
+          3. 只做运行时加载（写入 _marker_img / _marker_template 生效），不覆盖持久化配置；
+             设模板/清模板时回退自然失效（本设备有模板后优先用本设备的）
+
+        返回 bool：是否成功加载到回退模板。
+        """
+        import json as _json
+        # 本设备已有模板则不回退
+        if self._marker_template is not None and Path(self._marker_template).exists():
+            return False
+        if not DEVICE_TEMPLATES_DIR.is_dir():
+            return False
+        target = getattr(self.device, "_last_size", None)
+        target = tuple(target) if target else None
+        best = None  # (score, marker_file, meta, serial)
+        try:
+            for meta_f in DEVICE_TEMPLATES_DIR.glob("meta_*.json"):
+                safe = meta_f.name[len("meta_"):-len(".json")]
+                if safe == _safe_serial(self.serial):
+                    continue  # 跳过自己
+                marker_f = DEVICE_TEMPLATES_DIR / f"marker_{safe}.png"
+                if not marker_f.exists():
+                    continue
+                try:
+                    meta = _json.loads(meta_f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                # 评分：分辨率完全一致 = 最佳；否则按分辨率差值惩罚
+                mres = tuple(meta.get("res") or ())
+                if target and mres:
+                    res_score = 0 if tuple(mres) == target else abs(tuple(mres)[0] - target[0]) + abs(tuple(mres)[1] - target[1])
+                else:
+                    res_score = 0 if not target else 10 ** 6
+                cand = (res_score, marker_f, meta, safe)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+        except Exception:
+            return False
+        if best is None:
+            return False
+        res_score, marker_f, meta, src_serial = best
+        import cv2
+        im = cv2.imread(str(marker_f))
+        if im is None:
+            return False
+        # 运行时套用回退模板（不写持久化文件，避免污染本设备配置）
+        self._marker_template = marker_f
+        self._marker_img = im
+        self._marker_matcher = None
+        self._marker_w = int(meta.get("w") or 0)
+        self._marker_h = int(meta.get("h") or 0)
+        self._marker_cx = float(meta.get("cx", 0.5) if meta.get("cx") is not None else 0.5)
+        self._marker_cy = float(meta.get("cy", 0.5) if meta.get("cy") is not None else 0.5)
+        if meta.get("threshold"):
+            self.marker_threshold = float(meta["threshold"])
+        self._fallback_from = src_serial  # 诊断：回退来源
+        print(f"[marker:{self.serial}] 回退共用模板 ← {src_serial}（{self._marker_w}×{self._marker_h}，res_score={res_score}）", flush=True)
+        return True
+
     def ensure_marker_image(self):
-        """返回缓存的模板图；缓存空则从磁盘读并填入。"""
+        """返回缓存的模板图；缓存空则从磁盘读并填入。
+
+        本设备无模板时自动回退到其它设备同分辨率模板（设备首次未设模板也能跑）。
+        返回 DataFrame/ndarray。
+        """
         import cv2
         if self._marker_img is not None:
             return self._marker_img
         if self._marker_template is None or not Path(self._marker_template).is_file():
-            return None
+            # 本设备没设模板 → 尝试回退其它设备的共用模板
+            if not self._load_fallback_marker():
+                return None
         im = cv2.imread(str(self._marker_template))
         if im is not None:
             self._marker_img = im
@@ -1626,6 +1700,7 @@ def set_marker_template(req: SetMarkerReq) -> dict:
 
             # 4) 存模板（覆盖式，按设备隔离的单文件）
             cv2.imwrite(str(ds.marker_path), template)
+            ds._fallback_from = None  # 本设备已有自己的模板，清除回退来源
 
             # 4.3) 持久化到磁盘（重启后端自动恢复，免用户反复重设——真机实测痛点）
             try:
@@ -1748,6 +1823,13 @@ def marker_status(serial: Optional[str] = None) -> dict:
         ds = _target_session(serial)
     except AdbOpError as e:
         raise _err(400, str(e))
+    # 本设备模板，或（未设时）可回退到其它设备同分辨率模板，都视为可用
+    self_ready = (
+        ds._marker_template is not None
+        and Path(ds._marker_template).exists()
+    )
+    if not self_ready:
+        ds.ensure_marker_image()  # 触发回退加载（成功则设置 _marker_template/_fallback_from）
     ready = (
         ds._marker_template is not None
         and Path(ds._marker_template).exists()
@@ -1760,6 +1842,7 @@ def marker_status(serial: Optional[str] = None) -> dict:
         "center_y": round(ds._marker_cy, 5) if ready else None,
         "threshold": ds.marker_threshold,           # 审核 E-P1-3：可调阈值
         "threshold_default": MARKER_MATCH_THRESHOLD,
+        "fallback_from": ds._fallback_from,          # 非空 = 用的其它设备共用模板
     }
 
 
@@ -1790,7 +1873,12 @@ def preflight_auto(req: ReinstallReq) -> dict:
             and Path(ds._marker_template).exists()
         )
         if not marker_ok:
-            errors.append("未设启动元素模板（该设备需各自设置）")
+            # 允许回退共用模板：本设备没设，但其它设备有同分辨率可用模板时放行
+            # （多台跑同一 App、首页 UI 一致时，不必每台都设模板）
+            if ds.ensure_marker_image() is not None:
+                marker_ok = True
+            else:
+                errors.append("未设启动元素模板，且无其它设备的共用模板可回退")
     return {
         "ok": len(errors) == 0,
         "errors": errors,
