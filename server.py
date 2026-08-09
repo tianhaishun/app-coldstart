@@ -412,11 +412,21 @@ class IosDevice:
             return st["rsd"]
 
     def _invalidate_ios_tunnel(self) -> None:
-        """tunnel 失效（连接失败/设备重连）：清全局缓存，下次调用重建。"""
+        """tunnel 失效（连接失败/设备重连）：先关闭旧隧道再清缓存，下次调用重建。
+
+        多设备并行实测抓到的竞态：只清缓存不 aclose 时，PyTCP 进程级单例栈
+        仍持有旧隧道对象——后续新建隧道必然报 "a userspace tunnel is already
+        active in this process"（直播链 in-flight 截图失败 → invalidate →
+        循环 launch 撞单例）。
+        """
         with _ios_tunnel_lock:
-            _ios_tunnel_state["rsd"] = None
-            _ios_tunnel_state["tunnel"] = None
-            _ios_tunnel_state["serial"] = None
+            st = _ios_tunnel_state
+            if st["tunnel"] is not None:
+                try:
+                    IosLoop().run(st["tunnel"].aclose())
+                except Exception:
+                    pass
+            st["rsd"] = st["tunnel"] = st["serial"] = None
 
     def _dvt_shot(self) -> bytes:
         """DVT 截图（tunnel 复用；连接失败清缓存重建一次）。"""
