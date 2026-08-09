@@ -3527,6 +3527,19 @@ $('verifyLaunchBtn').addEventListener('click', async () => {
 
 // ── 并行设备多选（阶段③）：勾选多台同时跑自动测速 ──
 let parallelDevChecked = {};  // serial -> bool（记忆勾选）
+// 各设备启动模板就绪状态缓存：serial -> {ready:bool}
+const parallelMarkerReady = {};
+// 拉取某台设备的启动模板就绪状态（用于并行区 ✓/⚠ 标记 + 设模板提示）
+async function fetchMarkerReady(serial) {
+  try {
+    const r = await fetch(API + '/api/marker_status?serial=' + encodeURIComponent(serial));
+    const j = await r.json();
+    parallelMarkerReady[serial] = { ready: !!j.ready, w: j.width, h: j.height };
+  } catch {
+    parallelMarkerReady[serial] = { ready: false, w: 0, h: 0 };
+  }
+}
+// 渲染并行设备多选：每台设备名 + 模板就绪标记（✓ 已设 / ⚠ 未设，异步查回填充）
 function renderParallelDevices() {
   const box = $('parallelDevices');
   if (!box) return;
@@ -3537,8 +3550,9 @@ function renderParallelDevices() {
     const on = (parallelDevChecked[d.serial] !== undefined) ? parallelDevChecked[d.serial] : (d.serial === cur);
     const icon = d.platform === 'ios' ? '🍎' : '🤖';
     const label = (d.model || d.serial).slice(0, 14);
-    return `<label class="par-dev flex-1 flex items-center justify-center gap-1 py-1 bg-surface-container-high border rounded text-[10px] font-mono font-bold cursor-pointer select-none transition ${on ? 'border-tertiary text-tertiary' : 'border-outline-variant text-on-surface-variant'}" data-serial="${escapeHtml(d.serial)}" title="勾选后与其它设备同时跑自动测速">
-      <input type="checkbox" data-serial="${escapeHtml(d.serial)}" data-platform="${escapeHtml(d.platform)}" data-label="${escapeHtml(label)}" ${on ? 'checked' : ''} class="hidden">${icon} ${escapeHtml(label)}</label>`;
+    // 模板就绪标记占位：异步查回后填充（初始显示中性 ·）
+    return `<label class="par-dev flex-1 flex items-center justify-center gap-1 py-1 bg-surface-container-high border rounded text-[10px] font-mono font-bold cursor-pointer select-none transition ${on ? 'border-tertiary text-tertiary' : 'border-outline-variant text-on-surface-variant'}" data-serial="${escapeHtml(d.serial)}" title="勾选后在自动循环中与此设备同时并行测速">
+      <input type="checkbox" data-serial="${escapeHtml(d.serial)}" data-platform="${escapeHtml(d.platform)}" data-label="${escapeHtml(label)}" ${on ? 'checked' : ''} class="hidden">${icon} ${escapeHtml(label)} <span class="par-mark" data-serial="${escapeHtml(d.serial)}">·</span></label>`;
   }).join('');
   box.querySelectorAll('input').forEach(cb => {
     cb.addEventListener('change', () => {
@@ -3551,6 +3565,18 @@ function renderParallelDevices() {
           lb.classList.toggle('text-on-surface-variant', !cb.checked);
         }
       });
+    });
+  });
+  // 异步填充每台设备模板就绪标记（不阻塞渲染；设备多时并发量也小）
+  ready.forEach(d => {
+    fetchMarkerReady(d.serial).then(() => {
+      const st = parallelMarkerReady[d.serial];
+      const markEl = box.querySelector(`.par-mark[data-serial="${CSS.escape(d.serial)}"]`);
+      if (!markEl) return;
+      const ok = st && st.ready;
+      markEl.textContent = ok ? '✓' : '⚠';
+      markEl.style.color = ok ? '#22c55e' : '#ef4444';
+      markEl.title = ok ? `启动模板已设 ${st.w}×${st.h}` : '未设启动模板：请先在设备下拉选中此设备，再点「点画面选定启动元素」设置';
     });
   });
 }
@@ -3574,12 +3600,14 @@ $('autoStopBtn').addEventListener('click', () => {
 // ── 模板选定流程：点「点画面选定」→ 进入选定模式 → 用户点画面 → 调 set_marker_template ──
 $('setMarkerBtn').addEventListener('click', () => {
   if (!deviceReady) { uiAlert('请先连接设备并让画面显示出来', '', 'warning'); return; }
+  const cur = lastDeviceList.find(d => d.serial === $('deviceSel').value);
+  const devName = cur?.model || cur?.serial || '当前设备';
   skipPickingMode = false;
   markerPickingMode = true;
-  $('setMarkerBtn').textContent = '◉ 请在画面上点击启动元素...';
+  $('setMarkerBtn').textContent = '◉ 在画面点启动元素（设备：' + devName + '）...';
   $('setMarkerBtn').classList.add('animate-pulse');
   $('addSkipBtn').classList.remove('animate-pulse');
-  setState('running', '请在左侧画面上点一下"启动成功"元素的位置（按钮/文字/图标都行）');
+  setState('running', '请在左侧画面上点一下"启动成功"元素的位置（按钮/文字/图标都行）—— 此模板将保存到「' + devName + '」');
 });
 
 // 拦截画面点击：选定模板模式下，把点击坐标发给后端设模板（而不是设 tap 坐标）
@@ -3612,11 +3640,15 @@ async function setMarkerFromPoint(cx, cy) {
     const wrap = $('markerPreviewWrap');
     wrap.classList.remove('hidden');
     wrap.innerHTML = `<img src="data:${j.preview_mime || 'image/jpeg'};base64,${j.preview_base64}" style="width:100%;height:100%;object-fit:contain">`;
-    $('markerStatus').innerHTML = `✓ 模板已设 · <b class="text-on-surface">${j.width}×${j.height}</b> px · 中心 (${j.center_x.toFixed(3)}, ${j.center_y.toFixed(3)})`;
+    const curS = $('deviceSel').value;
+    const curDev = lastDeviceList.find(d => d.serial === curS);
+    const devName = curDev?.model || curS || '当前设备';
+    $('markerStatus').innerHTML = `✓ 模板已设（设备 <b class="text-on-surface">${escapeHtml(devName)}</b>）· <b class="text-on-surface">${j.width}×${j.height}</b> px · 中心 (${j.center_x.toFixed(3)}, ${j.center_y.toFixed(3)})`;
     $('setMarkerBtn').textContent = '📍 点画面选定启动元素';
-    setState('ok', `启动元素模板已设定（${j.width}×${j.height}）`);
+    setState('ok', `启动元素模板已设定（${devName} · ${j.width}×${j.height}）`);
     markProjectDirty();
     refreshAutoChecklist();
+    renderParallelDevices();  // 刷新并行区模板就绪标记
   } catch (e) {
     markerTemplateReady = false;
     // 失败保持选定模式：下一次点画面继续试设模板，避免误走 setCoords
