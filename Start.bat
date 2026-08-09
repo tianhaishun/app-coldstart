@@ -44,6 +44,15 @@ if not exist "%PY%" (
     echo.
 )
 
+REM -- Unify adb server before backend --
+REM 机器上可能有多套 adb（内置 与 PATH 的 platform-tools）共用同一 daemon(5037)，
+REM 版本分支不一会在握手时偶发 connection reset → 检测不到设备。
+REM 这里用内置 adb 强制重启 server，让 5037 常驻一个统一版本（与后端 ADB_EXE 优先内置一致）。
+if exist "%ROOT%adb\adb.exe" (
+    "%ROOT%adb\adb.exe" kill-server >nul 2>nul
+    "%ROOT%adb\adb.exe" start-server >nul 2>nul
+)
+
 REM -- Start backend --
 REM HOST=0.0.0.0 → 允许局域网其他人访问（http://本机IP:8766）
 REM 要切回仅本机访问（更安全）：把下面的 0.0.0.0 改成 127.0.0.1

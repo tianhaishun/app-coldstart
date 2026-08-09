@@ -234,6 +234,14 @@ class PythonManager {
       if (!envOk) return false;
     }
 
+    // 1.5 统一 adb server（防多版本握手冲突挂起）：
+    //     机器上可能存在多套 adb（内置 与 PATH 的 platform-tools），共用同一 daemon(5037)。
+    //     版本分支不同的客户端/服务端握手失败时会偶发 connection reset → 检测不到设备。
+    //     这里用内置 adb 强制重启 server，确保每次都只有一个统一版本的 daemon 在跑。
+    //     adb server 由内置路径启动后，后端 /api/devices 走同一内置（server.py:ADB_EXE 优先内置），
+    //     两端永远同版本，从根上消除该类挂起。
+    this.unifyAdbServer(onLog);
+
     // 2. 如果后端已在运行（比如 Start.bat 先启动了），直接复用
     onLog('info', '检查后端是否已运行...');
     if (await this.checkHealth()) {
@@ -323,6 +331,41 @@ class PythonManager {
     }
 
     return ready;
+  }
+
+  // ── 统一 adb server ────────────────────────────────────────
+
+  /** 内置 adb 可执行文件路径（与主进程 resolveAdbPath 同构，避免跨文件依赖）。 */
+  get bundledAdb() {
+    const exe = this.isWin ? 'adb.exe' : 'adb';
+    return path.join(this.backendRoot, 'adb', exe);
+  }
+
+  /**
+   * 用内置 adb 强制重启 adb server，统一版本防握手冲突挂起。
+   *
+   * 背景：机器上可能同时存在多套 adb（工具内置 与 PATH 的 platform-tools），
+   * 都连同一个 daemon(TCP 5037)。版本分支不同的客户端/服务端握手不兼容时，
+   * adb 会偶发 "protocol fault / connection reset"，导致工具检测不到设备。
+   * 用内置 adb 先 kill 再 start，确保 5037 常驻的是内置那套（此后 PATH 里保留的
+   * 其它版本即使被调用，也只能连接这个统一版本——adb 客户端对 daemon 是向下兼容的）。
+   *
+   * 兜底性质：每次启动后端前执行一次，仅开销一次 adb 启动，非致命（失败不阻塞）。
+   * @param {(level: string, msg: string) => void} onLog
+   */
+  unifyAdbServer(onLog) {
+    const adb = this.bundledAdb;
+    if (!fs.existsSync(adb)) return;  // 无内置 adb（如纯 PATH 环境），跳过
+
+    try {
+      onLog('info', '统一 adb server（用内置 adb 重启，防多版本握手冲突）...');
+      // spawnSync 同步执行：kill-server 与 start-server 必须串行
+      const kill = spawnSync(adb, ['kill-server'], { timeout: 15_000, windowsHide: true });
+      const start = spawnSync(adb, ['start-server'], { timeout: 15_000, windowsHide: true });
+      onLog('info', `adb server 已用内置统一版本重启（exit=${(start && start.status) ?? '?'}）`);
+    } catch (e) {
+      onLog('warn', `统一 adb server 失败（忽略，继续启动后端）：${e.message}`);
+    }
   }
 
   // ── 运行时源码保护 ────────────────────────────────────────
