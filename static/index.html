@@ -532,6 +532,8 @@
             <input id="autoKillCool" type="number" min="0" max="10" step="0.5" value="1.5" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
           </div>
         </div>
+        <!-- 并行设备：勾选多台可同时跑自动测速（每设备独立循环/日志/记录；默认勾当前选中设备） -->
+        <div id="parallelDevices" class="flex flex-wrap gap-1.5 shrink-0"></div>
         <!-- 测速项：首次/二次多选（调试用；默认全选=原行为；选中态由 JS 切 border-tertiary/text-tertiary，零新增 CSS 类） -->
         <div class="flex gap-1.5 shrink-0">
           <label id="optFirstLabel" class="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-surface-container-high border border-tertiary rounded text-xs font-mono font-bold text-tertiary cursor-pointer select-none transition" title="卸装重装后测首次冷启动（干净安装）">
@@ -583,6 +585,7 @@
             <button id="autoLogClearBtn" type="button" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded hover:text-danger" title="清空日志">清空</button>
           </div>
         </div>
+        <div id="autoLogTabs" class="hidden flex gap-1 shrink-0 flex-wrap"></div>
         <div id="autoProgress" class="bg-surface-container-lowest border-l-2 border-tertiary rounded p-2 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar min-h-0 flex-1"></div>
       </div>
     </div>
@@ -1361,6 +1364,7 @@ async function refreshDevices() {
     const sel = $('deviceSel');
     const devs = j.devices || [];
     lastDeviceList = devs;
+    renderParallelDevices();  // 并行设备多选同步（阶段③）
     const cur = sel.value;
     if (!devs.length) {
       sel.innerHTML = '<option value="">（无设备）</option>';
@@ -1402,6 +1406,7 @@ async function selectDevice(serial) {
     // 启动直播链（如果之前没启）
     if ($('liveToggle').checked && !liveTimer) startLive();
     refreshAutoChecklist();
+    renderParallelDevices();  // 设备选中后同步并行多选（默认勾当前选中）
   } catch(e) {
     console.error(e);
     refreshAutoChecklist();
@@ -1886,7 +1891,8 @@ function renderSampleList() {
     const tag = extremeTag.has(i)
       ? `<span class="tag ${extremeTag.get(i)}">${extremeTag.get(i) === 'max' ? 'MAX' : 'MIN'}</span>` : '';
     const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除后自动重算">异常</span>' : '';
-    return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
+    const devTag = r.deviceLabel ? `<span class="text-[9px] text-on-surface-variant ml-1">${escapeHtml(String(r.deviceLabel).slice(0, 10))}</span>` : '';
+    return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${devTag}${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
   }).join('');
   samplesBox.innerHTML =
     `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">样本 ${records.length} 条（首次 ${records.filter(r => r.type === 'first').length} + 二次 ${records.filter(r => r.type === 'second').length}）· 点 ✕ 删除后自动重算统计与报告</div>` +
@@ -1936,7 +1942,8 @@ function renderHistory() {
       else if (i === s.minIdx) tag = '<span class="tag min" style="opacity:.5" title="全部一起算时剔除">MIN*</span>';
     }
     const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可稍后决定是否删除">异常</span>' : '';
-    return `<div class="hist-item"><span class="idx">#${String(displayIdx).padStart(2,'0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${tag}${abn}<button class="del" data-idx="${i}">✕</button></div>`;
+    const devTag = r.deviceLabel ? `<span class="text-[9px] text-on-surface-variant ml-1">${escapeHtml(String(r.deviceLabel).slice(0, 10))}</span>` : '';
+    return `<div class="hist-item"><span class="idx">#${String(displayIdx).padStart(2,'0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${devTag}${tag}${abn}<button class="del" data-idx="${i}">✕</button></div>`;
   }).reverse().join('');
   el.querySelectorAll('.del').forEach(b => b.addEventListener('click', e => {
     const idx = parseInt(e.target.dataset.idx);
@@ -2383,23 +2390,80 @@ function formatAuditTs(d = new Date()) {
 /** level: INFO|STEP|OK|WARN|ERR ；phase: RUN|PRE|R1|MATCH…
  *  兼容旧调用 autoLog(kind, msg)（kind=ok/err/warn/info）。
  *  底部固定最新：用户没主动上滚时新日志自动贴底；上滚查看历史时不打断。 */
-function autoLog(level, phase, msg) {
+// 多设备并行（阶段③）：每设备独立日志行 + 当前日志 tab
+const devLogs = {};          // serial -> { lines: [] }（每设备日志，多设备时用）
+let activeLogDevice = null;  // 当前日志 tab 显示的设备 serial（null=单设备模式用全局 autoProgress）
+
+// 每设备日志容器（惰性创建，挂在 autoProgress 同父级）
+function logElFor(serial) {
+  if (!serial) return $('autoProgress');
+  const safe = String(serial).replace(/[^A-Za-z0-9_-]/g, '_');
+  let el = document.getElementById('autoProgress-' + safe);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'autoProgress-' + safe;
+    el.className = 'bg-surface-container-lowest border-l-2 border-tertiary rounded p-2 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar min-h-0 flex-1';
+    $('autoProgress').parentElement.appendChild(el);
+    if (activeLogDevice !== serial) el.classList.add('hidden');
+  }
+  return el;
+}
+
+// 多设备日志 tab：切换显示对应设备日志
+function switchLogDevice(serial) {
+  activeLogDevice = serial || null;
+  const tabs = $('autoLogTabs');
+  if (!tabs) return;
+  // 单设备：无 tab，直接用全局 autoProgress
+  if (!serial) {
+    tabs.classList.add('hidden');
+    $('autoProgress')?.classList.remove('hidden');
+    document.querySelectorAll('.autoProgress-dev').forEach(d => d.classList.add('hidden'));
+    return;
+  }
+  tabs.classList.remove('hidden');
+  $('autoProgress')?.classList.add('hidden');
+  document.querySelectorAll('.autoProgress-dev').forEach(d => d.classList.add('hidden'));
+  logElFor(serial).classList.remove('hidden');
+  // tab 高亮
+  tabs.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('text-primary', b.dataset.serial === serial);
+    b.classList.toggle('text-on-surface-variant', b.dataset.serial !== serial);
+  });
+}
+
+// 渲染日志设备 tab（多设备时）
+function renderLogTabs(devs) {
+  const tabs = $('autoLogTabs');
+  if (!tabs) return;
+  if (devs.length <= 1) { tabs.classList.add('hidden'); return; }
+  tabs.innerHTML = devs.map(d =>
+    `<button type="button" data-serial="${escapeHtml(d.serial)}" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded ${d.serial === activeLogDevice ? 'text-primary' : 'text-on-surface-variant'}" title="${escapeHtml(d.label)}">${escapeHtml(d.label.slice(0, 12))}</button>`
+  ).join('');
+  tabs.querySelectorAll('button').forEach(b => b.addEventListener('click', () => switchLogDevice(b.dataset.serial)));
+  tabs.classList.remove('hidden');
+}
+
+function autoLog(level, phase, msg, serial) {
   // 兼容旧签名 autoLog(kind, msg)
   if (msg === undefined) {
     msg = phase; phase = '—';
     level = { ok: 'OK', err: 'ERR', warn: 'WARN', info: 'INFO' }[String(level || '').toLowerCase()] || level || 'INFO';
   }
-  const el = $('autoProgress');
-  if (!el) {
-    auditLogLines.push(`[?] ${level} ${phase} ${msg}`);
-    return;
-  }
+  const el = serial ? logElFor(serial) : $('autoProgress');
   const lv = String(level || 'INFO').toUpperCase();
   const ph = String(phase || '—').toUpperCase();
   const text = String(msg ?? '');
   const ts = formatAuditTs();
   const plain = `[${ts}] ${lv.padEnd(5)} ${ph.padEnd(8)} ${text}`;
-  auditLogLines.push(plain);
+  // 日志行：多设备按 serial 分桶，单设备保持全局 auditLogLines（兼容复制/报告）
+  if (serial) {
+    if (!devLogs[serial]) devLogs[serial] = { lines: [] };
+    devLogs[serial].lines.push(plain);
+  } else {
+    auditLogLines.push(plain);
+  }
+  if (!el) return;
   const color = lv === 'OK' ? 'var(--mint)' : lv === 'ERR' ? 'var(--danger)' : lv === 'WARN' ? 'var(--amber)' : lv === 'STEP' ? 'var(--primary)' : '';
   const div = document.createElement('div');
   if (color) div.style.color = color;
@@ -2416,8 +2480,8 @@ function autoLog(level, phase, msg) {
     el.classList.add('user-scrolled');
   }
 
-  // 同步进度条阶段
-  setProgressPhase(ph, text);
+  // 同步进度条阶段（多设备时跟随当前 tab 设备）
+  if (!serial || serial === activeLogDevice) setProgressPhase(ph, text);
 }
 
 // 用户手动滚回底部 → 清除「未自动滚动」标记
@@ -2669,7 +2733,7 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 // 首次有跳过模板时先处理弹窗；没有跳过模板时直接识别启动模板；二次始终不扫跳过。
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
 // weirdMs：异常阈值（默认 35s）——只标记，不中止；等模板命中或用户停止
-async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
+async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
   let lastLogAt = 0;
   let warnedWeird = false;
   let warnedResMismatch = false;  // 审核 F-P1-4：分辨率变化只警告一次
@@ -2687,7 +2751,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips) {
       autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`);
     }
     try {
-      const qs = doSkips ? '' : '?check_skips=false';
+      const qs = (doSkips ? '?' : '?check_skips=false&') + (serial ? 'serial=' + encodeURIComponent(serial) : '');
       const r = await apiFetch(API + '/api/check_auto' + qs);
       if (r.ok) {
         const j = await r.json();
@@ -2778,17 +2842,17 @@ async function apiFetch(url, opts = {}, timeoutMs = 15000) {
 /** 测启动前：am kill-all 清后台 + force_stop 目标包 + 冷却
  *  任一步失败必须抛错中止——否则可能测到温启动，污染冷启样本。
  */
-async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
+async function prepareBeforeLaunch(pkg, killCoolMs, phase, serial, platform) {
   // iOS：am kill-all / force_stop 是 Android 命令，非越狱 iOS 上都是 no-op——
   // 日志如实显示"跳过"，不能显示"完成"（用户质疑正确性后修正）
-  const isIOS = currentPlatform === 'ios';
+  const isIOS = platform === 'ios';
   autoLog('STEP', phase, isIOS
     ? '准备冷启动环境：iOS 非越狱不支持 am kill-all / force_stop，冷启动由 launch 的 kill_existing 兜底'
     : '准备冷启动环境：先清后台进程 (am kill-all)，再强制停止目标包 (force-stop)');
   autoLog('STEP', phase, isIOS ? 'iOS：跳过 am kill-all（非越狱不支持）…' : '执行 am kill-all（清后台，腾内存）…');
   const kr = await apiFetch(API + '/api/kill_all', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
+    body: JSON.stringify(serial ? { serial } : {})
   });
   const kj = await kr.json().catch(() => ({}));
   if (!kr.ok || !kj.ok) {
@@ -2799,7 +2863,7 @@ async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
   autoLog('STEP', phase, isIOS ? 'iOS：跳过 force_stop（非越狱不支持）…' : `执行 force-stop 目标包 ${pkg}（确保进程被杀干净，才算冷启动）…`);
   const fr = await apiFetch(API + '/api/force_stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ package: pkg })
+    body: JSON.stringify(serial ? { package: pkg, serial } : { package: pkg })
   });
   const fj = await fr.json().catch(() => ({}));
   if (!fr.ok || fj.ok === false) {
@@ -2818,6 +2882,107 @@ async function prepareBeforeLaunch(pkg, killCoolMs, phase) {
 async function runAutoLoop() {
   await syncMarkerReadyFromServer();
   refreshAutoChecklist();
+  // ── 收集并行设备（阶段③ 多设备）──
+  const checked = [...document.querySelectorAll('#parallelDevices input:checked')]
+    .map(cb => ({ serial: cb.dataset.serial, platform: cb.dataset.platform, label: cb.dataset.label || cb.dataset.serial }));
+  const curSerial = $('deviceSel').value;
+  let devs = checked.length
+    ? checked
+    : (curSerial ? [{ serial: curSerial, platform: currentPlatform, label: $('deviceSel').selectedOptions[0]?.text || curSerial }] : []);
+  devs = devs.filter((d, i) => devs.findIndex(x => x.serial === d.serial) === i);
+  if (!devs.length) { uiAlert('请先连接并选择设备', '并行测速需要至少一台在线设备', 'warning'); return; }
+  const single = devs.length === 1;
+
+  // ── 全局运行状态（单/多设备统一在此收尾）──
+  autoRunning = true;
+  autoAbortFlag = false;
+  $('autoStartBtn').disabled = true;
+  $('autoStopBtn').disabled = false;
+  setAutoRunLayout(true);
+  clearAuditLog();
+  $('cardReport').classList.add('hidden');
+  startProgressClock(parseInt($('autoRounds').value) || 5);
+  autoLiveWasOn = !!liveTimer;
+  if (liveTimer) stopLive();
+  const t0 = performance.now();
+
+  function quickTrim(vals) {
+    if (!vals.length) return null;
+    if (vals.length < 3) return vals.reduce((a, b) => a + b, 0) / vals.length;
+    // 与 §2.3 一致：去掉第一个 max、第一个 min（并列时可能只剔一次）
+    const maxIdx = vals.indexOf(Math.max(...vals));
+    const minIdx = vals.indexOf(Math.min(...vals));
+    const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
+    return kept.reduce((a, b) => a + b, 0) / kept.length;
+  }
+
+  try {
+    if (single) {
+      // 单设备：保持原有行为（全局日志/单设备报告），runAutoLoopForDevice 内渲染报告
+      switchLogDevice(null);
+      renderLogTabs([]);
+      await runAutoLoopForDevice(devs[0], null);
+      return;
+    }
+
+    // ── 多设备并行：每设备独立循环/日志/记录（Promise.allSettled：一台失败不影响其它）──
+    renderLogTabs(devs);
+    switchLogDevice(devs[0].serial);
+    autoLog('INFO', 'RUN', `并行测速 ${devs.length} 台设备：${devs.map(d => d.label).join(' / ')}`);
+    const results = await Promise.allSettled(devs.map(d => runAutoLoopForDevice(d, d.serial)));
+
+    // 汇总报告（按设备分组）
+    const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
+    const L = [];
+    L.push('════════════════════════════════════════');
+    L.push('          多设备并行测速报告');
+    L.push('════════════════════════════════════════');
+    L.push('');
+    L.push(`测试时间  ${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+    L.push(`设备      ${devs.map(d => d.label).join(' / ')}`);
+    L.push(`应用包名  ${$('apkPkg').value.trim() || '—'}`);
+    L.push(`总耗时    ${totalSec}s`);
+    L.push('');
+    results.forEach((r, i) => {
+      const dev = devs[i];
+      L.push(`── ${dev.label} ──`);
+      if (r.status === 'rejected') {
+        L.push(`  ✗ 中止：${r.reason?.message || r.reason}`);
+        L.push('');
+        return;
+      }
+      const recs = records.slice(r.value.runStartIndex).filter(x => x.source === 'auto' && x.device === dev.serial);
+      const firsts = recs.filter(x => x.type === 'first').map(x => x.time);
+      const seconds = recs.filter(x => x.type === 'second').map(x => x.time);
+      const fm = quickTrim(firsts), sm = quickTrim(seconds);
+      L.push(`  首次 ${fm != null ? fmt(fm) + 's' : '—'}（n=${firsts.length}）`);
+      L.push(`  二次 ${sm != null ? fmt(sm) + 's' : '—'}（n=${seconds.length}）`);
+      L.push('');
+    });
+    L.push('样本明细 / 审计日志 → 点报告卡右上角「Excel」导出（汇总 · 样本明细 · 审计日志）');
+    $('autoReport').textContent = L.join('\n');
+    $('cardReport').classList.remove('hidden');
+    $('cardReport').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } finally {
+    stopProgressClock();
+    autoRunning = false;
+    autoAbortFlag = false;
+    $('autoStopBtn').disabled = true;
+    setAutoRunLayout(false);
+    if (autoLiveWasOn && $('liveToggle').checked) startLive();
+    refreshAutoChecklist();
+  }
+}
+
+// ── 单台设备自动循环（阶段③ 拆出）──
+// dev = {serial, platform, label}；logSerial 为 null 时走全局日志（单设备，行为与原版一致）
+async function runAutoLoopForDevice(dev, logSerial) {
+  const serial = dev.serial;
+  const platform = dev.platform;
+  const L = logSerial;  // autoLog 第 4 参（null=全局日志）
+  const isIOS = platform === 'ios';
+  await syncMarkerReadyFromServer();
+  refreshAutoChecklist();
   const pkg = $('apkPkg').value.trim();
   const apkPath = $('apkPath').value.trim();
   const x = parseFloat($('tapX').value);
@@ -2829,80 +2994,55 @@ async function runAutoLoop() {
   const launchMode = $('launchMode').value;
   const MAX_EXTRA_ROUNDS = 2;
 
-  if (!autoGateReady) {
-    setState('err', '开跑检查未通过');
-    uiAlert('请先补齐开跑检查中的必选项（红色 ✗）', '', 'warning');
-    return;
-  }
-
-  // 开跑前自检（不占 adb 锁）：APK 是否还在、模板是否已设
-  let preflight = null;
-  try {
-    const pr = await fetch(API + '/api/preflight_auto', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ package: pkg, apk_path: apkPath })
-    });
-    preflight = await pr.json();
-    if (!preflight.ok) {
-      const msg = (preflight.errors || ['自检失败']).join('\n· ');
-      setState('err', '自动循环自检未通过');
-      uiAlert('无法开始自动循环', '· ' + msg, 'error');
-      if (!preflight.marker_ready) markerTemplateReady = false;
-      refreshAutoChecklist();
-      return;
-    }
-    markerTemplateReady = !!preflight.marker_ready;
-  } catch (e) {
-    uiAlert('自检请求失败', e.message + '\n请确认后端已启动', 'error');
-    return;
-  }
-
-  let targetRounds = rounds;
-  let extraGranted = 0;
-
-  autoRunning = true;
-  autoAbortFlag = false;
-  $('autoStartBtn').disabled = true;
-  $('autoStopBtn').disabled = false;
-  setAutoRunLayout(true);
-  clearAuditLog();
-  $('cardReport').classList.add('hidden');
-  startProgressClock(targetRounds);
-
-  autoLiveWasOn = !!liveTimer;
-  if (liveTimer) stopLive();
-
-  const t0 = performance.now();
-  const runStartIndex = records.length;
-  const runId = new Date().toISOString();
-  const modeLabel = launchMode === 'pkg' ? '包名启动' : '模拟点击';
-  const deviceLabel = $('deviceSel').selectedOptions[0]?.text || '—';
-  const projName = ($('projectSel').selectedOptions[0]?.textContent || '').split(' · ')[0] || (currentProjectId || '（未选项目）');
-  const apkName = apkPath.split(/[/\\]/).pop();
-
   // 测速项多选（首次/二次；调试用，默认全选=原行为）
   const doFirst = $('optFirst')?.checked !== false;
   const doSecond = $('optSecond')?.checked !== false;
   const typesLabel = doFirst && doSecond ? '首次+二次' : doFirst ? '仅首次' : '仅二次';
   if (!doFirst && !doSecond) {
     uiAlert('请至少勾选一个测速项', '首次/二次冷启动至少选一项才能开始', 'warning');
-    return;
+    throw new Error('未选择测速项');
   }
-  // iOS：工具不管理安装包，首次不卸装重装（用已装 App 测）；kill_existing 兜底冷启动
-  const isIOS = currentPlatform === 'ios';
 
-  autoLog('INFO', 'RUN', `项目=${projName}`);
-  autoLog('INFO', 'RUN', `设备=${deviceLabel}`);
-  autoLog('INFO', 'RUN', `包名=${pkg} · ${modeLabel} · 计划 ${rounds} 轮 · 异常阈值 ${weirdMs / 1000}s（超时不中止，只标记）· 轮询间隔 ${gapMs}ms · 清进程冷却 ${killCoolMs / 1000}s`);
-  autoLog('INFO', 'RUN', `测速项=${typesLabel}${doFirst ? (isIOS ? '（首次=已装 App 直接测，iOS 不卸装）' : '（首次=卸装重装后测，干净安装）') : ''}${doSecond ? '（二次=杀进程后测，不卸装）' : ''}`);
-  autoLog('INFO', 'RUN', `APK=${apkName}` + (preflight?.apk_size_mb != null ? ` ${preflight.apk_size_mb}MB` : ''));
-  autoLog('INFO', 'RUN', '计时：cold_start 返回后起表；停表：启动成功模板连续 1 帧≥0.85；命中帧扣掉当次截图耗时；上升沿在 force_stop 后已预置；跳过仅首次；每轮启动前清进程');
-  autoLog('INFO', 'PRE', `开跑自检通过 · 设备=${preflight?.device || '—'} · 启动模板=${markerTemplateReady ? '已就绪' : '未设'} · 跳过弹窗模板×${skipTemplateCount}`);
-  autoLog('INFO', 'RUN', '已关闭直播截图，adb 专供本轮自动循环');
+  // 开跑前自检（按设备；多设备时各设备独立检查）
+  let preflight = null;
+  try {
+    const pr = await apiFetch(API + '/api/preflight_auto', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package: pkg, apk_path: apkPath, serial })
+    });
+    preflight = await pr.json();
+    if (!preflight.ok) {
+      const msg = (preflight.errors || ['自检失败']).join('\n· ');
+      throw new Error(`设备 ${dev.label} 自检未通过：${msg}`);
+    }
+    markerTemplateReady = !!preflight.marker_ready;
+  } catch (e) {
+    if (e.message.includes('自检未通过') || e.message.includes('设备 ')) {
+      autoLog('ERR', 'PRE', `${e.message}`, L);
+    }
+    throw e;
+  }
+
+  let targetRounds = rounds;
+  let extraGranted = 0;
+  const t0 = performance.now();
+  const runStartIndex = records.length;
+  const runId = new Date().toISOString();
+  const modeLabel = launchMode === 'pkg' ? '包名启动' : '模拟点击';
+  const deviceLabel = dev.label;
+  const projName = ($('projectSel').selectedOptions[0]?.textContent || '').split(' · ')[0] || (currentProjectId || '（未选项目）');
+  const apkName = apkPath.split(/[/\\]/).pop();
+
+  autoLog('INFO', 'RUN', `项目=${projName}`, L);
+  autoLog('INFO', 'RUN', `设备=${deviceLabel}`, L);
+  autoLog('INFO', 'RUN', `包名=${pkg} · ${modeLabel} · 计划 ${rounds} 轮 · 异常阈值 ${weirdMs / 1000}s（超时不中止，只标记）· 轮询间隔 ${gapMs}ms · 清进程冷却 ${killCoolMs / 1000}s`, L);
+  autoLog('INFO', 'RUN', `测速项=${typesLabel}${doFirst ? (isIOS ? '（首次=已装 App 直接测，iOS 不卸装）' : '（首次=卸装重装后测，干净安装）') : ''}${doSecond ? '（二次=杀进程后测，不卸装）' : ''}`, L);
+  autoLog('INFO', 'RUN', `APK=${apkName}` + (preflight?.apk_size_mb != null ? ` ${preflight.apk_size_mb}MB` : ''), L);
+  autoLog('INFO', 'RUN', '计时：cold_start 返回后起表；停表：启动成功模板连续 1 帧≥0.85；命中帧扣掉当次截图耗时；上升沿在 force_stop 后已预置；跳过仅首次；每轮启动前清进程', L);
+  autoLog('INFO', 'PRE', `开跑自检通过 · 设备=${preflight?.device || '—'} · 启动模板=${markerTemplateReady ? '已就绪' : '未设'} · 跳过弹窗模板×${skipTemplateCount}`, L);
 
   try {
-    // 本轮 APK 指纹（审核 B-P0-2：报告按 APK 版本分组用；仅首次更新，二次沿用；
-    // 仅二次模式无卸装 → null，旧记录无 apk 字段 → 归「未记录版本」组）
+    // 本轮 APK 指纹（审核 B-P0-2：报告按 APK 版本分组用；仅首次更新，二次沿用）
     let curApkInfo = null;
     for (let round = 1; round <= targetRounds; round++) {
       if (autoAbortFlag) throw new Error('用户中断');
@@ -2910,11 +3050,11 @@ async function runAutoLoop() {
       let roundAbnormal = false;
 
       if (doFirst && !isIOS) {
-        autoLog('STEP', phase, `第 ${round} 轮：开始卸装重装（保证首次冷启动是干净安装）…`);
+        autoLog('STEP', phase, `第 ${round} 轮：开始卸装重装（保证首次冷启动是干净安装）…`, L);
         const tRe = performance.now();
         const reinstallResp = await apiFetch(API + '/api/reinstall', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ package: pkg, apk_path: apkPath })
+          body: JSON.stringify({ package: pkg, apk_path: apkPath, serial })
         });
         let reinstallData;
         try {
@@ -2924,92 +3064,92 @@ async function runAutoLoop() {
         }
         const reMs = performance.now() - tRe;
         if (reinstallData.log && reinstallData.log.length) {
-          reinstallData.log.forEach(line => autoLog('INFO', 'ADB', `adb 原始输出：${String(line).trim()}`));
+          reinstallData.log.forEach(line => autoLog('INFO', 'ADB', `adb 原始输出：${String(line).trim()}`, L));
         }
         if (!reinstallData.ok) {
           throw new Error(`卸装失败：${reinstallData.error || '未知'}`);
         }
         curApkInfo = reinstallData.apk_info || null;
-        autoLog('OK', phase, `卸装重装成功 · 耗时 ${(reMs / 1000).toFixed(1)}s` + (curApkInfo ? ` · APK ${curApkInfo.name}（${curApkInfo.sha256_prefix}）` : ''));
+        autoLog('OK', phase, `卸装重装成功 · 耗时 ${(reMs / 1000).toFixed(1)}s` + (curApkInfo ? ` · APK ${curApkInfo.name}（${curApkInfo.sha256_prefix}）` : ''), L);
       } else if (doFirst && isIOS) {
-        autoLog('INFO', phase, `第 ${round} 轮：iOS 不卸装重装（工具不管理 iOS 安装包），用已装 App 测首次；启动时 kill_existing 兜底冷启动`);
+        autoLog('INFO', phase, `第 ${round} 轮：iOS 不卸装重装（工具不管理 iOS 安装包），用已装 App 测首次；启动时 kill_existing 兜底冷启动`, L);
       } else {
-        autoLog('INFO', phase, `第 ${round} 轮：测速项=仅二次，跳过卸装重装（复用已装应用，快速调试）`);
+        autoLog('INFO', phase, `第 ${round} 轮：测速项=仅二次，跳过卸装重装（复用已装应用，快速调试）`, L);
       }
 
       if (doFirst) {
         if (autoAbortFlag) throw new Error('用户中断');
-        autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`);
-        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`);
-        const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round);
+        autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`, L);
+        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`, serial, platform);
+        const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round, serial);
         if (first.abnormal) roundAbnormal = true;
-        records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal, apk: curApkInfo });
+        records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal, apk: curApkInfo, device: serial, deviceLabel });
         saveRecords(); renderHistory(); renderStats();
-        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 首次冷启动 = ${fmt(first.time)}s · 第 ${round} 轮` + (first.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 首次冷启动 = ${fmt(first.time)}s · 第 ${round} 轮` + (first.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''), L);
       }
 
       if (doSecond) {
         if (autoAbortFlag) throw new Error('用户中断');
-        autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`);
-        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`);
-        const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round);
+        autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`, L);
+        await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`, serial, platform);
+        const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round, serial);
         if (second.abnormal) roundAbnormal = true;
-        records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal, apk: curApkInfo });
+        records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal, apk: curApkInfo, device: serial, deviceLabel });
         saveRecords(); renderHistory(); renderStats();
-        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 二次冷启动 = ${fmt(second.time)}s · 第 ${round} 轮` + (second.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''));
+        autoLog('OK', 'RECORD', `写入记录 #${String(records.length).padStart(2, '0')} · 二次冷启动 = ${fmt(second.time)}s · 第 ${round} 轮` + (second.abnormal ? ' · ⚠ 异常样本（≥异常阈值）' : ''), L);
       }
 
       if (roundAbnormal && extraGranted < MAX_EXTRA_ROUNDS) {
         extraGranted += 1;
         targetRounds += 1;
         _progressTotalRounds = targetRounds;
-        autoLog('WARN', 'RUN', `本轮出现异常样本（≥${weirdMs / 1000}s），自动补跑第 ${targetRounds} 轮（已补 ${extraGranted}/${MAX_EXTRA_ROUNDS}）`);
+        autoLog('WARN', 'RUN', `本轮出现异常样本（≥${weirdMs / 1000}s），自动补跑第 ${targetRounds} 轮（已补 ${extraGranted}/${MAX_EXTRA_ROUNDS}）`, L);
       }
     }
 
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
     // 本 run 摘要（与右侧去极值口径一致，便于对照）
-    const runRecs = records.slice(runStartIndex).filter(r => r.source === 'auto');
+    const runRecs = records.slice(runStartIndex).filter(r => r.source === 'auto' && r.device === serial);
     const firsts = runRecs.filter(r => r.type === 'first').map(r => r.time);
     const seconds = runRecs.filter(r => r.type === 'second').map(r => r.time);
     const abnN = runRecs.filter(r => r.abnormal).length;
     function quickTrim(vals) {
       if (!vals.length) return null;
       if (vals.length < 3) return vals.reduce((a, b) => a + b, 0) / vals.length;
-      // 与 §2.3 一致：去掉第一个 max、第一个 min（并列时可能只剔一次）
       const maxIdx = vals.indexOf(Math.max(...vals));
       const minIdx = vals.indexOf(Math.min(...vals));
       const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
       return kept.reduce((a, b) => a + b, 0) / kept.length;
     }
     const fm = quickTrim(firsts), sm = quickTrim(seconds);
-    // 审核 D-P1-2：样本不足/较少标记（n<3 不足，3≤n<5 较少）
+    // 审核 D-P1-2：样本不足/较少标记
     const nMark = n => n < 3 ? `样本不足(n=${n})` : n < 5 ? `样本较少(n=${n})` : `n=${n}`;
-    autoLog('OK', 'SUMMARY', `全部完成 · 墙钟 ${totalSec}s · 首次均值 ${fm != null ? fmt(fm) + 's' : '—'}（${nMark(firsts.length)}）· 二次均值 ${sm != null ? fmt(sm) + 's' : '—'}（${nMark(seconds.length)}）` + (abnN ? ` · 异常样本 ${abnN}` : '') + (extraGranted ? ` · 补跑 ${extraGranted} 轮` : ''));
-    lastRunAuditLog = auditLogLines.slice();
-    renderAutoReport({ success: true, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, runStartIndex, launchMode });
-
+    autoLog('OK', 'SUMMARY', `全部完成 · 墙钟 ${totalSec}s · 首次均值 ${fm != null ? fmt(fm) + 's' : '—'}（${nMark(firsts.length)}）· 二次均值 ${sm != null ? fmt(sm) + 's' : '—'}（${nMark(seconds.length)}）` + (abnN ? ` · 异常样本 ${abnN}` : '') + (extraGranted ? ` · 补跑 ${extraGranted} 轮` : ''), L);
+    if (!L) {
+      // 单设备：渲染单设备报告（保持原行为）
+      lastRunAuditLog = auditLogLines.slice();
+      renderAutoReport({ success: true, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, runStartIndex, launchMode });
+    }
+    return { runStartIndex, serial };
   } catch (e) {
     const totalSec = ((performance.now() - t0) / 1000).toFixed(1);
-    autoLog('ERR', 'ABORT', `${e.message} · 已耗时 ${totalSec}s`);
-    setState('err', '自动循环中止：' + e.message);
-    lastRunAuditLog = auditLogLines.slice();
-    renderAutoReport({ success: false, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, error: e.message, runStartIndex, launchMode });
-  } finally {
-    stopProgressClock();
-    autoRunning = false;
-    autoAbortFlag = false;
-    $('autoStopBtn').disabled = true;
-    setAutoRunLayout(false);
-    if (autoLiveWasOn && $('liveToggle').checked) startLive();
+    autoLog('ERR', 'ABORT', `${e.message} · 已耗时 ${totalSec}s`, L);
+    if (!L) {
+      // 单设备：渲染中止报告
+      setState('err', '自动循环中止：' + e.message);
+      lastRunAuditLog = auditLogLines.slice();
+      renderAutoReport({ success: false, rounds: targetRounds, plannedRounds: rounds, extraRounds: extraGranted, weirdSec: weirdMs / 1000, totalSec, error: e.message, runStartIndex, launchMode });
+    }
+    throw e;  // 多设备：协调器 allSettled 捕获；单设备：协调器 finally 收尾
   }
 }
 
 // 单次测速：cold_start → 单一时钟打点 → 模板比对停表
 // 返回 { time, abnormal }；weirdMs 只作异常阈值，不中止
-async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) {
+async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, serial) {
   if (autoAbortFlag) throw new Error('用户中断');
   const body = { mode: launchMode, package: pkg };
+  if (serial) body.serial = serial;
   if (launchMode === 'tap') { body.x = x; body.y = y; }
   const isFirst = label === '首次';
   // 没有配置跳过弹窗模板时，直接匹配启动成功模板，不走跳过弹窗分支。
@@ -3034,7 +3174,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round) 
   const rising = j.marker_rising_edge !== false;
   const risingSeeded = j.marker_rising_seeded === true;
   autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'));
-  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips);
+  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial);
 }
 
 // ── 报告生成（页面内 + 可复制）──
@@ -3228,12 +3368,12 @@ function exportXlsx(ctx) {
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '汇总');
 
-  // Sheet2 样本明细（含 MAX/MIN 剔除标记、异常标记）
-  const rows = [['序号', '类型', '耗时(s)', '剔除标记', '异常', '采集时间', 'APK版本']];
+  // Sheet2 样本明细（含设备列、MAX/MIN 剔除标记、异常标记）
+  const rows = [['序号', '设备', '类型', '耗时(s)', '剔除标记', '异常', '采集时间', 'APK版本']];
   let fi = 0, si = 0;
   runRecords.forEach((r, i) => {
     const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
-    rows.push([n, r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
+    rows.push([n, r.deviceLabel || '', r.type === 'first' ? '首次' : r.type === 'second' ? '二次' : '手动',
       +r.time.toFixed(3), '', r.abnormal ? '异常' : '',
       new Date(r.date).toLocaleString('zh-CN'), (r.apk && r.apk.sha256_prefix) || '']);
   });
@@ -3384,6 +3524,36 @@ $('verifyLaunchBtn').addEventListener('click', async () => {
     btn.textContent = '▶ 启动测试';
   }
 });
+
+// ── 并行设备多选（阶段③）：勾选多台同时跑自动测速 ──
+let parallelDevChecked = {};  // serial -> bool（记忆勾选）
+function renderParallelDevices() {
+  const box = $('parallelDevices');
+  if (!box) return;
+  const ready = lastDeviceList.filter(d => d.state === 'device');
+  const cur = $('deviceSel').value;
+  if (!ready.length) { box.innerHTML = ''; return; }
+  box.innerHTML = ready.map(d => {
+    const on = (parallelDevChecked[d.serial] !== undefined) ? parallelDevChecked[d.serial] : (d.serial === cur);
+    const icon = d.platform === 'ios' ? '🍎' : '🤖';
+    const label = (d.model || d.serial).slice(0, 14);
+    return `<label class="par-dev flex-1 flex items-center justify-center gap-1 py-1 bg-surface-container-high border rounded text-[10px] font-mono font-bold cursor-pointer select-none transition ${on ? 'border-tertiary text-tertiary' : 'border-outline-variant text-on-surface-variant'}" data-serial="${escapeHtml(d.serial)}" title="勾选后与其它设备同时跑自动测速">
+      <input type="checkbox" data-serial="${escapeHtml(d.serial)}" data-platform="${escapeHtml(d.platform)}" data-label="${escapeHtml(label)}" ${on ? 'checked' : ''} class="hidden">${icon} ${escapeHtml(label)}</label>`;
+  }).join('');
+  box.querySelectorAll('input').forEach(cb => {
+    cb.addEventListener('change', () => {
+      parallelDevChecked[cb.dataset.serial] = cb.checked;
+      box.querySelectorAll('label').forEach(lb => {
+        if (lb.dataset.serial === cb.dataset.serial) {
+          lb.classList.toggle('border-tertiary', cb.checked);
+          lb.classList.toggle('text-tertiary', cb.checked);
+          lb.classList.toggle('border-outline-variant', !cb.checked);
+          lb.classList.toggle('text-on-surface-variant', !cb.checked);
+        }
+      });
+    });
+  });
+}
 
 // ── 启停按钮绑定 ──
 $('autoStartBtn').addEventListener('click', () => {
