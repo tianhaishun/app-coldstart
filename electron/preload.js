@@ -32,8 +32,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /**
    * 原生文件选择对话框。
+   * 主进程取得路径后会直接读文件内容返回 base64（避免渲染层 fetch(file://) 不稳定）。
    * @param {Object} options - { title, defaultPath, filters }
-   * @returns {Promise<{canceled: boolean, filePath?: string}>}
+   * @returns {Promise<{canceled: boolean, filePath?: string, name?: string,
+   *   size?: number, dataUrl?: string, readError?: string}>}
+   *   - dataUrl：文件 base64（成功读文件时）
+   *   - readError：主进程读文件失败原因（无 dataUrl 时）
    */
   openFileDialog: (options) => ipcRenderer.invoke('dialog:openFile', options),
 

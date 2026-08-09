@@ -1306,15 +1306,22 @@ $('browseApkBtn').addEventListener('click', async () => {
       ],
     });
     if (result.canceled || !result.filePath) return;
-    // 用 fetch 上传到后端（与拖拽上传同一套逻辑）
-    try {
-      const fileResp = await fetch(result.filePath);
-      const blob = await fileResp.blob();
-      const file = new File([blob], result.filePath.split(/[/\\]/).pop());
-      uploadApkFile(file);
-    } catch(e) {
-      // Electron 下 fetch('C:\\...') 可能被 webSecurity 拦截；回退到 input[type=file]
-      $('apkFileInput').click();
+    // 主进程已直接读回 base64（main.js dialog:openFile），转 blob 上传。
+    // 不再用 fetch(file://)——它在 webSecurity=true 下不稳定，曾导致偶现
+    // "点两次对话框 + 上传失败"。
+    if (result.dataUrl) {
+      try {
+        const dataResp = await fetch(result.dataUrl);
+        const blob = await dataResp.blob();
+        const file = new File([blob], result.name || result.filePath.split(/[/\\]/).pop());
+        uploadApkFile(file);
+      } catch(e) {
+        uiAlert('读取文件失败', (e && e.message) || '无法读取所选 APK 文件', 'error');
+      }
+    } else if (result.readError) {
+      uiAlert('读取文件失败', result.readError, 'error');
+    } else {
+      uiAlert('读取文件失败', '未知错误', 'error');
     }
   } else {
     $('apkFileInput').click();

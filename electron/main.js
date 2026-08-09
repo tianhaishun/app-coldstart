@@ -797,7 +797,24 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
   if (result.canceled || result.filePaths.length === 0) {
     return { canceled: true };
   }
-  return { canceled: false, filePath: result.filePaths[0] };
+  const filePath = result.filePaths[0];
+  // 主进程直接读取文件内容并返回 base64。
+  // 历史问题：渲染进程用 fetch('file://...') 读本地路径在 webSecurity=true 下
+  // 不稳定（偶发被拦 → 前端 catch 又弹一次文件对话框 + 传播为"上传失败"）。
+  // 改由主进程 fs 读取（file:// 路径在渲染层不可靠，主进程无此限制），
+  // 前端拿到 base64 转 blob 上传，彻底消除该竞态。
+  try {
+    const data = fs.readFileSync(filePath);
+    return {
+      canceled: false,
+      filePath,
+      name: path.basename(filePath),
+      size: data.length,
+      dataUrl: `data:application/vnd.android.package-archive;base64,${data.toString('base64')}`,
+    };
+  } catch (e) {
+    return { canceled: false, filePath, readError: String(e && e.message || e) };
+  }
 });
 
 /**
