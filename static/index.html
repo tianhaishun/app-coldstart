@@ -577,7 +577,7 @@
 
         <!-- 进度状态条：跑测中显示当前轮次/阶段/耗时 -->
         <div id="autoProgressBar" class="shrink-0">
-          <span class="seg">轮次 <b id="apbRound">—</b></span>
+          <span class="seg">轮次 <span id="apbRound" class="flex flex-wrap gap-1.5">—</span></span>
           <div class="bar-track"><div id="apbFill" class="bar-fill" style="width:0%"></div></div>
           <span class="seg">阶段 <b id="apbPhase">—</b></span>
           <span class="seg">已耗时 <b id="apbElapsed">0.0s</b></span>
@@ -683,19 +683,28 @@
     </div>
 
     <!-- 历史记录 -->
-    <div id="cardHistory" class="card glass-panel rounded border border-outline-variant overflow-hidden flex-1 flex flex-col">
+    <!-- min-h-0 关键：flex-1 撑满剩余空间时，缺 min-h-0 会让内容(min-content高度)
+         撑破卡片 → 历史记录底部越过客户端页面底部边框。用内联 style（Tailwind min-h-0
+         类不在编译产物 static.css 中，类名无效）。 -->
+    <div id="cardHistory" class="card glass-panel rounded border border-outline-variant overflow-hidden flex-1 flex flex-col" style="min-height:0">
       <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
         <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">📝 历史记录</span>
         <span><span id="histBadge" class="text-[10px] px-1.5 py-0.5 bg-surface-container-high rounded font-mono">0</span> <span class="text-[10px] text-on-surface-variant">条</span></span>
       </div>
-      <!-- 样本编辑区（常驻：随时可删样本并重算，不依赖自动循环——用户反馈的流程修复） -->
-      <div id="reportSamples" class="hidden border-b border-outline-variant"></div>
+      <!-- 设备筛选：按设备标签分别展示/统计冷启动时间（多设备各自计算，不混淆） -->
+      <div id="devFilterBar" class="hidden px-2 py-1 border-b border-outline-variant flex flex-wrap gap-1 items-center">
+        <span class="text-[9px] font-mono text-on-surface-variant mr-1">设备</span>
+        <button type="button" id="devFilterAll" class="px-1.5 py-0.5 text-[9px] font-mono border border-outline-variant rounded hover:text-primary" title="显示全部设备">全部</button>
+        <div id="devFilterChips" class="flex flex-wrap gap-1"></div>
+      </div>
+      <!-- 历史列表（统一渲染：序号/类型/时间/设备标签/MAX-MIN/异常 + ✎编辑 ✕删除，不再分两套） -->
       <div id="historyList" class="flex-1 overflow-y-auto p-1.5 flex flex-col gap-0.5 custom-scrollbar">
         <div class="text-center text-on-surface-variant py-5 text-xs">暂无记录 · 用自动测速采集</div>
       </div>
-      <div class="grid grid-cols-3 gap-1.5 p-2 border-t border-outline-variant shrink-0">
-        <button id="copyBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">复制报告</button>
-        <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary">导出 CSV</button>
+      <div class="grid grid-cols-4 gap-1.5 p-2 border-t border-outline-variant shrink-0">
+        <button id="copyBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="复制本轮测速报告文本">复制报告</button>
+        <button id="exportXlsxBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="导出 Excel（汇总/样本明细/审计日志 三个工作表）">导出 Excel</button>
+        <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="导出 CSV">导出 CSV</button>
         <button id="clearBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs">清空</button>
       </div>
     </div>
@@ -736,6 +745,57 @@ let config = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}');
 let layout = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
 let uiPrefs = JSON.parse(localStorage.getItem(UI_PREFS_KEY) || '{}');
 let records = JSON.parse(localStorage.getItem(recordsKey(currentProjectId)) || '[]');
+// 设备筛选：Set<serial>；null=全部设备（统计/历史/样本/报告都按此过滤，互不混淆）
+let deviceFilter = null;
+function viewRecords() {
+  if (!deviceFilter || !deviceFilter.size) return records;
+  return records.filter(r => deviceFilter.has(r.device));
+}
+function deviceFilterOptions() {
+  const map = new Map();
+  records.forEach(r => {
+    if (r.device && !map.has(r.device)) map.set(r.device, r.deviceLabel || r.device);
+  });
+  return [...map.entries()];
+}
+// 渲染历史卡设备筛选 chip（点选/再点取消；「全部」清空筛选）
+function renderDeviceFilter() {
+  const bar = $('devFilterBar');
+  const chipsBox = $('devFilterChips');
+  if (!bar || !chipsBox) return;
+  const opts = deviceFilterOptions();
+  // 修剪陈旧 serial：某设备记录全被删后，筛选里残留的 serial 不再生效
+  if (deviceFilter && deviceFilter.size) {
+    const valid = new Set(opts.map(([s]) => s));
+    deviceFilter = new Set([...deviceFilter].filter(s => valid.has(s)));
+    if (!deviceFilter.size) deviceFilter = null;
+  }
+  if (!opts.length) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  const allBtn = $('devFilterAll');
+  if (allBtn) {
+    const noFilter = !deviceFilter || !deviceFilter.size;
+    allBtn.classList.toggle('text-primary', noFilter);
+    allBtn.classList.toggle('border-primary', noFilter);
+  }
+  chipsBox.innerHTML = opts.map(([serial, label]) => {
+    const on = deviceFilter && deviceFilter.has(serial);
+    return `<button type="button" data-serial="${escapeHtml(serial)}" class="px-1.5 py-0.5 text-[9px] font-mono border rounded ${on ? 'text-primary border-primary' : 'border-outline-variant text-on-surface-variant'}" title="${escapeHtml(label)}">${escapeHtml(String(label).slice(0, 12))}</button>`;
+  }).join('');
+  chipsBox.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => {
+      const serial = b.dataset.serial;
+      if (!deviceFilter) deviceFilter = new Set();
+      if (deviceFilter.has(serial)) deviceFilter.delete(serial);
+      else deviceFilter.add(serial);
+      if (!deviceFilter.size) deviceFilter = null;
+      renderDeviceFilter(); renderHistory(); renderStats();
+    });
+  });
+  if (allBtn) {
+    allBtn.onclick = () => { deviceFilter = null; renderDeviceFilter(); renderHistory(); renderStats(); };
+  }
+}
 let ocrResult = null;
 let deviceReady = false;
 let tick = 0, ocrTick = 0;
@@ -1081,7 +1141,8 @@ async function loadProjectById(pid, { clearApk = true } = {}) {
     currentProjectId = '';
     localStorage.removeItem(PROJECT_ID_KEY);
     records = JSON.parse(localStorage.getItem(recordsKey('')) || '[]');
-    renderHistory(); renderStats();
+    deviceFilter = null;  // 切桶后重置设备筛选（M3：旧项目筛选的 serial 不应过滤新桶）
+    renderDeviceFilter(); renderHistory(); renderStats();
     return;
   }
   const r = await fetch(API + '/api/projects/' + encodeURIComponent(pid));
@@ -1111,7 +1172,8 @@ async function loadProjectById(pid, { clearApk = true } = {}) {
       info.className = 'mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed';
     }
   }
-  renderHistory(); renderStats();
+  deviceFilter = null;  // 切桶后重置设备筛选（M3：旧项目筛选的 serial 不应过滤新项目）
+  renderDeviceFilter(); renderHistory(); renderStats();
   clearProjectDirty();
   refreshAutoChecklist();
   setState('ok', `已加载项目：${j.name}`);
@@ -1196,7 +1258,8 @@ $('projectDelBtn').addEventListener('click', async () => {
     setMarkerPreviewFromProject({ marker_ready: false });
     renderSkipList([]);
     showApkReminder('');
-    renderHistory(); renderStats();
+    deviceFilter = null;  // 删除项目后重置设备筛选（M3）
+    renderDeviceFilter(); renderHistory(); renderStats();
     setState('', '项目已删除');
   } catch (e) {
     uiAlert('删除失败', e.message, 'error');
@@ -1210,7 +1273,8 @@ $('projectSel').addEventListener('change', async () => {
     currentProjectId = '';
     localStorage.removeItem(PROJECT_ID_KEY);
     records = JSON.parse(localStorage.getItem(recordsKey('')) || '[]');
-    renderHistory(); renderStats();
+    deviceFilter = null;  // 切桶后重置设备筛选（M3）
+    renderDeviceFilter(); renderHistory(); renderStats();
     return;
   }
   if (!await uiConfirm('切换项目会加载该项目的模板与配置。', '未点「保存」的当前模板改动会丢失。\n并请重新上传 APK。\n\n继续？', 'question')) {
@@ -1736,7 +1800,7 @@ function stopTimer() {
 $('mainBtn').addEventListener('click', () => running ? stopTimer() : startTimer());
 
 // ── 历史/统计 ──
-function saveRecords() { localStorage.setItem(recordsKey(currentProjectId), JSON.stringify(records)); }
+function saveRecords() { localStorage.setItem(recordsKey(currentProjectId), JSON.stringify(records)); renderDeviceFilter(); }
 
 function showApkReminder(hint) {
   const info = $('apkInfo');
@@ -1757,12 +1821,14 @@ function showApkUploaded(orig, sizeMb) {
   currentApkHint = orig;
 }
 function computeStats() {
-  if (!records.length) return { avg: null, max: null, min: null, maxIdx: -1, minIdx: -1 };
-  const t = records.map(r => r.time);
+  // 设备筛选：只统计当前选中设备的数据（多设备各自独立计算，不混淆）
+  const vr = viewRecords();
+  if (!vr.length) return { avg: null, max: null, min: null, maxIdx: -1, minIdx: -1 };
+  const t = vr.map(r => r.time);
   const max = Math.max(...t), min = Math.min(...t);
   const maxIdx = t.indexOf(max), minIdx = t.indexOf(min);
   let avg;
-  if (records.length >= 3) {
+  if (vr.length >= 3) {
     const rest = t.filter((_, i) => i !== maxIdx && i !== minIdx);
     avg = rest.reduce((a, b) => a + b, 0) / rest.length;
   } else {
@@ -1777,7 +1843,7 @@ function computeStats() {
 function computeStatsGrouped() {
   const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
   const first = [], second = [];
-  records.forEach((r, i) => {
+  viewRecords().forEach((r, i) => {
     const displayIdx = i + 1;
     // 分组以记录真实类型为准（自动记录带 type；测速项可选「仅首次/仅二次」后
     // 序号奇偶不再与类型交替，必须用 type）。手动记录无 type → 回退序号奇偶
@@ -1837,13 +1903,14 @@ function computeStatsGrouped() {
 }
 
 function renderStats() {
+  const vr = viewRecords();
   const s = computeStats();
-  // 老的一锅烩统计（保留作对照）
-  $('statCount').textContent = records.length;
+  // 老的一锅烩统计（保留作对照；按当前设备筛选）
+  $('statCount').textContent = vr.length;
   $('statMax').innerHTML = s.max !== null ? fmt(s.max) + '<span class="unit">s</span>' : '—';
   $('statMin').innerHTML = s.min !== null ? fmt(s.min) + '<span class="unit">s</span>' : '—';
   $('statAvg').innerHTML = s.avg !== null ? fmt(s.avg) + '<span class="unit">s</span>' : '—<span class="unit">s</span>';
-  $('statsHint').textContent = records.length === 0 ? '' : records.length < 3 ? '至少 3 条才去极值' : `去极值 · 中间 ${records.length-2} 个`;
+  $('statsHint').textContent = vr.length === 0 ? '' : vr.length < 3 ? '至少 3 条才去极值' : `去极值 · 中间 ${vr.length-2} 个`;
 
   // 新的分组统计（首次/二次）
   const gs = computeStatsGrouped();
@@ -1892,25 +1959,29 @@ function renderStats() {
 // 流程修复：之前样本列表只在 renderAutoReport（自动循环结束）时渲染，
 // 用户反馈「要先跑循环才能删历史记录」不合理——改为页面加载即渲染全部样本。
 function renderSampleList() {
-  const samplesBox = $('reportSamples');
+  const samplesBox = $('historyList');
   if (!samplesBox) return;
-  if (!records.length) { samplesBox.classList.add('hidden'); return; }
-  samplesBox.classList.remove('hidden');
-  // 分组剔除标记（MAX/MIN，n>=3 时每组剔 1 最大 + 1 最小，与明细一致）
+  const vr = viewRecords();
+  if (!vr.length) {
+    samplesBox.innerHTML = '<div class="empty-msg">' + (deviceFilter && deviceFilter.size ? '该设备暂无记录 · 切换设备筛选' : '暂无记录 · 用自动测速采集') + '</div>';
+    return;
+  }
+  // 分组剔除标记（MAX/MIN，n>=3 时每组剔 1 最大 + 1 最小，与明细一致；按过滤后视图）
   const extremeTag = new Map();
   function markExtreme(list) {
     const vals = list.map(r => r.time);
     if (vals.length >= 3) {
-      const riMax = records.indexOf(list[vals.indexOf(Math.max(...vals))]);
-      const riMin = records.indexOf(list[vals.indexOf(Math.min(...vals))]);
+      const riMax = vr.indexOf(list[vals.indexOf(Math.max(...vals))]);
+      const riMin = vr.indexOf(list[vals.indexOf(Math.min(...vals))]);
       if (riMax >= 0) extremeTag.set(riMax, 'max');
       if (riMin >= 0) extremeTag.set(riMin, 'min');
     }
   }
-  markExtreme(records.filter(r => r.type === 'first'));
-  markExtreme(records.filter(r => r.type === 'second'));
+  markExtreme(vr.filter(r => r.type === 'first'));
+  markExtreme(vr.filter(r => r.type === 'second'));
   let fi = 0, si = 0;
-  const rows = records.map((r, i) => {
+  const rows = vr.map((r, i) => {
+    const realIdx = records.indexOf(r);  // 映射回全量 records 真实索引（编辑/删除用）
     const isOdd = (i + 1) % 2 === 1;
     const rType = r.type || (isOdd ? 'first' : 'second');  // 与 computeStatsGrouped 同规则
     const n = r.type === 'first' ? ++fi : r.type === 'second' ? ++si : (i + 1);
@@ -1923,24 +1994,23 @@ function renderSampleList() {
     const devTag = r.deviceLabel ? `<span class="text-[9px] text-on-surface-variant ml-1">${escapeHtml(String(r.deviceLabel).slice(0, 10))}</span>` : '';
     // 时间可编辑（不在测速中也能改）：默认显示秒，点 ✎ 变输入框，改写秒数后回车/失焦保存并重算
     return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}` +
-      `<span class="time"><span class="t-val" data-ridx="${i}">${fmt(r.time)}</span>s</span>` +
-      `<input class="t-edit hidden" data-ridx="${i}" type="number" step="0.001" min="0" value="${fmt(r.time)}" style="width:52px;font-size:10px">` +
+      `<span class="time"><span class="t-val" data-ridx="${realIdx}">${fmt(r.time)}</span>s</span>` +
+      `<input class="t-edit hidden" data-ridx="${realIdx}" type="number" step="0.001" min="0" value="${fmt(r.time)}" style="width:52px;font-size:10px">` +
       `${devTag}${tag}${abn}` +
-      `<button class="edit" data-ridx="${i}" title="编辑该样本时间并重算">✎</button>` +
-      `<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
+      `<button class="edit" data-ridx="${realIdx}" title="编辑该样本时间并重算">✎</button>` +
+      `<button class="del" data-ridx="${realIdx}" title="删除该样本并重算">✕</button></div>`;
   }).join('');
   samplesBox.innerHTML =
-    `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">样本 ${records.length} 条（首次 ${records.filter(r => r.type === 'first').length} + 二次 ${records.filter(r => r.type === 'second').length}）· 点 ✎ 编辑时间 / ✕ 删除后自动重算统计与报告</div>` +
-    `<div class="p-1.5 flex flex-col gap-0.5 custom-scrollbar max-h-[140px] overflow-y-auto">${rows}</div>`;
+    `<div class="px-1.5 pt-1 text-[9px] font-mono text-on-surface-variant">${vr.length} 条（首次 ${vr.filter(r => r.type === 'first').length} + 二次 ${vr.filter(r => r.type === 'second').length}）· 点 ✎ 编辑时间 / ✕ 删除后自动重算</div>` +
+    `<div class="flex flex-col gap-0.5">${rows}</div>`;
 
-  // 编辑保存：校验为正数秒数 → 转回毫秒写回 → 重算统计/报告
+  // 编辑保存：校验为正数秒数 → 转回毫秒写回 → 重算统计/报告（按真实 records 索引）
   const applyEdit = (ri, inputEl, valEl) => {
     if (!(ri >= 0 && ri < records.length)) return;
     const sec = parseFloat(inputEl.value);
     if (!(sec > 0)) { uiAlert('无效时间', '请输入大于 0 的秒数', 'warning'); inputEl.value = fmt(records[ri].time); return; }
-    const old = records[ri].time;
     records[ri].time = Math.round(sec * 1000);   // 秒 → 毫秒
-    saveRecords(); renderHistory(); renderStats();
+    saveRecords(); renderHistory(); renderStats(); renderDeviceFilter();
     if (lastReportCtx) renderAutoReport(lastReportCtx);
     if (valEl) valEl.textContent = fmt(records[ri].time);
   };
@@ -1961,55 +2031,17 @@ function renderSampleList() {
     const ri = parseInt(b.dataset.ridx);
     if (!(ri >= 0 && ri < records.length)) return;
     records.splice(ri, 1);
-    saveRecords(); renderHistory(); renderStats();
+    saveRecords(); renderHistory(); renderStats(); renderDeviceFilter();
     if (lastReportCtx) renderAutoReport(lastReportCtx);  // 有报告时同步重算
   }));
 }
 
 function renderHistory() {
-  const el = $('historyList');
-  $('histBadge').textContent = records.length;
-  if (!records.length) {
-    el.innerHTML = '<div class="empty-msg">暂无记录 · 用自动测速采集</div>';
-    return;
-  }
-  const s = computeStats();
-  const gs = computeStatsGrouped();
-  // 建一个"序号 → 是否被分组剔除"的查找表
-  const droppedMap = {};  // displayIdx -> 'max_first' / 'min_first' / 'max_second' / 'min_second'
-  if (gs.first && gs.first.dropped_max) droppedMap[gs.first.dropped_max.idx] = 'max_first';
-  if (gs.first && gs.first.dropped_min) droppedMap[gs.first.dropped_min.idx] = 'min_first';
-  if (gs.second && gs.second.dropped_max) droppedMap[gs.second.dropped_max.idx] = 'max_second';
-  if (gs.second && gs.second.dropped_min) droppedMap[gs.second.dropped_min.idx] = 'min_second';
-
-  el.innerHTML = records.map((r, i) => {
-    const displayIdx = i + 1;
-    const isOdd = displayIdx % 2 === 1;
-    // 与 computeStatsGrouped 同规则：自动记录用真实 type（仅首次/仅二次调试时
-    // 序号奇偶不再交替），手动记录回退奇偶。typeTag 只由固定常量生成，无用户数据。
-    const rType = r.type || (isOdd ? 'first' : 'second');
-    const typeTag = rType === 'first'
-      ? '<span class="tag-type tag-first">首</span>'
-      : '<span class="tag-type tag-second">二</span>';
-    // 分组剔除标记（优先显示，比老的一锅烩 MAX/MIN 更准确）
-    let tag = '';
-    const drop = droppedMap[displayIdx];
-    if (drop === 'max_first' || drop === 'max_second') tag = '<span class="tag max">MAX</span>';
-    else if (drop === 'min_first' || drop === 'min_second') tag = '<span class="tag min">MIN</span>';
-    // 老的一锅烩标记（如果分组没剔但一锅烩剔了，显示小字）
-    else if (records.length >= 3) {
-      if (i === s.maxIdx) tag = '<span class="tag max" style="opacity:.5" title="全部一起算时剔除">MAX*</span>';
-      else if (i === s.minIdx) tag = '<span class="tag min" style="opacity:.5" title="全部一起算时剔除">MIN*</span>';
-    }
-    const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可稍后决定是否删除">异常</span>' : '';
-    const devTag = r.deviceLabel ? `<span class="text-[9px] text-on-surface-variant ml-1">${escapeHtml(String(r.deviceLabel).slice(0, 10))}</span>` : '';
-    return `<div class="hist-item"><span class="idx">#${String(displayIdx).padStart(2,'0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${devTag}${tag}${abn}<button class="del" data-idx="${i}">✕</button></div>`;
-  }).reverse().join('');
-  el.querySelectorAll('.del').forEach(b => b.addEventListener('click', e => {
-    const idx = parseInt(e.target.dataset.idx);
-    records.splice(idx, 1); saveRecords(); renderHistory(); renderStats();
-  }));
-  renderSampleList();  // 样本编辑区同步（常驻）
+  // 统一由 renderSampleList 渲染（序号/类型/时间/设备标签/MAX-MIN/异常 + ✎编辑 ✕删除），
+  // 这里只维护 badge 计数，避免两套渲染（此前 reportSamples + historyList 重复显示同批数据）。
+  const vr = viewRecords();
+  $('histBadge').textContent = vr.length;
+  renderSampleList();
 }
 function removeLast() { if (!records.length) return; records.pop(); saveRecords(); renderHistory(); renderStats(); }
 async function clearAll() {
@@ -2096,10 +2128,10 @@ function buildReport() {
   L.push(`应用包名    ${$('apkPkg').value || '—'}`);
   L.push('');
 
-  // 分组统计：首次冷启动
+  // 分组统计：首次冷启动（数据源=当前设备筛选视图，与统计口径一致）
   L.push(`── 首次冷启动（${gs.counts.first} 次） ──`);
   if (gs.first) {
-    records.forEach((r, i) => {
+    viewRecords().forEach((r, i) => {
       if ((i+1) % 2 !== 1) return;  // 只看奇数
       let tag = '';
       if (gs.first.dropped_max && gs.first.dropped_max.idx === i+1) tag = '   ← 最大（剔除）';
@@ -2118,7 +2150,7 @@ function buildReport() {
   // 分组统计：二次冷启动
   L.push(`── 二次冷启动（${gs.counts.second} 次） ──`);
   if (gs.second) {
-    records.forEach((r, i) => {
+    viewRecords().forEach((r, i) => {
       if ((i+1) % 2 !== 0) return;  // 只看偶数
       let tag = '';
       if (gs.second.dropped_max && gs.second.dropped_max.idx === i+1) tag = '   ← 最大（剔除）';
@@ -2155,6 +2187,10 @@ $('copyBtn').addEventListener('click', () => {
     b.textContent = '✓ 已复制'; setTimeout(() => b.textContent = t, 1200);
   });
 });
+$('exportXlsxBtn').addEventListener('click', () => {
+  if (!lastReportCtx) { uiAlert('暂无测速报告', '请先完成一次自动循环测速，再导出 Excel', 'warning'); return; }
+  exportXlsx(lastReportCtx);
+});
 $('csvBtn').addEventListener('click', () => {
   if (!records.length) return;
   const s = computeStats();
@@ -2178,7 +2214,7 @@ $('csvBtn').addEventListener('click', () => {
   if (gs.first && gs.first.dropped_min) droppedMap[gs.first.dropped_min.idx] = '剔除(首次最小)';
   if (gs.second && gs.second.dropped_max) droppedMap[gs.second.dropped_max.idx] = '剔除(二次最大)';
   if (gs.second && gs.second.dropped_min) droppedMap[gs.second.dropped_min.idx] = '剔除(二次最小)';
-  records.forEach((r, i) => {
+  viewRecords().forEach((r, i) => {
     const displayIdx = i + 1;
     // 类型以真实 type 为准（自动记录；手动记录回退奇偶），与 computeStatsGrouped 同规则
     const type = r.type === 'first' ? '首次'
@@ -2508,22 +2544,69 @@ function renderLogTabs(devs) {
 function renderCombinedLog() {
   const el = $('autoProgress');
   if (!el) return;
+  // 记录各列滚动位置（用户上滚查看历史时，重建后恢复位置，避免跳回顶部）
+  const prevScrolls = [];
+  if (el.children && el.children.length) {
+    for (const c of el.children) if (c.scrollTop !== undefined) prevScrolls.push(c.scrollTop);
+  }
+  const prevElTop = el.scrollTop;
   el.innerHTML = '';
-  // 单设备模式：走全局 auditLogLines（兼容老逻辑）
+  el.style.display = '';
+  // 用户是否已主动上滚（查看历史时不打扰，新日志仅标记）
+  const userScrolled = el.classList.contains('user-scrolled');
+  // 单设备模式：走全局 auditLogLines（兼容老逻辑），单列无隔线
   if (!selectedLogDevices.size) {
+    el.style.flexDirection = '';
     for (const line of auditLogLines) appendLogLine(el, line, '');
-    el.scrollTop = el.scrollHeight;
+    if (!userScrolled) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    else el.scrollTop = prevElTop;
     return;
   }
   const serials = [...selectedLogDevices];
-  serials.forEach(s => {
+  if (serials.length <= 1) {
+    el.style.flexDirection = '';
+    const s = serials[0];
     const bucket = devLogs[s];
-    if (!bucket || !bucket.lines) return;
-    const label = logDevLabels[s] || bucket.label || s;
-    const prefix = serials.length > 1 ? `[${label.slice(0, 8)}] ` : '';
-    for (const line of bucket.lines) appendLogLine(el, line, prefix);
+    const label = logDevLabels[s] || (bucket && bucket.label) || s;
+    for (const line of (bucket ? bucket.lines : [])) appendLogLine(el, line, '');
+    if (!userScrolled) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    else el.scrollTop = prevElTop;
+    return;
+  }
+  // 多列：flex row 并排，每列独立滚动，列间 1px 隔线
+  el.style.display = 'flex';
+  el.style.flexDirection = 'row';
+  el.style.gap = '0';
+  const cols = [];
+  serials.forEach((s, idx) => {
+    const bucket = devLogs[s];
+    const label = logDevLabels[s] || (bucket && bucket.label) || s;
+    const col = document.createElement('div');
+    col.style.flex = '1 1 0';
+    col.style.minWidth = '0';
+    col.style.overflowY = 'auto';
+    col.style.maxHeight = '100%';
+    if (idx > 0) { col.style.borderLeft = '1px solid var(--outline-variant, #333)'; col.style.paddingLeft = '6px'; }
+    const head = document.createElement('div');
+    head.style.cssText = 'position:sticky;top:0;background:var(--surface-container-lowest,#1a1a2e);font-size:0.7rem;font-weight:bold;color:var(--primary);padding:2px 4px;border-bottom:1px dashed var(--outline-variant,#333);z-index:1;';
+    head.textContent = `▍${label.slice(0, 14)}`;
+    col.appendChild(head);
+    for (const line of (bucket ? bucket.lines : [])) appendLogLine(col, line, '');
+    el.appendChild(col);
+    cols.push(col);
   });
-  el.scrollTop = el.scrollHeight;
+  // 强制每列滚到底（最新日志可见）；用户上滚时恢复原位置（不跳顶）
+  if (!userScrolled) {
+    requestAnimationFrame(() => {
+      cols.forEach(c => { c.scrollTop = c.scrollHeight; });
+      el.scrollTop = el.scrollHeight;
+    });
+  } else {
+    requestAnimationFrame(() => {
+      cols.forEach((c, ci) => { if (prevScrolls[ci] !== undefined) c.scrollTop = prevScrolls[ci]; });
+      el.scrollTop = prevElTop;
+    });
+  }
 }
 
 // 追加一行日志到容器（带可选设备前缀）
@@ -2561,33 +2644,32 @@ function autoLog(level, phase, msg, serial) {
   } else {
     auditLogLines.push(plain);
   }
-  // 统一重绘到 #autoProgress（多选拼接 / 单设备全局）
+  // 统一重绘到 #autoProgress（多列 / 单设备全局），内部自动贴底到最新日志
   renderCombinedLog();
 
-  // 底部固定最新：只有当用户没主动上滚查看历史时，才自动贴底
-  const el = $('autoProgress');
-  if (!el) return;
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-  if (nearBottom) {
-    el.classList.remove('user-scrolled');
-    // rAF 等 DOM 渲染后再滚，避免 flex 重算高度导致滚不到底
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  } else {
-    el.classList.add('user-scrolled');
-  }
-
   // 同步进度条阶段（多设备时跟随任一选中设备）
-  if (!serial || selectedLogDevices.has(serial)) setProgressPhase(ph, text);
+  if (!serial || selectedLogDevices.has(serial)) setProgressPhase(ph, text, serial);
 }
 
-// 用户手动滚回底部 → 清除「未自动滚动」标记
+// 用户滚动监听（外层 + 内部列）：
+//  - 滚到底部 → 清除 user-scrolled（恢复自动贴底）
+//  - 主动上滚 → 标记 user-scrolled（暂停自动贴底，新日志不打扰）
 (() => {
   const el = $('autoProgress');
   if (!el) return;
   el.addEventListener('scroll', () => {
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
     if (nearBottom) el.classList.remove('user-scrolled');
+    else if (el.scrollTop > 0) el.classList.add('user-scrolled');
   });
+  el.addEventListener('scroll', (e) => {
+    const t = e.target;
+    if (t && t !== el && t.scrollTop !== undefined) {
+      const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 30;
+      if (nearBottom) el.classList.remove('user-scrolled');
+      else if (t.scrollTop > 0) el.classList.add('user-scrolled');
+    }
+  }, true);
 })();
 
 // ── 进度条：跟踪当前轮次 / 阶段 / 耗时 ──
@@ -2597,6 +2679,11 @@ let _progressTimerId = null;
 function startProgressClock(totalRounds) {
   _progressStartTs = performance.now();
   _progressTotalRounds = totalRounds || 0;
+  // 新循环开始时清空每设备轮次映射（避免上一轮残留）
+  for (const k in progressByDevice) delete progressByDevice[k];
+  // 重置日志贴底状态（上一轮上滚查看不残留到新一轮）
+  const ap = document.getElementById('autoProgress');
+  if (ap) ap.classList.remove('user-scrolled');
   stopProgressClock();
   _progressTimerId = setInterval(() => {
     const el = $('apbElapsed');
@@ -2607,15 +2694,32 @@ function startProgressClock(totalRounds) {
 function stopProgressClock() {
   if (_progressTimerId) { clearInterval(_progressTimerId); _progressTimerId = null; }
 }
-function setProgressPhase(ph, text) {
+// 每设备当前轮次映射：serial -> 当前轮（多设备并行各自推进，进度按设备分开显示）
+const progressByDevice = {};
+function setProgressPhase(ph, text, serial) {
   // 从 phase（如 R3-2ND）和 text 推断进度
   if ($('apbPhase')) $('apbPhase').textContent = ph === '—' ? '—' : ph;
   // 解析轮次：R1 / R3-1ST / R3-2ND
   const m = String(ph).match(/R(\d+)/);
   if (m && _progressTotalRounds > 0) {
     const cur = parseInt(m[1]);
-    if ($('apbRound')) $('apbRound').textContent = `${cur}/${_progressTotalRounds}`;
-    const pct = Math.min(100, Math.round((cur - 0.5) / _progressTotalRounds * 100));
+    if (serial) progressByDevice[serial] = cur;
+    const el = $('apbRound');
+    if (el) {
+      const devs = Object.entries(progressByDevice);
+      if (devs.length <= 1) {
+        // 单设备：保持简洁「3/5」
+        el.innerHTML = `<b>${cur}/${_progressTotalRounds}</b>`;
+      } else {
+        // 多设备：每台显示「设备名 3/5」，谁快谁慢一目了然
+        el.innerHTML = devs.map(([s, c]) =>
+          `<span class="flex items-center gap-0.5"><span class="text-[9px] text-on-surface-variant">${escapeHtml((logDevLabels[s] || s).slice(0, 10))}</span><b>${c}/${_progressTotalRounds}</b></span>`
+        ).join('');
+      }
+    }
+    // 进度条取当前最大轮次推进（至少一台到该轮；多设备各台快慢不同，这是可接受近似）
+    const maxCur = Math.max(cur, ...Object.values(progressByDevice));
+    const pct = Math.min(100, Math.round((maxCur - 0.5) / _progressTotalRounds * 100));
     const fill = $('apbFill');
     if (fill) fill.style.width = pct + '%';
   }
@@ -2841,13 +2945,13 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
   const doSkips = checkSkips === true;
   autoLog('INFO', 'WAIT', doSkips
     ? '开始轮询识别：先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
-    : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表');
+    : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表', serial);
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
     if (!warnedWeird && weirdMs > 0 && elapsed > weirdMs) {
       warnedWeird = true;
-      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`);
+      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`, serial);
     }
     try {
       const qs = (doSkips ? '?' : '?check_skips=false&') + (serial ? 'serial=' + encodeURIComponent(serial) : '');
@@ -2862,18 +2966,18 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
         if (j.skipped) {
           const cx = j.skip_cx != null ? Number(j.skip_cx).toFixed(3) : '—';
           const cy = j.skip_cy != null ? Number(j.skip_cy).toFixed(3) : '—';
-          autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`);
+          autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`, serial);
           if (gapMs > 0) await sleep(Math.max(gapMs, 200));
           continue;
         }
         if (j.error && elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`);
+          autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`, serial);
         }
         // 审核 F-P1-4：分辨率与设模板时不一致 → 警告一次（仅提示，不停表）
         if (j.res_mismatch && !warnedResMismatch) {
           warnedResMismatch = true;
-          autoLog('WARN', 'WAIT', '⚠ 设备分辨率已变化（模板按旧分辨率设定），识别可能不准——建议停止后重设启动模板');
+          autoLog('WARN', 'WAIT', '⚠ 设备分辨率已变化（模板按旧分辨率设定），识别可能不准——建议停止后重设启动模板', serial);
         }
         if (j.hit) {
           // 终点补偿：成功画面在「截图命令开始」时已在屏上；拿到图之前的 shot_ms 不应计入冷启
@@ -2886,7 +2990,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
           // 异常按记录时间判断（已扣命中帧截图耗时），与表格/报告口径一致。
           // 不能按墙钟 rawMs 判断：截图偏慢时会出现「记录 14.273s < 阈值 15s 却被标异常」的误标。
           const abnormal = weirdMs > 0 && total >= weirdMs;
-          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`);
+          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`, serial);
           return { time: total, abnormal, raw_ms: rawMs, shot_ms: shotCost };
         }
         // 未确认：每 2s 打进度；写清当前在等什么
@@ -2900,19 +3004,19 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
           else if (j.above && !j.rising_ready) reason = `启动模板已过阈值（${confPct}），但还在等上升沿：需要先出现「低于阈值」的一帧，再升上来（防桌面残留误停）`;
           else if (j.above) reason = `启动模板已过阈值（${confPct}），连续确认中 ${streak}/${need} 帧`;
           else reason = `启动模板置信度 ${confPct}（未过阈值）· 继续截屏比对`;
-          autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`);
+          autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`, serial);
         }
       } else {
         if (elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`);
+          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`, serial);
         }
       }
     } catch (e) {
       console.warn('自动检测轮询失败（将继续重试）:', e.message);
       if (elapsed - lastLogAt > 2000) {
         lastLogAt = elapsed;
-        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`);
+        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`, serial);
       }
     }
     if (gapMs > 0) await sleep(gapMs);
@@ -3057,10 +3161,22 @@ async function runAutoLoop() {
       L.push(`  二次 ${sm != null ? fmt(sm) + 's' : '—'}（n=${seconds.length}）`);
       L.push('');
     });
-    L.push('样本明细 / 审计日志 → 点报告卡右上角「Excel」导出（汇总 · 样本明细 · 审计日志）');
-    $('autoReport').textContent = L.join('\n');
-    $('cardReport').classList.remove('hidden');
-    $('cardReport').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    L.push('样本明细 / 审计日志 → 点历史记录下方「导出报告 Excel」（汇总 · 样本明细 · 审计日志）');
+    // 报告不在前端页面展示，但必须设置 lastReportCtx 供「导出 Excel」使用（S1）：
+    // 多设备分支需显式调 renderAutoReport，否则导出按钮永远「暂无测速报告」。
+    const minStartIdx = Math.min(...results.map(r => (r.status === 'fulfilled' && r.value && typeof r.value.runStartIndex === 'number') ? r.value.runStartIndex : Number.MAX_SAFE_INTEGER));
+    const runStartIndex = isFinite(minStartIdx) ? minStartIdx : 0;
+    renderAutoReport({
+      success: true,
+      rounds: parseInt($('autoRounds').value) || 5,
+      plannedRounds: parseInt($('autoRounds').value) || 5,
+      extraRounds: 0,
+      weirdSec: (parseFloat($('autoTimeout').value) || 35),
+      totalSec,
+      runStartIndex,
+      launchMode: $('launchMode').value,
+      multi: true,
+    });
   } finally {
     stopProgressClock();
     autoRunning = false;
@@ -3253,7 +3369,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   // 没有配置跳过弹窗模板时，直接匹配启动成功模板，不走跳过弹窗分支。
   const checkSkips = isFirst && skipTemplateCount > 0;  // 仅首次且确有模板时扫描跳过弹窗；二次不扫
   const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
-  autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…');
+  autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…', serial);
   const r = await apiFetch(API + '/api/cold_start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -3271,14 +3387,13 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   const confNeed = j.marker_confirm_frames != null ? j.marker_confirm_frames : 1;
   const rising = j.marker_rising_edge !== false;
   const risingSeeded = j.marker_rising_seeded === true;
-  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'));
+  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'), serial);
   return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial);
 }
 
-// ── 报告生成（页面内 + 可复制）──
+// ── 报告生成（数据供导出，不在页面展示）──
 function renderAutoReport(ctx) {
   const el = $('autoReport');
-  const card = $('cardReport');
   const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
   const platformLabel = platform === 'ios' ? 'iOS（首次 -1s）' : 'GP（安卓）';
   const now = new Date().toLocaleString('zh-CN', { hour12: false });
@@ -3402,8 +3517,7 @@ function renderAutoReport(ctx) {
   }
 
   el.textContent = L.join('\n');
-  card.classList.remove('hidden');
-  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  // 报告不在前端页面展示（需求）：只保留 autoReport 文本 + lastReportCtx 供导出按钮读取
 
   renderSampleList();  // 样本编辑区常驻渲染（历史卡，随时可删样本，不依赖本报告）
   lastReportCtx = ctx;
@@ -3876,6 +3990,8 @@ async function setSkipFromPoint(cx, cy) {
 
 (async function init() {
   await checkHealth();
+  // 页面加载即渲染历史/样本/统计/设备筛选（含 localStorage 已有数据）
+  renderDeviceFilter(); renderHistory(); renderStats();
   const devs = await refreshDevices();
   // 自动选中设备：优先用上次保存的 serial，否则取第一台可用设备
   // 这是测试工具——绝大多数情况只连一台机器，不该让用户每次手动选
