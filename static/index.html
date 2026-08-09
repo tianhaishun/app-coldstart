@@ -1897,13 +1897,44 @@ function renderSampleList() {
       : '<span class="tag-type tag-second">二</span>';
     const tag = extremeTag.has(i)
       ? `<span class="tag ${extremeTag.get(i)}">${extremeTag.get(i) === 'max' ? 'MAX' : 'MIN'}</span>` : '';
-    const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除后自动重算">异常</span>' : '';
+    const abn = r.abnormal ? '<span class="tag abn" title="超过异常阈值，可点 ✕ 删除或 ✎ 改时间后自动重算">异常</span>' : '';
     const devTag = r.deviceLabel ? `<span class="text-[9px] text-on-surface-variant ml-1">${escapeHtml(String(r.deviceLabel).slice(0, 10))}</span>` : '';
-    return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}<span class="time">${fmt(r.time)}s</span>${devTag}${tag}${abn}<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
+    // 时间可编辑（不在测速中也能改）：默认显示秒，点 ✎ 变输入框，改写秒数后回车/失焦保存并重算
+    return `<div class="hist-item"><span class="idx">#${String(n).padStart(2, '0')}</span>${typeTag}` +
+      `<span class="time"><span class="t-val" data-ridx="${i}">${fmt(r.time)}</span>s</span>` +
+      `<input class="t-edit hidden" data-ridx="${i}" type="number" step="0.001" min="0" value="${fmt(r.time)}" style="width:52px;font-size:10px">` +
+      `${devTag}${tag}${abn}` +
+      `<button class="edit" data-ridx="${i}" title="编辑该样本时间并重算">✎</button>` +
+      `<button class="del" data-ridx="${i}" title="删除该样本并重算">✕</button></div>`;
   }).join('');
   samplesBox.innerHTML =
-    `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">样本 ${records.length} 条（首次 ${records.filter(r => r.type === 'first').length} + 二次 ${records.filter(r => r.type === 'second').length}）· 点 ✕ 删除后自动重算统计与报告</div>` +
+    `<div class="px-2.5 pt-2 text-[10px] font-mono text-on-surface-variant">样本 ${records.length} 条（首次 ${records.filter(r => r.type === 'first').length} + 二次 ${records.filter(r => r.type === 'second').length}）· 点 ✎ 编辑时间 / ✕ 删除后自动重算统计与报告</div>` +
     `<div class="p-1.5 flex flex-col gap-0.5 custom-scrollbar max-h-[140px] overflow-y-auto">${rows}</div>`;
+
+  // 编辑保存：校验为正数秒数 → 转回毫秒写回 → 重算统计/报告
+  const applyEdit = (ri, inputEl, valEl) => {
+    if (!(ri >= 0 && ri < records.length)) return;
+    const sec = parseFloat(inputEl.value);
+    if (!(sec > 0)) { uiAlert('无效时间', '请输入大于 0 的秒数', 'warning'); inputEl.value = fmt(records[ri].time); return; }
+    const old = records[ri].time;
+    records[ri].time = Math.round(sec * 1000);   // 秒 → 毫秒
+    saveRecords(); renderHistory(); renderStats();
+    if (lastReportCtx) renderAutoReport(lastReportCtx);
+    if (valEl) valEl.textContent = fmt(records[ri].time);
+  };
+  samplesBox.querySelectorAll('.edit').forEach(b => b.addEventListener('click', () => {
+    const ri = parseInt(b.dataset.ridx);
+    const item = b.closest('.hist-item');
+    const valEl = item.querySelector('.t-val');
+    const editEl = item.querySelector('.t-edit');
+    if (!item || !editEl) return;
+    valEl.classList.add('hidden'); editEl.classList.remove('hidden');
+    editEl.focus(); editEl.select();
+  }));
+  samplesBox.querySelectorAll('.t-edit').forEach(inp => {
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { applyEdit(parseInt(inp.dataset.ridx), inp, inp.closest('.hist-item')?.querySelector('.t-val')); inp.classList.add('hidden'); } if (e.key === 'Escape') { inp.classList.add('hidden'); } });
+    inp.addEventListener('blur', () => { const valEl = inp.closest('.hist-item')?.querySelector('.t-val'); if (valEl && valEl.classList.contains('hidden')) { applyEdit(parseInt(inp.dataset.ridx), inp, valEl); inp.classList.add('hidden'); } });
+  });
   samplesBox.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
     const ri = parseInt(b.dataset.ridx);
     if (!(ri >= 0 && ri < records.length)) return;
