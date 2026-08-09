@@ -460,18 +460,24 @@
     </div>
 
     <!-- 启动方式 + 辅助操作 -->
-    <div class="glass-panel p-2 rounded flex flex-col gap-2 shrink-0">
-      <div>
-        <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动方式</label>
-        <select id="launchMode" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs py-1.5 px-2 focus:ring-primary focus:border-primary">
-          <option value="pkg">包名启动（推荐，不依赖图标位置）</option>
-          <option value="tap">模拟点击图标（需设坐标）</option>
-        </select>
+    <div id="cardLaunch" class="card glass-panel p-0 rounded flex flex-col gap-2 shrink-0 overflow-hidden">
+      <div class="px-2 py-1 flex items-center justify-between bg-surface-container-low border-b border-outline-variant cursor-pointer select-none hover:text-primary" data-toggle title="点击折叠/展开启动方式与辅助操作">
+        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">🚀 启动方式 <span class="toggle-arrow text-[9px]">▼</span></span>
+        <span class="text-[9px] text-on-surface-variant" id="launchSummary"></span>
       </div>
-      <div class="grid grid-cols-3 gap-1.5">
-        <button id="reinstallBtn" class="py-1.5 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">卸载重装</button>
-        <button id="forceStopBtn" class="py-1.5 bg-surface-container-high border border-danger/20 text-on-surface hover:bg-danger/10 rounded text-xs font-mono font-bold transition active:scale-95">杀进程</button>
-        <button id="backHomeBtn" class="py-1.5 bg-surface-container-high border border-outline-variant text-on-surface hover:bg-surface-container-highest rounded text-xs font-mono font-bold transition active:scale-95">回主页</button>
+      <div class="card-body p-2 flex flex-col gap-2">
+        <div>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">启动方式</label>
+          <select id="launchMode" class="w-full bg-surface-container-high border border-outline-variant rounded text-xs py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <option value="pkg">包名启动（推荐，不依赖图标位置）</option>
+            <option value="tap">模拟点击图标（需设坐标）</option>
+          </select>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5">
+          <button id="reinstallBtn" class="py-1.5 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">卸载重装</button>
+          <button id="forceStopBtn" class="py-1.5 bg-surface-container-high border border-danger/20 text-on-surface hover:bg-danger/10 rounded text-xs font-mono font-bold transition active:scale-95">杀进程</button>
+          <button id="backHomeBtn" class="py-1.5 bg-surface-container-high border border-outline-variant text-on-surface hover:bg-surface-container-highest rounded text-xs font-mono font-bold transition active:scale-95">回主页</button>
+        </div>
       </div>
     </div>
 
@@ -480,8 +486,8 @@
 
     <!-- 🤖 自动测速（模板比对停表 + 全自动循环）-->
     <div id="autoLoopCard" class="card glass-panel rounded p-2 border border-tertiary/40 flex-1 flex flex-col min-h-0 overflow-hidden">
-      <div class="flex items-center justify-between text-on-surface mb-1 shrink-0">
-        <span class="font-mono text-[11px] font-bold tracking-wider text-on-surface-variant">🤖 自动测速</span>
+      <div class="flex items-center justify-between text-on-surface mb-1 shrink-0 cursor-pointer select-none hover:text-primary" data-toggle title="点击折叠/展开自动测速配置，腾出空间给运行审计日志">
+        <span class="font-mono text-[11px] font-bold tracking-wider text-on-surface-variant">🤖 自动测速 <span class="toggle-arrow text-[9px]">▼</span></span>
         <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
       </div>
       <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
@@ -612,11 +618,11 @@
 
     <!-- 应用配置 -->
     <div id="cardConfig" class="card glass-panel rounded border border-outline-variant overflow-hidden shrink-0">
-      <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between">
-        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">⚙ 应用配置</span>
+      <div class="bg-surface-container-low px-2.5 py-1 border-b border-outline-variant flex items-center justify-between cursor-pointer select-none hover:text-primary" data-toggle title="点击折叠/展开应用配置，腾出空间给下方历史记录">
+        <span class="font-mono text-[10px] font-bold tracking-wider text-on-surface-variant">⚙ 应用配置 <span class="toggle-arrow text-[9px]">▼</span></span>
         <span class="text-[10px] text-on-surface-variant">表单本地记 · 模板点「保存」</span>
       </div>
-      <div class="p-2.5 flex flex-col gap-2.5">
+      <div class="card-body p-2.5 flex flex-col gap-2.5">
         <div>
           <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK 包名</label>
           <div class="flex gap-1.5">
@@ -824,11 +830,13 @@ function applyLayout() {
     }
   }
   // 折叠状态
-  ['cardShortcut','cardConfig','cardStats','cardHistory','autoLoopCard','cardDebug'].forEach(id => {
-    if (layout[id + '_collapsed']) {
-      const el = document.getElementById(id);
-      if (el) el.classList.add('collapsed');
-    }
+  ['cardShortcut','cardConfig','cardLaunch','cardStats','cardHistory','autoLoopCard','cardDebug'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (layout[id + '_collapsed']) el.classList.add('collapsed');
+    // 同步折叠箭头（▼ 展开 / ▶ 折叠）
+    const arrow = el.querySelector('.toggle-arrow');
+    if (arrow) arrow.textContent = el.classList.contains('collapsed') ? '▶' : '▼';
   });
   // 开跑检查折叠 + 日志高度
   if (typeof layout.autoCheckCollapsed === 'boolean') {
@@ -848,9 +856,23 @@ function saveLayout() { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout))
 document.querySelectorAll('[data-toggle]').forEach(head => {
   head.addEventListener('click', () => {
     const card = head.closest('.card');
+    if (!card) return;
     card.classList.toggle('collapsed');
     layout[card.id + '_collapsed'] = card.classList.contains('collapsed');
+    // 同步箭头（▼ 展开 / ▶ 折叠）
+    const arrow = head.querySelector('.toggle-arrow') || card.querySelector('.toggle-arrow');
+    if (arrow) arrow.textContent = card.classList.contains('collapsed') ? '▶' : '▼';
     saveLayout();
+    // 折叠/展开应用配置或自动测速后，让历史/日志区重新占满
+    if (card.id === 'cardConfig' || card.id === 'cardStats' || card.id === 'cardHistory') {
+      const h = document.getElementById('historyList');
+      if (h) requestAnimationFrame(() => h.style.flexGrow = '');
+      renderHistory(); renderStats(); renderSampleList();
+    }
+    if (card.id === 'autoLoopCard') {
+      const p = document.getElementById('autoProgress');
+      if (p) requestAnimationFrame(() => { p.scrollTop = p.scrollHeight; });
+    }
   });
 });
 
@@ -2428,58 +2450,95 @@ function formatAuditTs(d = new Date()) {
 /** level: INFO|STEP|OK|WARN|ERR ；phase: RUN|PRE|R1|MATCH…
  *  兼容旧调用 autoLog(kind, msg)（kind=ok/err/warn/info）。
  *  底部固定最新：用户没主动上滚时新日志自动贴底；上滚查看历史时不打断。 */
-// 多设备并行（阶段③）：每设备独立日志行 + 当前日志 tab
-const devLogs = {};          // serial -> { lines: [] }（每设备日志，多设备时用）
-let activeLogDevice = null;  // 当前日志 tab 显示的设备 serial（null=单设备模式用全局 autoProgress）
+// 多设备并行（阶段③）：日志按设备分桶，但展示为「多选拼接同一日志区」
+const devLogs = {};            // serial -> { lines: [], label }（每设备日志源）
+let selectedLogDevices = new Set();  // 当前选中的设备 serial 集合（多选，点一下选中/再点取消）
+const logDevLabels = {};       // serial -> 显示名（拼接前缀用）
 
-// 每设备日志容器（惰性创建，挂在 autoProgress 同父级）
-function logElFor(serial) {
-  if (!serial) return $('autoProgress');
-  const safe = String(serial).replace(/[^A-Za-z0-9_-]/g, '_');
-  let el = document.getElementById('autoProgress-' + safe);
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'autoProgress-' + safe;
-    el.className = 'bg-surface-container-lowest border-l-2 border-tertiary rounded p-2 font-mono leading-relaxed whitespace-pre-wrap overflow-y-auto custom-scrollbar min-h-0 flex-1';
-    $('autoProgress').parentElement.appendChild(el);
-    if (activeLogDevice !== serial) el.classList.add('hidden');
-  }
-  return el;
-}
-
-// 多设备日志 tab：切换显示对应设备日志
+// 选中一台设备（多选语义：在集合中增删）；无 serial 表示单设备模式清空选中
 function switchLogDevice(serial) {
-  activeLogDevice = serial || null;
+  if (!serial) {
+    selectedLogDevices.clear();
+  } else if (selectedLogDevices.has(serial)) {
+    selectedLogDevices.delete(serial);   // 点第二下取消选中
+  } else {
+    selectedLogDevices.add(serial);      // 点一下选中
+  }
   const tabs = $('autoLogTabs');
   if (!tabs) return;
-  // 单设备：无 tab，直接用全局 autoProgress
+  // 单设备（无多选 tab）：直接用全局 autoProgress
   if (!serial) {
     tabs.classList.add('hidden');
     $('autoProgress')?.classList.remove('hidden');
-    document.querySelectorAll('.autoProgress-dev').forEach(d => d.classList.add('hidden'));
     return;
   }
   tabs.classList.remove('hidden');
-  $('autoProgress')?.classList.add('hidden');
-  document.querySelectorAll('.autoProgress-dev').forEach(d => d.classList.add('hidden'));
-  logElFor(serial).classList.remove('hidden');
-  // tab 高亮
+  $('autoProgress')?.classList.remove('hidden');
+  // tab 高亮：选中设备高亮
   tabs.querySelectorAll('button').forEach(b => {
-    b.classList.toggle('text-primary', b.dataset.serial === serial);
-    b.classList.toggle('text-on-surface-variant', b.dataset.serial !== serial);
+    const on = selectedLogDevices.has(b.dataset.serial);
+    b.classList.toggle('text-primary', on);
+    b.classList.toggle('text-on-surface-variant', !on);
+    b.classList.toggle('bg-primary/10', on);
   });
+  renderCombinedLog();
 }
 
-// 渲染日志设备 tab（多设备时）
+// 渲染日志设备 tab（多设备时，多选切换）
 function renderLogTabs(devs) {
   const tabs = $('autoLogTabs');
   if (!tabs) return;
-  if (devs.length <= 1) { tabs.classList.add('hidden'); return; }
-  tabs.innerHTML = devs.map(d =>
-    `<button type="button" data-serial="${escapeHtml(d.serial)}" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded ${d.serial === activeLogDevice ? 'text-primary' : 'text-on-surface-variant'}" title="${escapeHtml(d.label)}">${escapeHtml(d.label.slice(0, 12))}</button>`
-  ).join('');
+  if (devs.length <= 1) { tabs.classList.add('hidden'); selectedLogDevices.clear(); return; }
+  devs.forEach(d => { logDevLabels[d.serial] = d.label; if (!devLogs[d.serial]) devLogs[d.serial] = { lines: [], label: d.label }; });
+  // 默认只展示一台：首次（集合为空）选第一台；之后保留用户多选/取消
+  if (!selectedLogDevices.size) selectedLogDevices.add(devs[0].serial);
+  // 只保留仍在列表中的设备（避免遗留已拔除设备）
+  selectedLogDevices = new Set([...selectedLogDevices].filter(s => devs.some(d => d.serial === s)));
+  if (!selectedLogDevices.size) selectedLogDevices.add(devs[0].serial);
+  tabs.innerHTML = devs.map(d => {
+    const on = selectedLogDevices.has(d.serial);
+    return `<button type="button" data-serial="${escapeHtml(d.serial)}" class="px-1.5 py-0.5 text-[10px] font-mono border border-outline-variant rounded ${on ? 'text-primary bg-primary/10' : 'text-on-surface-variant'}" title="${escapeHtml(d.label)}">${escapeHtml(d.label.slice(0, 12))}</button>`;
+  }).join('');
   tabs.querySelectorAll('button').forEach(b => b.addEventListener('click', () => switchLogDevice(b.dataset.serial)));
   tabs.classList.remove('hidden');
+  renderCombinedLog();
+}
+
+// 把选中设备的日志拼接渲染到统一滚动区 #autoProgress（多选时形成一个连续日志区）
+function renderCombinedLog() {
+  const el = $('autoProgress');
+  if (!el) return;
+  el.innerHTML = '';
+  // 单设备模式：走全局 auditLogLines（兼容老逻辑）
+  if (!selectedLogDevices.size) {
+    for (const line of auditLogLines) appendLogLine(el, line, '');
+    el.scrollTop = el.scrollHeight;
+    return;
+  }
+  const serials = [...selectedLogDevices];
+  serials.forEach(s => {
+    const bucket = devLogs[s];
+    if (!bucket || !bucket.lines) return;
+    const label = logDevLabels[s] || bucket.label || s;
+    const prefix = serials.length > 1 ? `[${label.slice(0, 8)}] ` : '';
+    for (const line of bucket.lines) appendLogLine(el, line, prefix);
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+// 追加一行日志到容器（带可选设备前缀）
+function appendLogLine(el, plain, prefix) {
+  const div = document.createElement('div');
+  const m = plain.match(/^\[([^\]]+)\]\s+(OK|ERR|WARN|STEP|INFO)\s+(\S+)\s+(.*)$/);
+  const devPre = prefix ? `<span class="text-on-surface-variant text-[9px] mr-1">${escapeHtml(prefix)}</span>` : '';
+  if (m) {
+    const [, ts, lv, ph, text] = m;
+    const color = lv === 'OK' ? 'var(--mint)' : lv === 'ERR' ? 'var(--danger)' : lv === 'WARN' ? 'var(--amber)' : lv === 'STEP' ? 'var(--primary)' : '';
+    div.innerHTML = `${devPre}<span class="text-on-surface-variant">[${escapeHtml(ts)}]</span> <span class="alog-phase" style="${color ? 'color:' + color : ''}">${escapeHtml(lv.padEnd(5))} ${escapeHtml(ph.padEnd(8))}</span>${escapeHtml(text)}`;
+  } else {
+    div.innerHTML = `${devPre}${escapeHtml(plain)}`;
+  }
+  el.appendChild(div);
 }
 
 function autoLog(level, phase, msg, serial) {
@@ -2488,7 +2547,6 @@ function autoLog(level, phase, msg, serial) {
     msg = phase; phase = '—';
     level = { ok: 'OK', err: 'ERR', warn: 'WARN', info: 'INFO' }[String(level || '').toLowerCase()] || level || 'INFO';
   }
-  const el = serial ? logElFor(serial) : $('autoProgress');
   const lv = String(level || 'INFO').toUpperCase();
   const ph = String(phase || '—').toUpperCase();
   const text = String(msg ?? '');
@@ -2498,17 +2556,17 @@ function autoLog(level, phase, msg, serial) {
   if (serial) {
     if (!devLogs[serial]) devLogs[serial] = { lines: [] };
     devLogs[serial].lines.push(plain);
+    // 记录出现过的设备标签（renderLogTabs 会设置；此处兜底取 serial）
+    if (!logDevLabels[serial]) logDevLabels[serial] = serial;
   } else {
     auditLogLines.push(plain);
   }
-  if (!el) return;
-  const color = lv === 'OK' ? 'var(--mint)' : lv === 'ERR' ? 'var(--danger)' : lv === 'WARN' ? 'var(--amber)' : lv === 'STEP' ? 'var(--primary)' : '';
-  const div = document.createElement('div');
-  if (color) div.style.color = color;
-  div.innerHTML = `<span class="text-on-surface-variant">[${ts}]</span> <span class="alog-phase">${escapeHtml(lv.padEnd(5))} ${escapeHtml(ph.padEnd(8))}</span>${escapeHtml(text)}`;
-  el.appendChild(div);
+  // 统一重绘到 #autoProgress（多选拼接 / 单设备全局）
+  renderCombinedLog();
 
   // 底部固定最新：只有当用户没主动上滚查看历史时，才自动贴底
+  const el = $('autoProgress');
+  if (!el) return;
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   if (nearBottom) {
     el.classList.remove('user-scrolled');
@@ -2518,8 +2576,8 @@ function autoLog(level, phase, msg, serial) {
     el.classList.add('user-scrolled');
   }
 
-  // 同步进度条阶段（多设备时跟随当前 tab 设备）
-  if (!serial || serial === activeLogDevice) setProgressPhase(ph, text);
+  // 同步进度条阶段（多设备时跟随任一选中设备）
+  if (!serial || selectedLogDevices.has(serial)) setProgressPhase(ph, text);
 }
 
 // 用户手动滚回底部 → 清除「未自动滚动」标记
@@ -2565,6 +2623,9 @@ function setProgressPhase(ph, text) {
 
 function clearAuditLog() {
   auditLogLines = [];
+  // 清空每设备日志源（多选拼接用），并重置选中集合
+  for (const k in devLogs) devLogs[k].lines = [];
+  selectedLogDevices.clear();
   const el = $('autoProgress');
   if (el) el.innerHTML = '';
 }
@@ -2964,8 +3025,7 @@ async function runAutoLoop() {
     }
 
     // ── 多设备并行：每设备独立循环/日志/记录（Promise.allSettled：一台失败不影响其它）──
-    renderLogTabs(devs);
-    switchLogDevice(devs[0].serial);
+    renderLogTabs(devs);  // 默认选中第一台展示；之后 tab 可多选/取消
     autoLog('INFO', 'RUN', `并行测速 ${devs.length} 台设备：${devs.map(d => d.label).join(' / ')}`);
     const results = await Promise.allSettled(devs.map(d => runAutoLoopForDevice(d, d.serial)));
 
