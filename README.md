@@ -20,18 +20,24 @@
 
 ## 🚀 快速开始
 
-### 方式一：下载安装包（推荐）
+### 方式一：一键脚本启动客户端（推荐）
 
-1. 从 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases) 下载 `AppColdStart-2.0.0-setup.exe`
+**Windows**：双击 `Start.bat` —— 自动校验/补齐 Node.js、Python、adb、scrcpy 与 npm/Python 依赖（只补缺失、不破坏既有环境，下载均为官方地址），然后启动 Electron 桌面客户端。仅首次运行需联网下载依赖，之后秒开。
+
+**macOS**：双击 `Start-Mac.command`（或终端运行 `bash start-mac.sh`）—— brew 补齐 node / python3 / android-platform-tools / libimobiledevice / scrcpy 并启动客户端。
+
+### 方式二：下载安装包
+
+1. 从 [Release 页面](https://git.7k7k.com/tianhaishun/app-coldstart/-/releases) 下载最新 `AppColdStart-*-setup.exe`
 2. 双击安装（安装过程中自动初始化 OCR 引擎，有分步进度日志）
 3. 桌面出现 AppColdStart 图标，双击启动
 4. 启动时显示加载动画，后端就绪后自动进入主界面
 
 **无需安装 Python，无需联网配置，装完即用。** 内置完整 Python 运行时 + ADB + scrcpy + iOS 工具链。
 
-### 方式二：浏览器模式（Start.bat）
+### 方式三：浏览器模式（备用，局域网访问）
 
-双击 `Start.bat` —— 首次自动建 venv + 装依赖，启动后端并打开浏览器。
+双击 `Start-Web.bat` —— 首次自动建 venv + 装依赖，启动后端并打开浏览器。仅作局域网临时访问备用：长时间运行内存占用会累积升高，不适合长时间跑测。
 
 > ⚠️ 浏览器模式无 scrcpy 镜像 / 录屏 / iOS 支持，仅 Android 截图轮询。
 

@@ -15,6 +15,13 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# macOS 启动脚本必须 LF（CRLF 会导致 bash 解析失败）
+*.sh text eol=lf
+*.command text eol=lf
+
+# PowerShell 脚本（Windows 执行，与 bat 同样 CRLF）
+*.ps1 text eol=crlf
+
 # 源码与文档（不强制，遵循 text=auto 的平台默认）
 *.py   text
 *.html text

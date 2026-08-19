@@ -4,6 +4,24 @@
 
 ---
 
+## v2.1.0（开发中）— 2026-08
+
+### 新增
+- **一键启动脚本（客户端）**：`Start.bat`（Windows，内部调用 `scripts/start-windows.ps1`）与 `Start-Mac.command` / `start-mac.sh`（macOS）。自动校验/补齐 Node.js、Python（全无时按官方 embeddable 自动构建 python-embed）、adb、scrcpy、iOS 工具链与 npm/Python 依赖后启动 Electron 客户端；只补缺失、不破坏既有环境，下载均为已验证的官方地址。原 Web 模式启动器保留为 `Start-Web.bat`（备用，局域网访问）
+- **Word 性能报告导出**：按参考模板格式生成 docx（多设备表格、首/二次截尾均值、iOS 首次调整、异常样本标记），`/api/export_report_docx` 下载
+
+### 修复
+- **Word 导出必现 500**：中文文件名进 Content-Disposition 触发 starlette latin-1 编码异常，改为 ASCII 回退名 + RFC 5987 `filename*` 扩展名
+- **模板回退误采纳**：设备分辨率未知时不再随机采纳其他设备的持久化模板（原逻辑给未知分辨率打满分）
+- **单实例锁幽灵进程**：拿不到锁的实例不再无窗口常驻，完整走启动流程（仅 second-instance 聚焦属于持锁实例）
+- **单设备模式日志不可见**：默认单设备模式下测速轮询日志（WAIT/SKIP/MATCH）恢复可见，复制日志/Excel 审计/报告附件同步恢复
+- **测试隔离**：pytest 将项目持久化目录隔离到临时目录，测试结果不再受本机真实模板文件影响
+
+### 工程
+- 统计/导出核心口径抽为 `static/stats-core.js`（trimValues/sec 单点维护），由 `npm run test:js`（node --test）覆盖；测试增至 pytest 58 项 + node 7 项
+
+---
+
 ## v2.0.0 — 2026-07-30
 
 ### 新增
