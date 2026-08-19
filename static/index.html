@@ -726,6 +726,7 @@
 
 </main>
 
+<script src="/stats-core.js"></script>
 <script>
 
 const API = '';
@@ -1827,13 +1828,8 @@ function computeStats() {
   const t = vr.map(r => r.time);
   const max = Math.max(...t), min = Math.min(...t);
   const maxIdx = t.indexOf(max), minIdx = t.indexOf(min);
-  let avg;
-  if (vr.length >= 3) {
-    const rest = t.filter((_, i) => i !== maxIdx && i !== minIdx);
-    avg = rest.reduce((a, b) => a + b, 0) / rest.length;
-  } else {
-    avg = t.reduce((a, b) => a + b, 0) / t.length;
-  }
+  // 截尾平均（n>=3 剔 1 max + 1 min），核心口径在 StatsCore.trimValues
+  const avg = StatsCore.trimValues(t).mean;
   return { avg, max, min, maxIdx, minIdx };
 }
 
@@ -1855,30 +1851,21 @@ function computeStatsGrouped() {
 
   function trimMean(group) {
     if (!group.length) return null;
-    const values = group.map(g => g.time);
-    const max = Math.max(...values);
-    const min = Math.min(...values);
-    const maxIdx = values.indexOf(max);
-    const minIdx = values.indexOf(min);
+    const t = StatsCore.trimValues(group.map(g => g.time));
     if (group.length >= 3) {
       // 剔 1 max + 1 min（并列只剔第一个匹配）
-      const kept = group.filter((_, i) => i !== maxIdx && i !== minIdx);
-      const mean = kept.reduce((s, g) => s + g.time, 0) / kept.length;
       return {
-        raw: values,
-        dropped_max: { idx: group[maxIdx].displayIdx, value: max },
-        dropped_min: { idx: group[minIdx].displayIdx, value: min },
-        kept: kept.map(g => g.time),
-        mean: mean,
+        raw: t.raw,
+        dropped_max: { idx: group[t.maxIdx].displayIdx, value: t.max },
+        dropped_min: { idx: group[t.minIdx].displayIdx, value: t.min },
+        kept: group.filter((_, i) => i !== t.maxIdx && i !== t.minIdx).map(g => g.time),
+        mean: t.mean,
         // 审核 D-P1-2：3≤n<5 截尾后仅剩 1~3 值，标注样本较少（n>=5 无标记）
         warning: group.length < 5 ? `样本较少（n=${group.length}）` : undefined,
       };
-    } else if (group.length > 0) {
-      // 不足 3 条，全量平均（不剔）；审核 D-P1-2：显式标注样本不足
-      const mean = values.reduce((s, v) => s + v, 0) / values.length;
-      return { raw: values, dropped_max: null, dropped_min: null, kept: values, mean, warning: `样本不足（n=${group.length}），未去极值` };
     }
-    return null;
+    // 不足 3 条，全量平均（不剔）；审核 D-P1-2：显式标注样本不足
+    return { raw: t.raw, dropped_max: null, dropped_min: null, kept: t.raw, mean: t.mean, warning: `样本不足（n=${group.length}），未去极值` };
   }
 
   const firstResult = trimMean(first);
@@ -3110,13 +3097,9 @@ async function runAutoLoop() {
   const t0 = performance.now();
 
   function quickTrim(vals) {
-    if (!vals.length) return null;
-    if (vals.length < 3) return vals.reduce((a, b) => a + b, 0) / vals.length;
-    // 与 §2.3 一致：去掉第一个 max、第一个 min（并列时可能只剔一次）
-    const maxIdx = vals.indexOf(Math.max(...vals));
-    const minIdx = vals.indexOf(Math.min(...vals));
-    const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
-    return kept.reduce((a, b) => a + b, 0) / kept.length;
+    // 与 §2.3 一致：n>=3 去掉第一个 max、第一个 min（并列时可能只剔一次）
+    const t = StatsCore.trimValues(vals);
+    return t ? t.mean : null;
   }
 
   try {
@@ -3328,12 +3311,8 @@ async function runAutoLoopForDevice(dev, logSerial) {
     const seconds = runRecs.filter(r => r.type === 'second').map(r => r.time);
     const abnN = runRecs.filter(r => r.abnormal).length;
     function quickTrim(vals) {
-      if (!vals.length) return null;
-      if (vals.length < 3) return vals.reduce((a, b) => a + b, 0) / vals.length;
-      const maxIdx = vals.indexOf(Math.max(...vals));
-      const minIdx = vals.indexOf(Math.min(...vals));
-      const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
-      return kept.reduce((a, b) => a + b, 0) / kept.length;
+      const t = StatsCore.trimValues(vals);
+      return t ? t.mean : null;
     }
     const fm = quickTrim(firsts), sm = quickTrim(seconds);
     // 审核 D-P1-2：样本不足/较少标记
@@ -3409,22 +3388,13 @@ function renderAutoReport(ctx) {
   const firsts = runRecords.filter(r => r.type === 'first');
   const seconds = runRecords.filter(r => r.type === 'second');
 
-  // 复用现有 trimMean 逻辑（与 computeStatsGrouped 一致：n>=3 截尾）
+  // 复用 StatsCore.trimValues（与 computeStatsGrouped 一致：n>=3 截尾）
   function trimMean(arr) {
     if (!arr.length) return null;
-    const vals = arr.map(r => r.time);
-    if (vals.length >= 3) {
-      const max = Math.max(...vals), min = Math.min(...vals);
-      const maxIdx = vals.indexOf(max), minIdx = vals.indexOf(min);
-      const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
-      return {
-        mean: kept.reduce((a, b) => a + b, 0) / kept.length,
-        max, min, maxIdx, minIdx, raw: vals,
-        // 审核 D-P1-2：样本不足/较少标记
-        warning: vals.length < 3 ? `样本不足（n=${vals.length}），未去极值` : (vals.length < 5 ? `样本较少（n=${vals.length}）` : undefined),
-      };
-    }
-    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals, warning: `样本不足（n=${vals.length}），未去极值` };
+    const t = StatsCore.trimValues(arr.map(r => r.time));
+    // 审核 D-P1-2：样本不足/较少标记
+    const warning = arr.length < 3 ? `样本不足（n=${arr.length}），未去极值` : (arr.length < 5 ? `样本较少（n=${arr.length}）` : undefined);
+    return { ...t, warning };
   }
 
   const fr = trimMean(firsts);
@@ -3535,19 +3505,8 @@ function exportXlsx(ctx) {
   const pkg = $('apkPkg').value || '—';
   const reportMode = (ctx && ctx.launchMode) || $('launchMode').value;
 
-  function trimMean(arr) {
-    if (!arr.length) return null;
-    const vals = arr.map(r => r.time);
-    if (vals.length >= 3) {
-      const max = Math.max(...vals), min = Math.min(...vals);
-      const maxIdx = vals.indexOf(max), minIdx = vals.indexOf(min);
-      const kept = vals.filter((_, i) => i !== maxIdx && i !== minIdx);
-      return { mean: kept.reduce((a, b) => a + b, 0) / kept.length, max, min, maxIdx, minIdx, raw: vals };
-    }
-    return { mean: vals.reduce((a, b) => a + b, 0) / vals.length, max: null, min: null, maxIdx: -1, minIdx: -1, raw: vals };
-  }
   // r.time 是毫秒；导出统一转秒显示（与界面 fmt() 一致：ms/1000）
-  const sec = ms => (ms / 1000).toFixed(3);
+  const sec = StatsCore.sec;
   const firstAdjust = platform === 'ios' ? -iosFirstAdjustSec() * 1000 : 0;
 
   // 按设备分组（多设备并行时各自独立统计/编号/剔极值，绝不混算）
@@ -3581,7 +3540,8 @@ function exportXlsx(ctx) {
     ['设备', '首次冷启动 最终', '二次冷启动 最终', '差值（首−二）', '样本数', '剔极值'],
   ];
   groups.forEach(g => {
-    const fr = trimMean(g.firsts), sr = trimMean(g.seconds);
+    const fr = StatsCore.trimValues(g.firsts.map(r => r.time));
+    const sr = StatsCore.trimValues(g.seconds.map(r => r.time));
     const ff = fr ? fr.mean + firstAdjust : null;
     const sf = sr ? sr.mean : null;
     const diff = (ff !== null && sf !== null) ? ff - sf : null;

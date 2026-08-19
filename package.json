@@ -11,7 +11,8 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "release": "node scripts/release.js",
-    "gen-doc": "python scripts/gen-docs.py"
+    "gen-doc": "python scripts/gen-docs.py",
+    "test:js": "node --test tests/stats-core.test.mjs"
   },
   "devDependencies": {
     "electron": "^33.0.0",
