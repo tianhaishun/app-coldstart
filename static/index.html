@@ -300,6 +300,87 @@
     #autoSetupBlock .border-t { padding-top: 0.375rem; }
     .mid-col .glass-panel.p-2 { padding: 0.375rem; }
   }
+
+  /* ══════════════════════════════════════════════════════════════
+     v2.2 视觉精致化 —— Linear/Raycast 深色极简工具风
+     纯表现层覆盖：不改任何 id / JS 契约；颜色只消费 OC-2 令牌（§3.3.1）。
+     原则：弱化边框、投影浮起、克制强调色（霓虹绿只留成功语义）、
+     统一 150ms 过渡、主行动按钮用 --primary 暖橙单色。
+     ══════════════════════════════════════════════════════════════ */
+
+  /* 圆角放大一档（3px → 6px），深色下更柔和；明暗两档通用 */
+  html[data-theme="oc-2"][data-color-scheme] { --radius: 6px; }
+
+  /* 深色档：卡片弱描边 + 轻投影浮起（亮色档保持原样不动） */
+  html[data-color-scheme="dark"] .glass-panel {
+    border-color: var(--border-weaker-base);
+    box-shadow: 0 1px 3px color-mix(in srgb, #000 40%, transparent);
+  }
+  /* 卡片头横带压平：透明底 + 弱分隔线（原来色块带偏重） */
+  html[data-color-scheme="dark"] .card > .bg-surface-container-low {
+    background-color: transparent !important;
+    border-bottom-color: var(--border-weaker-base) !important;
+  }
+  /* 顶栏底部分隔线弱化 */
+  html[data-color-scheme="dark"] header { border-bottom-color: var(--border-weaker-base) !important; }
+
+  /* 顶栏控件：胶囊 → 幽灵（透明底，hover 才出底色） */
+  .ui-pref { background: transparent; border-color: transparent; }
+  .ui-pref:hover { background: var(--sc-high); }
+  header .bg-surface-container-high {
+    background-color: transparent !important;
+    border-color: transparent !important;
+    transition: background-color .15s ease;
+  }
+  header .bg-surface-container-high:hover { background-color: var(--sc-high) !important; }
+
+  /* 全局交互过渡 + 聚焦环（primary 光晕，替代编译产物里不全的 ring） */
+  button, input, select, textarea, [data-toggle], summary {
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease, transform .1s ease;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--primary) 65%, transparent) !important;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+
+  /* 卡片折叠头 hover 反馈统一 */
+  .card [data-toggle]:hover { background: color-mix(in srgb, var(--on) 4%, transparent); }
+
+  /* 主行动按钮：--primary 暖橙 + 轻光晕（HTML 类同步改为 bg-primary/text-on-primary） */
+  #autoStartBtn:not(:disabled) {
+    box-shadow: 0 1px 6px color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+
+  /* 自动测速卡：去霓虹绿描边融入卡片体系；日志左边条换 primary */
+  #autoLoopCard { border-color: var(--border-weaker-base) !important; }
+  #autoProgress { border-left-color: color-mix(in srgb, var(--primary) 45%, transparent) !important; }
+
+  /* 测速项选中态：霓虹绿 → primary 暖橙（JS 仍切 border-tertiary/text-tertiary，契约不动） */
+  #optFirstLabel.border-tertiary, #optSecondLabel.border-tertiary {
+    border-color: color-mix(in srgb, var(--primary) 55%, transparent) !important;
+    background-color: color-mix(in srgb, var(--primary) 10%, transparent) !important;
+  }
+  #optFirstLabel.text-tertiary, #optSecondLabel.text-tertiary { color: var(--primary) !important; }
+
+  /* 并行设备勾选条选中态：同上换 primary（JS 动态生成，类契约同上不动） */
+  #parallelDevices .par-dev.border-tertiary {
+    border-color: color-mix(in srgb, var(--primary) 55%, transparent) !important;
+    background-color: color-mix(in srgb, var(--primary) 10%, transparent) !important;
+  }
+  #parallelDevices .par-dev.text-tertiary { color: var(--primary) !important; }
+
+  /* 统计卡：色条 4px → 2px；大数字等宽数字 + 微缩字距 */
+  #cardStats .border-l-4 { border-left-width: 2px; }
+  #firstFinal, #secondFinal, #statAvg { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+
+  /* 历史列表：行内小卡片 → 扁平行，hover 才出底色（Linear 列表风） */
+  .hist-item { background: transparent; }
+  .hist-item:hover { background: var(--sc-high); border-color: transparent; }
 </style>
 </head>
 <body class="text-on-surface h-screen flex flex-col overflow-hidden">
@@ -551,7 +632,7 @@
         </div>
         <div id="autoLaunchHint" class="text-[10px] font-mono text-on-surface-variant leading-relaxed shrink-0"></div>
         <div class="grid grid-cols-2 gap-1.5 shrink-0">
-          <button id="autoStartBtn" class="py-2 bg-tertiary text-on-tertiary rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">▶ 开始自动循环</button>
+          <button id="autoStartBtn" class="py-2 bg-primary text-on-primary rounded font-mono text-xs font-bold hover:brightness-110 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">▶ 开始自动循环</button>
           <button id="autoStopBtn" class="py-2 bg-surface-container-high border border-danger/20 text-on-surface rounded font-mono text-xs font-bold hover:bg-danger/10 transition active:scale-95" disabled>■ 停止</button>
         </div>
 
