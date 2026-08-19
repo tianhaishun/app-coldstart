@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Literal, Any
+from urllib.parse import quote
 
 # uvicorn 加载本模块时把根目录加进 sys.path，便于 from server import ...
 ROOT = Path(__file__).resolve().parent
@@ -1449,6 +1450,74 @@ def health() -> dict:
     return {"ok": True, "adb": ADB_EXE, "version": "2.0"}
 
 
+@app.get("/api/device_info")
+def device_info(serial: Optional[str] = None) -> dict:
+    """读取一台设备的硬件规格（供 Word 报告「测试设备」表格填充）。
+
+    Android：adb getprop + wm size + /proc/meminfo；iOS：pymobiledevice3 取值。
+    单条 prop 取失败不影响整体（返回对应字段为空串），整设备不可达才抛 AdbError→400。
+    与其他 adb 端点同样持目标设备锁（对齐 §2.4）。
+    """
+    try:
+        ds = _target_session(serial)
+        with ds.lock:
+            if isinstance(ds.device, IosDevice):
+                # iOS：pymobiledevice3 能取到的有限，尽力而为
+                return {"ok": True, "platform": "ios",
+                        "brand": "Apple", "model": ds.device.model or "",
+                        "osVersion": "", "cpu": "", "ram": "",
+                        "resolution": "", "hardware": ""}
+            # Android：一条 shell 批量取多个 getprop（减少 adb 往返）
+            props_script = (
+                "for p in ro.product.manufacturer ro.product.brand ro.product.model "
+                "ro.build.version.release ro.product.cpu.abi ro.board.platform ro.hardware; "
+                "do echo \"$p=${p}\"; getprop \"$p\"; done"
+            )
+            raw = ds.device.run(["shell", props_script], timeout=10.0, check=False)
+            props: dict[str, str] = {}
+            lines = [l.strip() for l in (raw or "").splitlines() if l.strip()]
+            i = 0
+            while i + 1 < len(lines):
+                key = lines[i]
+                val = lines[i + 1]
+                if key.startswith("ro.") and "=" in key:
+                    props[key.split("=")[0]] = val
+                i += 2
+            # 内存：MemTotal（kB）→ GB
+            ram = ""
+            try:
+                mem_raw = ds.device.run(["shell", "cat", "/proc/meminfo"], timeout=10.0, check=False)
+                m = re.search(r"MemTotal:\s*(\d+)", mem_raw or "")
+                if m:
+                    ram = f"{round(int(m.group(1)) / 1024 / 1024)}GB"
+            except Exception:
+                pass
+            # 分辨率：wm size 输出形如 "Physical size: 1080x2400"
+            resolution = ""
+            try:
+                size_raw = ds.device.run(["shell", "wm", "size"], timeout=10.0, check=False)
+                m = re.search(r"(\d+x\d+)", size_raw or "")
+                if m:
+                    resolution = m.group(1)
+            except Exception:
+                pass
+            # 厂商优先 manufacturer，空则回退 brand
+            brand = props.get("ro.product.manufacturer") or props.get("ro.product.brand") or ""
+            return {
+                "ok": True,
+                "platform": "android",
+                "brand": brand,
+                "model": props.get("ro.product.model", ""),
+                "osVersion": ("Android " + props["ro.build.version.release"]) if props.get("ro.build.version.release") else "",
+                "cpu": props.get("ro.product.cpu.abi") or props.get("ro.board.platform") or "",
+                "ram": ram,
+                "resolution": resolution,
+                "hardware": props.get("ro.hardware") or props.get("ro.board.platform") or "",
+            }
+    except AdbOpError as e:
+        raise _err(400, str(e))
+
+
 @app.get("/api/devices")
 def list_devices() -> dict:
     """列出所有连接的设备（Android + iOS 合并返回）。
@@ -2767,6 +2836,93 @@ def cold_start(req: ColdStartReq) -> dict:
         }
     except AdbOpError as e:
         raise _err(400, str(e))
+
+
+# ── Word 性能报告导出 ────────────────────────────────────────────────────
+
+class ReportSampleData(BaseModel):
+    """单条样本（首次/二次冷启动）。"""
+    time: float                        # 毫秒
+    date: str = ""
+    abnormal: bool = False
+    apkVersion: Optional[str] = None
+
+
+class ReportDeviceData(BaseModel):
+    """报告中的单台设备数据。"""
+    serial: str = ""
+    model: str = ""
+    label: str = ""
+    brand: str = "/"
+    osVersion: str = "/"
+    cpu: str = "/"
+    ram: str = "/"
+    resolution: str = "/"
+    hardware: str = ""
+    firsts: list[ReportSampleData] = Field(default_factory=list)
+    seconds: list[ReportSampleData] = Field(default_factory=list)
+
+
+class ReportExportReq(BaseModel):
+    """导出 Word 性能报告请求。"""
+    title: str = "冷启动测速报告"
+    testDate: str = ""
+    appName: str = ""
+    platform: str = "gp"
+    platformLabel: str = "GP（安卓）"
+    # iOS 首次冷启动均值调整秒数（与前端 iosFirstAdjustSec 对齐，默认 1.0，0 关闭）。
+    # report_docx 在 platform=='ios' 时对首次均值减去此值（剔除 TestFlight 弹窗时间）。
+    iosFirstAdjustSec: float = 1.0
+    launchMode: str = "模拟点击图标"
+    launchModeDesc: str = "模拟点击图标"
+    plannedRounds: int = 5
+    totalSec: float = 0
+    success: bool = True
+    error: str = ""
+    devices: list[ReportDeviceData] = Field(default_factory=list)
+    auditLog: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/export_report_docx")
+def export_report_docx(req: ReportExportReq) -> Response:
+    """生成 Word 性能报告文档（.docx），按参考模板格式一比一输出。
+
+    前端收集 lastReportCtx + records 数据 POST 过来，后端用 python-docx 生成
+    格式化的 Word 文档返回下载。格式参照：
+    20260625-GP GOGO！Blast 1期&新4期性能对比测试报告.docx
+    """
+    try:
+        from report_docx import generate_report
+        data = req.model_dump()
+        docx_bytes = generate_report(data)
+        title = str(data.get("title") or "report").strip()
+        # Content-Disposition 头会被 starlette 按 latin-1 编码（实测：中文文件名
+        # 必抛 UnicodeEncodeError → 500）。filename= 只放 ASCII 回退名，中文名走
+        # RFC 5987 filename*=UTF-8''（percent 编码后仍是 ASCII），浏览器优先取它。
+        ascii_name = re.sub(r'[^A-Za-z0-9_.\-]', '_', title)[:60] or "report"
+        filename = f"{ascii_name}.docx"
+        encoded_name = f"{quote(title[:60])}.docx"
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}"
+                ),
+                **_FRONTEND_NO_CACHE_HEADERS,
+            },
+        )
+    except ImportError as e:
+        # 区分两种 ImportError，给出可操作的提示：
+        #   1) report_docx 模块自身缺失（安装版打包遗漏 backend/report_docx.py）
+        #   2) report_docx 内部 from docx import 失败（python-docx 依赖未装）
+        # 靠 ImportError.name（缺失的顶层模块名）判断，无 name 时回退到消息匹配。
+        missing = getattr(e, "name", "") or ""
+        if missing == "docx" or "docx" in str(e).lower():
+            raise _err(500, "python-docx 未安装，无法生成 Word 报告")
+        raise _err(500, "report_docx 模块缺失（安装版可能打包遗漏），无法生成 Word 报告")
+    except Exception as e:
+        raise _err(500, f"生成报告失败：{e}")
 
 
 # ── 静态资源（前端单文件）─────────────────────────────────────────────

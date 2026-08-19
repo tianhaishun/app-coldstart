@@ -38,6 +38,10 @@
         "to": "backend/adb_helper.py"
       },
       {
+        "from": "report_docx.py",
+        "to": "backend/report_docx.py"
+      },
+      {
         "from": "requirements.txt",
         "to": "backend/requirements.txt"
       },

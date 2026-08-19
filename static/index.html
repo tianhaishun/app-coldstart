@@ -704,6 +704,7 @@
       <div class="grid grid-cols-4 gap-1.5 p-2 border-t border-outline-variant shrink-0">
         <button id="copyBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="复制本轮测速报告文本">复制报告</button>
         <button id="exportXlsxBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="导出 Excel（汇总/样本明细/审计日志 三个工作表）">导出 Excel</button>
+        <button id="exportDocxBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="导出 Word 性能报告（按参考模板格式）">导出报告</button>
         <button id="csvBtn" class="py-1.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="导出 CSV">导出 CSV</button>
         <button id="clearBtn" class="py-1.5 bg-surface-container-high border border-danger/30 text-danger hover:bg-danger/10 rounded text-xs">清空</button>
       </div>
@@ -718,6 +719,7 @@
           <button id="reportCopyBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">复制</button>
           <button id="reportCsvBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary">CSV</button>
           <button id="reportXlsxBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="导出 Excel（汇总/样本明细/审计日志 三个工作表）">Excel</button>
+          <button id="reportDocxBtn" class="text-[10px] px-2 py-0.5 bg-surface-container-high border border-outline-variant rounded hover:text-primary" title="导出 Word 性能报告（按参考模板格式）">Word</button>
         </div>
       </div>
       <pre id="autoReport" class="p-2.5 font-mono text-[11px] whitespace-pre-wrap text-on-surface leading-relaxed max-h-[400px] overflow-y-auto custom-scrollbar"></pre>
@@ -2178,6 +2180,10 @@ $('exportXlsxBtn').addEventListener('click', () => {
   if (!lastReportCtx) { uiAlert('暂无测速报告', '请先完成一次自动循环测速，再导出 Excel', 'warning'); return; }
   exportXlsx(lastReportCtx);
 });
+$('exportDocxBtn').addEventListener('click', () => {
+  if (!lastReportCtx) { uiAlert('暂无测速报告', '请先完成一次自动循环测速，再导出报告', 'warning'); return; }
+  exportDocxReport(lastReportCtx);
+});
 $('csvBtn').addEventListener('click', () => {
   if (!records.length) return;
   const s = computeStats();
@@ -3597,8 +3603,153 @@ function exportXlsx(ctx) {
   XLSX.writeFile(wb, `AppColdStart_${safePkg}_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
-// ── 报告区按钮：重算 / 复制文本 / 下载 CSV / 导出 Excel ──
+// ── 导出 Word 性能报告（后端 python-docx 生成，按参考模板格式）──
+// 参照 20260625-GP GOGO！Blast 报告模板：标题/测试背景/测试设备/测试流程/测试结果/首次装包启动时长
+async function exportDocxReport(ctx) {
+  if (!ctx) { uiAlert('暂无测速报告', '请先完成一次自动循环测速，再导出报告', 'warning'); return; }
+
+  const startIdx = (ctx && ctx.runStartIndex) || 0;
+  const runRecords = records.slice(startIdx).filter(r => r.source === 'auto');
+  const platform = document.querySelector('input[name="platform"]:checked')?.value || 'gp';
+  const platformLabel = platform === 'ios' ? 'iOS（首次 -1s）' : 'GP（安卓）';
+  const now = new Date().toLocaleString('zh-CN', { hour12: false });
+  const pkg = $('apkPkg').value || '—';
+  const reportMode = (ctx && ctx.launchMode) || $('launchMode').value;
+  const launchModeLabel = reportMode === 'pkg' ? '包名启动（monkey）' : '模拟点击图标';
+
+  // 按设备分组（与 exportXlsx 逻辑一致）
+  const devMap = new Map();
+  runRecords.forEach(r => {
+    const key = r.device || '__all__';
+    if (!devMap.has(key)) devMap.set(key, {
+      serial: key === '__all__' ? '' : key,
+      model: '',
+      label: r.deviceLabel || key,
+      brand: '/', osVersion: '/', cpu: '/', ram: '/', resolution: '/', hardware: '',
+      firsts: [], seconds: [],
+    });
+    const g = devMap.get(key);
+    const sample = {
+      time: r.time,
+      date: r.date ? new Date(r.date).toLocaleString('zh-CN') : '',
+      abnormal: !!r.abnormal,
+      apkVersion: (r.apk && (r.apk.name || r.apk.sha256_prefix)) || '',
+    };
+    if (r.type === 'first') g.firsts.push(sample);
+    else if (r.type === 'second') g.seconds.push(sample);
+  });
+
+  // 尝试从设备下拉框补充型号信息
+  const devSel = $('deviceSel');
+  if (devSel) {
+    const selectedOpt = devSel.selectedOptions[0];
+    if (selectedOpt) {
+      const model = selectedOpt.textContent || '';
+      devMap.forEach(g => {
+        if (!g.model) g.model = model;
+        if (!g.label || g.label === '__all__') g.label = model;
+      });
+    }
+  }
+
+  // 从后端拉取每台设备的硬件规格（厂商/CPU/内存/分辨率/系统），填进报告。
+  // 失败则保留占位符，不让单个设备取不到规格就中断整个导出。
+  const _PLACEHOLDER = '/';   // 与上方 devMap 初始化一致的占位
+  await Promise.all([...devMap.values()].map(async g => {
+    if (!g.serial) return;    // 无 serial（__all__ 兜底）无法查询
+    try {
+      const r = await fetch(`${API}/api/device_info?serial=${encodeURIComponent(g.serial)}`, { method: 'GET' });
+      if (!r.ok) return;
+      const info = await r.json();
+      if (!info || info.ok === false) return;
+      // 后端返回的规格字段（取值成功才覆盖占位符，避免用空串盖掉 /）
+      const pick = v => (v && String(v).trim()) ? String(v).trim() : _PLACEHOLDER;
+      g.brand = pick(info.brand);
+      g.osVersion = pick(info.osVersion);
+      g.cpu = pick(info.cpu);
+      g.ram = pick(info.ram);
+      g.resolution = pick(info.resolution);
+      g.hardware = info.hardware || '';
+      if (info.model) g.model = info.model;
+    } catch (_) { /* 设备离线等：保留占位符 */ }
+  }));
+
+  const devices = [...devMap.values()].map(g => ({
+    serial: g.serial,
+    model: g.model || g.label,
+    label: g.label,
+    brand: g.brand,
+    osVersion: g.osVersion,
+    cpu: g.cpu,
+    ram: g.ram,
+    resolution: g.resolution,
+    hardware: g.hardware,
+    firsts: g.firsts,
+    seconds: g.seconds,
+  }));
+
+  // 标题：YYYYMMDD-应用名 冷启动测速报告
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const appName = pkg.split('.').pop() || 'App';
+  const title = `${dateStr}-${appName} 冷启动测速报告`;
+
+  // 审计日志
+  const audit = (lastRunAuditLog && lastRunAuditLog.length) ? lastRunAuditLog : auditLogLines;
+
+  const body = {
+    title,
+    testDate: now,
+    appName: pkg,
+    platform,
+    platformLabel,
+    // iOS 首次调整秒数透传给后端（与页面统计口径一致；安卓为 0 不影响）
+    iosFirstAdjustSec: platform === 'ios' ? iosFirstAdjustSec() : 0,
+    launchMode: launchModeLabel,
+    launchModeDesc: reportMode === 'pkg' ? '包名启动（monkey）' : '模拟点击图标',
+    plannedRounds: (ctx && (ctx.plannedRounds != null ? ctx.plannedRounds : ctx.rounds)) || 5,
+    totalSec: (ctx && ctx.totalSec) || 0,
+    success: ctx ? ctx.success !== false : true,
+    error: (ctx && ctx.error) || '',
+    devices,
+    auditLog: audit || [],
+  };
+
+  const btn = $('exportDocxBtn') || $('reportDocxBtn');
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '生成中…'; btn.disabled = true; }
+
+  try {
+    const resp = await fetch('/api/export_report_docx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(errText || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const disposition = resp.headers.get('Content-Disposition') || '';
+    const m = disposition.match(/filename="?(.+?)[";]?$/);
+    const filename = m ? m[1] : `${title}.docx`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    if (btn) { btn.textContent = '✓ 已导出'; setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1500); }
+  } catch (e) {
+    if (btn) { btn.textContent = origText; btn.disabled = false; }
+    uiAlert('导出失败', e.message || String(e), 'error');
+  }
+}
+
+// ── 报告区按钮：重算 / 复制文本 / 下载 CSV / 导出 Excel / 导出 Word ──
 $('reportXlsxBtn').addEventListener('click', () => exportXlsx(lastReportCtx));
+$('reportDocxBtn').addEventListener('click', () => exportDocxReport(lastReportCtx));
 $('reportRegenBtn').addEventListener('click', () => {
   if (!lastReportCtx) return;
   renderAutoReport(lastReportCtx);  // 删除样本后重算均值与报告文本

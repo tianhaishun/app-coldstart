@@ -17,3 +17,6 @@ numpy>=1.24,<3.0
 # iOS 设备通信（截图/设备检测/App 管理）。pymobiledevice3 10.x 全异步 API。
 # 需要 Windows 端 Apple Mobile Device Service（AMDS）作为 usbmuxd 后端。
 pymobiledevice3>=10.0,<11.0
+# Word 性能报告导出（/api/export_report_docx → report_docx.generate_report）。
+# 打包时由 scripts/build-python-embed.py 统一 pip install 本文件，装一次即随安装版分发。
+python-docx>=1.1,<2.0
