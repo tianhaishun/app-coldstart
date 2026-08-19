@@ -16,6 +16,8 @@
 - **单实例锁幽灵进程**：拿不到锁的实例不再无窗口常驻，完整走启动流程（仅 second-instance 聚焦属于持锁实例）
 - **单设备模式日志不可见**：默认单设备模式下测速轮询日志（WAIT/SKIP/MATCH）恢复可见，复制日志/Excel 审计/报告附件同步恢复
 - **测试隔离**：pytest 将项目持久化目录隔离到临时目录，测试结果不再受本机真实模板文件影响
+- **一键启动 PS 5.1 必现失败**：`$ErrorActionPreference='Stop'` 下原生命令的 stderr（adb start-server 的 daemon 提示、npm/pip 进度）被包装成 NativeCommandError 升级为终止错误，统一改走 `Invoke-Native` 包装（局部 Continue + 保留 `$LASTEXITCODE` 校验），冒烟实测全链路通过
+- **Start.bat 中文乱码**：cmd 按 GBK 解析 UTF-8 批处理导致中文 echo 乱码并被当成命令执行，提示文案回纯 ASCII（对齐 §3.4），中文说明留在 README
 
 ### 工程
 - 统计/导出核心口径抽为 `static/stats-core.js`（trimValues/sec 单点维护），由 `npm run test:js`（node --test）覆盖；测试增至 pytest 58 项 + node 7 项

@@ -37,6 +37,18 @@ function Exit-Fail($msg) {
   exit 1
 }
 
+function Invoke-Native {
+  # PS 5.1 会把原生命令的 stderr 包装成 NativeCommandError，在本脚本的
+  # $ErrorActionPreference='Stop' 下升级为【终止错误】（实测：adb start-server
+  # 的 daemon 提示、npm/pip 的进度输出都走 stderr，2>$null 也拦不住，必现踩坑）。
+  # 本函数调用期间临时降为 Continue，stderr 按普通输出处理；退出码不变，
+  # 调用方照常读 $LASTEXITCODE 判断成败。
+  param([scriptblock]$Body)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $Body } finally { $ErrorActionPreference = $prev }
+}
+
 function Download-File($url, $dest) {
   Write-Host "  下载: $url"
   try {
@@ -86,7 +98,7 @@ if (Test-Path (Join-Path $Root "node_modules\electron")) {
   Write-Host "  首次运行：npm install（约 1-3 分钟）..."
   Push-Location $Root
   try {
-    npm install --prefer-offline --no-audit --no-fund
+    Invoke-Native { npm install --prefer-offline --no-audit --no-fund }
     if ($LASTEXITCODE -ne 0) { throw "npm install 退出码 $LASTEXITCODE" }
   } finally { Pop-Location }
   Write-Ok "npm 依赖安装完成"
@@ -142,7 +154,7 @@ if (Test-Path $EmbedPy) {
   Download-File $GetPipUrl (Join-Path $EmbedDir "get-pip.py")
   Push-Location $EmbedDir
   try {
-    & (Join-Path $EmbedDir "python.exe") get-pip.py --no-warn-script-location
+    Invoke-Native { & (Join-Path $EmbedDir "python.exe") get-pip.py --no-warn-script-location }
     if ($LASTEXITCODE -ne 0) { throw "get-pip 退出码 $LASTEXITCODE" }
   } finally { Pop-Location }
   Remove-Item -Force (Join-Path $EmbedDir "get-pip.py")
@@ -150,7 +162,7 @@ if (Test-Path $EmbedPy) {
   Write-Host "  安装运行时依赖（几分钟，请勿关闭窗口）..."
   Push-Location $Root
   try {
-    & (Join-Path $EmbedDir "Scripts\pip.exe") install -r requirements.txt --no-warn-script-location
+    Invoke-Native { & (Join-Path $EmbedDir "Scripts\pip.exe") install -r requirements.txt --no-warn-script-location }
     if ($LASTEXITCODE -ne 0) { throw "pip install 退出码 $LASTEXITCODE" }
   } finally { Pop-Location }
   Write-Ok "python-embed 构建完成"
@@ -177,8 +189,8 @@ if (Test-Path $AdbExe) {
 }
 # 统一 adb server 版本：机器上可能有多套 adb 共用同一 daemon(5037)，
 # 版本不一致会在握手时偶发 connection reset → 检测不到设备
-& $AdbExe kill-server 2>$null | Out-Null
-& $AdbExe start-server 2>$null | Out-Null
+Invoke-Native { & $AdbExe kill-server 2>$null | Out-Null }
+Invoke-Native { & $AdbExe start-server 2>$null | Out-Null }
 
 # ── 5. scrcpy ─────────────────────────────────────────────────────────────────
 Write-Step "检查 scrcpy ..."
@@ -217,6 +229,6 @@ Write-Step "启动客户端 ..."
 Write-Host "  启动 Electron（首次启动会自动建 .venv / 复用 python-embed，请耐心等待）..."
 Push-Location $Root
 try {
-  npm start
+  Invoke-Native { npm start }
   if ($LASTEXITCODE -ne 0) { throw "客户端退出码 $LASTEXITCODE" }
 } finally { Pop-Location }

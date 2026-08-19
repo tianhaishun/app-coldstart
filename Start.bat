@@ -1,25 +1,32 @@
 @echo off
 setlocal
-title App Cold Start Profiler - 一键启动（客户端）
-chcp 65001 >nul
+title App Cold Start Profiler - One-Click Start (Client)
+
+REM NOTE: keep this file pure ASCII (AGENTS.md 3.4).
+REM cmd parses .bat files in the system OEM codepage (GBK on zh-CN);
+REM UTF-8 Chinese text gets garbled and can even break parsing.
+REM Chinese documentation lives in README.md / the HTML UI instead.
+
 set "ROOT=%~dp0"
 
 echo ============================================
-echo   App Cold Start Profiler - 客户端一键启动
+echo   App Cold Start Profiler - One-Click Start
 echo ============================================
 echo.
-echo   自动校验/补齐 Node.js、Python、adb、scrcpy 与 npm/Python 依赖，
-echo   然后启动 Electron 桌面客户端（主要使用方式）。
+echo   Checks and installs Node.js, Python, adb, scrcpy and
+echo   npm/Python dependencies (only what is missing), then
+echo   starts the Electron desktop client.
 echo.
-echo   仅首次运行需要联网下载缺失依赖，之后秒开。
-echo   浏览器模式（备用，局域网访问）请用 Start-Web.bat。
+echo   First run needs network access to download dependencies.
+echo   Browser mode (backup, LAN access): run Start-Web.bat
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\start-windows.ps1"
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
     echo.
-    echo [FAIL] 启动失败（错误码 %RC%）。请把上方输出截图发给维护者。
+    echo [FAIL] Startup failed, exit code %RC%. Send a screenshot
+    echo        of the output above to the maintainer.
     pause
     exit /b 1
 )
