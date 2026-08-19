@@ -2923,7 +2923,9 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 // 首次有跳过模板时先处理弹窗；没有跳过模板时直接识别启动模板；二次始终不扫跳过。
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
 // weirdMs：异常阈值（默认 35s）——只标记，不中止；等模板命中或用户停止
-async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
+async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer) {
+  // serial：API 请求目标设备；logSer：日志路由（单设备模式传 null 走全局日志，
+  // 否则日志会进 devLogs 桶而单设备渲染分支只看全局桶 → 不可见，实测踩坑）
   let lastLogAt = 0;
   let warnedWeird = false;
   let warnedResMismatch = false;  // 审核 F-P1-4：分辨率变化只警告一次
@@ -2932,13 +2934,13 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
   const doSkips = checkSkips === true;
   autoLog('INFO', 'WAIT', doSkips
     ? '开始轮询识别：先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
-    : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表', serial);
+    : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表', logSer);
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
     const elapsed = performance.now() - startTs;
     if (!warnedWeird && weirdMs > 0 && elapsed > weirdMs) {
       warnedWeird = true;
-      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`, serial);
+      autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`, logSer);
     }
     try {
       const qs = (doSkips ? '?' : '?check_skips=false&') + (serial ? 'serial=' + encodeURIComponent(serial) : '');
@@ -2953,18 +2955,18 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
         if (j.skipped) {
           const cx = j.skip_cx != null ? Number(j.skip_cx).toFixed(3) : '—';
           const cy = j.skip_cy != null ? Number(j.skip_cy).toFixed(3) : '—';
-          autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`, serial);
+          autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`, logSer);
           if (gapMs > 0) await sleep(Math.max(gapMs, 200));
           continue;
         }
         if (j.error && elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`, serial);
+          autoLog('WARN', 'WAIT', `识别暂未就绪：${j.error} · 已等待 ${(elapsed / 1000).toFixed(1)}s · ${timing}`, logSer);
         }
         // 审核 F-P1-4：分辨率与设模板时不一致 → 警告一次（仅提示，不停表）
         if (j.res_mismatch && !warnedResMismatch) {
           warnedResMismatch = true;
-          autoLog('WARN', 'WAIT', '⚠ 设备分辨率已变化（模板按旧分辨率设定），识别可能不准——建议停止后重设启动模板', serial);
+          autoLog('WARN', 'WAIT', '⚠ 设备分辨率已变化（模板按旧分辨率设定），识别可能不准——建议停止后重设启动模板', logSer);
         }
         if (j.hit) {
           // 终点补偿：成功画面在「截图命令开始」时已在屏上；拿到图之前的 shot_ms 不应计入冷启
@@ -2977,7 +2979,7 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
           // 异常按记录时间判断（已扣命中帧截图耗时），与表格/报告口径一致。
           // 不能按墙钟 rawMs 判断：截图偏慢时会出现「记录 14.273s < 阈值 15s 却被标异常」的误标。
           const abnormal = weirdMs > 0 && total >= weirdMs;
-          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`, serial);
+          autoLog('OK', 'MATCH', `启动成功模板已确认：置信度 ${((j.confidence || 0) * 100).toFixed(0)}%（阈值 ${thr}）· 连续 ${j.streak || need}/${need} 帧 · 墙钟 ${fmt(rawMs)}s − 截图 ${Math.round(shotCost)}ms → 记 ${fmt(total)}s` + (abnormal ? ' · 标为异常样本' : '') + ` · 共轮询 ${pollCount} 次 · ${timing}`, logSer);
           return { time: total, abnormal, raw_ms: rawMs, shot_ms: shotCost };
         }
         // 未确认：每 2s 打进度；写清当前在等什么
@@ -2991,19 +2993,19 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial) {
           else if (j.above && !j.rising_ready) reason = `启动模板已过阈值（${confPct}），但还在等上升沿：需要先出现「低于阈值」的一帧，再升上来（防桌面残留误停）`;
           else if (j.above) reason = `启动模板已过阈值（${confPct}），连续确认中 ${streak}/${need} 帧`;
           else reason = `启动模板置信度 ${confPct}（未过阈值）· 继续截屏比对`;
-          autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`, serial);
+          autoLog('INFO', 'WAIT', `等待中 ${(elapsed / 1000).toFixed(1)}s · ${reason} · ${timing}`, logSer);
         }
       } else {
         if (elapsed - lastLogAt > 2000) {
           lastLogAt = elapsed;
-          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`, serial);
+          autoLog('WARN', 'WAIT', `check_auto 请求失败 HTTP ${r.status}，将继续重试`, logSer);
         }
       }
     } catch (e) {
       console.warn('自动检测轮询失败（将继续重试）:', e.message);
       if (elapsed - lastLogAt > 2000) {
         lastLogAt = elapsed;
-        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`, serial);
+        autoLog('WARN', 'WAIT', `识别请求异常：${e.message} · 将继续重试`, logSer);
       }
     }
     if (gapMs > 0) await sleep(gapMs);
@@ -3278,7 +3280,7 @@ async function runAutoLoopForDevice(dev, logSerial) {
         if (autoAbortFlag) throw new Error('用户中断');
         autoLog('STEP', `${phase}-1st`, `第 ${round} 轮 · 测【首次冷启动】（${modeLabel}）…`, L);
         await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-1st`, serial, platform);
-        const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round, serial);
+        const first = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '首次', round, serial, L);
         if (first.abnormal) roundAbnormal = true;
         records.push({ time: first.time, date: new Date().toISOString(), source: 'auto', type: 'first', round, run_id: runId, abnormal: !!first.abnormal, apk: curApkInfo, device: serial, deviceLabel });
         saveRecords(); renderHistory(); renderStats();
@@ -3289,7 +3291,7 @@ async function runAutoLoopForDevice(dev, logSerial) {
         if (autoAbortFlag) throw new Error('用户中断');
         autoLog('STEP', `${phase}-2nd`, `第 ${round} 轮 · 测【二次冷启动】（${modeLabel}）· 不再卸装，只杀进程后启动…`, L);
         await prepareBeforeLaunch(pkg, killCoolMs, `${phase}-2nd`, serial, platform);
-        const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round, serial);
+        const second = await measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, '二次', round, serial, L);
         if (second.abnormal) roundAbnormal = true;
         records.push({ time: second.time, date: new Date().toISOString(), source: 'auto', type: 'second', round, run_id: runId, abnormal: !!second.abnormal, apk: curApkInfo, device: serial, deviceLabel });
         saveRecords(); renderHistory(); renderStats();
@@ -3339,7 +3341,8 @@ async function runAutoLoopForDevice(dev, logSerial) {
 
 // 单次测速：cold_start → 单一时钟打点 → 模板比对停表
 // 返回 { time, abnormal }；weirdMs 只作异常阈值，不中止
-async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, serial) {
+// serial：API 请求目标设备；logSer：日志路由（单设备模式传 null 走全局日志）
+async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, serial, logSer) {
   if (autoAbortFlag) throw new Error('用户中断');
   const body = { mode: launchMode, package: pkg };
   if (serial) body.serial = serial;
@@ -3348,7 +3351,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   // 没有配置跳过弹窗模板时，直接匹配启动成功模板，不走跳过弹窗分支。
   const checkSkips = isFirst && skipTemplateCount > 0;  // 仅首次且确有模板时扫描跳过弹窗；二次不扫
   const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
-  autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…', serial);
+  autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…', logSer);
   const r = await apiFetch(API + '/api/cold_start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
@@ -3366,8 +3369,8 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   const confNeed = j.marker_confirm_frames != null ? j.marker_confirm_frames : 1;
   const rising = j.marker_rising_edge !== false;
   const risingSeeded = j.marker_rising_seeded === true;
-  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'), serial);
-  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial);
+  autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'), logSer);
+  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer);
 }
 
 // ── 报告生成（数据供导出，不在页面展示）──

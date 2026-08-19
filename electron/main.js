@@ -683,10 +683,12 @@ async function handleBackendCrash(reason) {
 const gotLock = app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  // 单实例锁获取失败：不退出，降级继续运行。
+  // 单实例锁获取失败：不退出，降级继续运行（而非无窗口常驻幽灵进程）。
   // 原因：macOS 具名信号量在实例被强杀（SIGKILL）后可能残留，新实例拿不到锁
   // （打包实测 gotLock=false 导致 app 静默退出）。本地工具场景下多开窗口共用
   // 同一后端是可接受的（python-manager 的 checkHealth 复用机制兜底防端口冲突）。
+  // 因此无论是否拿到锁，都完整走 whenReady 启动流程；仅 second-instance
+  // 聚焦逻辑属于持锁实例。
   console.error('[warn] 单实例锁获取失败（可能残留），降级继续运行');
 } else {
   app.on('second-instance', () => {
@@ -696,67 +698,67 @@ if (!gotLock) {
       mainWindow.focus();
     }
   });
-
-  app.whenReady().then(async () => {
-    log('info', `Electron ${process.versions.electron} (Chrome ${process.versions.chrome})`);
-    log('info', `平台: ${process.platform} ${process.arch}`);
-    log('info', `开发模式: ${isDev ? '是 (--dev)' : '否'}`);
-    log('info', '────────────────────────────────');
-
-    // 立即显示启动闪屏（用户不用盯着空白等待）
-    createSplashWindow();
-
-    log('info', '正在启动 Python 后端...');
-
-    // 启动 Python 后端
-    const started = await pyManager.start(log);
-
-    if (!started) {
-      log('error', '后端启动失败，显示错误窗口。');
-      splashWindow?.close();
-      const detail = startupLogs.join('\n');
-      createErrorWindow('后端启动失败', detail);
-      return;
-    }
-
-    log('info', '后端就绪，创建应用窗口。');
-
-    // 闪屏显示完成状态后关闭
-    updateSplash('启动完成！', '', 100);
-    await new Promise(r => setTimeout(r, 500)); // 让用户看到 100%
-    splashWindow?.close();
-
-    // 后端意外退出时：先通知前端展示 overlay，再弹窗恢复（见 handleBackendCrash）
-    pyManager.onUnexpectedExit = (reason) => {
-      mainWindow?.webContents.send('backend-status', 'offline');
-      handleBackendCrash(reason);
-    };
-
-    buildAppMenu();
-    createMainWindow();
-
-    // 后端就绪后启动设备热插拔监听（adb track-devices 流式命令）
-    startDeviceTracker();
-  });
-
-  // 所有窗口关闭时退出（macOS 除外，但本工具不适合常驻菜单栏）
-  app.on('window-all-closed', () => {
-    app.quit();
-  });
-
-  // 应用即将退出时清理 Python 后端（统一在此清理，避免与 window-all-closed 重复调用）
-  app.on('before-quit', () => {
-    disposeDeviceTracker();
-    scrcpyManager.dispose();
-    pyManager.stop();
-    // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
-    // 防止 adb.exe 残留导致升级文件锁
-    const adbPath = resolveAdbPath();
-    if (adbPath) {
-      try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
-    }
-  });
 }
+
+app.whenReady().then(async () => {
+  log('info', `Electron ${process.versions.electron} (Chrome ${process.versions.chrome})`);
+  log('info', `平台: ${process.platform} ${process.arch}`);
+  log('info', `开发模式: ${isDev ? '是 (--dev)' : '否'}`);
+  log('info', '────────────────────────────────');
+
+  // 立即显示启动闪屏（用户不用盯着空白等待）
+  createSplashWindow();
+
+  log('info', '正在启动 Python 后端...');
+
+  // 启动 Python 后端
+  const started = await pyManager.start(log);
+
+  if (!started) {
+    log('error', '后端启动失败，显示错误窗口。');
+    splashWindow?.close();
+    const detail = startupLogs.join('\n');
+    createErrorWindow('后端启动失败', detail);
+    return;
+  }
+
+  log('info', '后端就绪，创建应用窗口。');
+
+  // 闪屏显示完成状态后关闭
+  updateSplash('启动完成！', '', 100);
+  await new Promise(r => setTimeout(r, 500)); // 让用户看到 100%
+  splashWindow?.close();
+
+  // 后端意外退出时：先通知前端展示 overlay，再弹窗恢复（见 handleBackendCrash）
+  pyManager.onUnexpectedExit = (reason) => {
+    mainWindow?.webContents.send('backend-status', 'offline');
+    handleBackendCrash(reason);
+  };
+
+  buildAppMenu();
+  createMainWindow();
+
+  // 后端就绪后启动设备热插拔监听（adb track-devices 流式命令）
+  startDeviceTracker();
+});
+
+// 所有窗口关闭时退出（macOS 除外，但本工具不适合常驻菜单栏）
+app.on('window-all-closed', () => {
+  app.quit();
+});
+
+// 应用即将退出时清理 Python 后端（统一在此清理，避免与 window-all-closed 重复调用）
+app.on('before-quit', () => {
+  disposeDeviceTracker();
+  scrcpyManager.dispose();
+  pyManager.stop();
+  // 兜底：确保 adb daemon 被关闭（后端被 taskkill /F 时 lifespan shutdown 不会执行。
+  // 防止 adb.exe 残留导致升级文件锁
+  const adbPath = resolveAdbPath();
+  if (adbPath) {
+    try { execFileSync(adbPath, ['kill-server'], { timeout: 3000, windowsHide: true }); } catch {}
+  }
+});
 
 // ── IPC 处理（主进程侧）─────────────────────────────────────
 

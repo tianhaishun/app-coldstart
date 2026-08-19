@@ -764,12 +764,16 @@ class DeviceSession:
                     meta = _json.loads(meta_f.read_text(encoding="utf-8"))
                 except Exception:
                     continue
-                # 评分：分辨率完全一致 = 最佳；否则按分辨率差值惩罚
+                # 评分：分辨率完全一致 = 最佳；否则按分辨率差值惩罚。
+                # 本设备分辨率未知（尚无截图）时无法判断模板是否适用，跳过回退
+                # （此前 target 为空给 0 分，会随机采纳第一份模板，实测踩坑）。
+                if not target:
+                    continue
                 mres = tuple(meta.get("res") or ())
-                if target and mres:
+                if mres:
                     res_score = 0 if tuple(mres) == target else abs(tuple(mres)[0] - target[0]) + abs(tuple(mres)[1] - target[1])
                 else:
-                    res_score = 0 if not target else 10 ** 6
+                    res_score = 10 ** 6
                 cand = (res_score, marker_f, meta, safe)
                 if best is None or cand[0] < best[0]:
                     best = cand
