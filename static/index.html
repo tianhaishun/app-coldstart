@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="oc-2" data-color-scheme="dark" data-font-scale="lg" data-font="plex">
+<html lang="zh-CN" data-theme="linear" data-color-scheme="dark" data-font-scale="lg" data-font="cascadia">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,7 +9,7 @@
 <!-- SheetJS（本地化，离线可用）：自动测速报告 Excel 导出 -->
 <script src="/vendor/xlsx.mini.min.js"></script>
 <!-- OpenCode OC-2：唯一色源（static/themes/oc-2.json → oc-2.css） -->
-<link rel="stylesheet" href="/themes/oc-2.css">
+<link rel="stylesheet" href="/themes/linear.css">
 <style>
   /* 字号档：拉大 rem，并把绝对 px 的极小字一并抬高 */
   html[data-font-scale="sm"] { font-size: 13px; }
@@ -17,32 +17,27 @@
   html[data-font-scale="lg"] { font-size: 16px; }
   html[data-font-scale="xl"] { font-size: 17.5px; }
 
-  html[data-font="plex"] body,
-  html[data-font="plex"] .font-mono, html[data-font="plex"] .mono,
-  html[data-font="plex"] input, html[data-font="plex"] select, html[data-font="plex"] button, html[data-font="plex"] textarea {
+  /* Linear 化：UI 字体一律 Inter（见 linear.css --font-ui），data-font 只决定
+     数据/日志区的等宽栈（.font-mono/.mono），不再把整页 body/控件变成等宽。 */
+  html[data-font="plex"] .font-mono, html[data-font="plex"] .mono {
     font-family: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei", "PingFang SC", monospace !important;
   }
-  html[data-font="jetbrains"] body,
-  html[data-font="jetbrains"] .font-mono, html[data-font="jetbrains"] .mono,
-  html[data-font="jetbrains"] input, html[data-font="jetbrains"] select, html[data-font="jetbrains"] button {
+  html[data-font="jetbrains"] .font-mono, html[data-font="jetbrains"] .mono {
     font-family: "JetBrains Mono", "IBM Plex Mono", Consolas, "Microsoft YaHei", monospace !important;
   }
-  html[data-font="cascadia"] body,
-  html[data-font="cascadia"] .font-mono, html[data-font="cascadia"] .mono,
-  html[data-font="cascadia"] input, html[data-font="cascadia"] select, html[data-font="cascadia"] button {
+  html[data-font="cascadia"] .font-mono, html[data-font="cascadia"] .mono {
     font-family: "Cascadia Code", "Cascadia Mono", Consolas, "Microsoft YaHei", monospace !important;
   }
-  html[data-font="consolas"] body,
-  html[data-font="consolas"] .font-mono, html[data-font="consolas"] .mono,
-  html[data-font="consolas"] input, html[data-font="consolas"] select, html[data-font="consolas"] button {
+  html[data-font="consolas"] .font-mono, html[data-font="consolas"] .mono {
     font-family: Consolas, "Courier New", "Microsoft YaHei", monospace !important;
-  }
-  html[data-font="yahei"] body {
-    font-family: "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif !important;
   }
   html[data-font="yahei"] .font-mono, html[data-font="yahei"] .mono {
     font-family: "JetBrains Mono", Consolas, "Microsoft YaHei", monospace !important;
   }
+
+  /* UI 字体（Inter + 系统回退）覆盖 body 与全部控件，覆盖 static.css 的雅黑 preflight */
+  html, body { font-family: var(--font-ui, Inter, "Segoe UI", "Microsoft YaHei", sans-serif) !important; }
+  button, select, input, textarea { font-family: var(--font-ui, Inter, "Segoe UI", "Microsoft YaHei", sans-serif) !important; }
 
   /* 覆盖 static.css 里写死的 surface/文字色，使主题切换生效 */
   body { background-color: var(--bg) !important; color: var(--on) !important; }
@@ -131,6 +126,13 @@
   .tag.min { color: var(--mint); border: 1px solid color-mix(in srgb, var(--mint) 50%, transparent); }
   .tag.abn { color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent); }
   .empty-msg { text-align: center; color: var(--on-var); padding: 16px 8px; font-size: 0.85rem; }
+  /* 空态（P3）：柔和引导——弱色 + 分隔线装饰 + 更充足的留白 */
+  .empty-msg {
+    color: var(--l-text-weak);
+    font-size: 0.75rem;
+    padding: 28px 16px;
+    letter-spacing: 0.02em;
+  }
   .kbd, kbd { font-size: 0.75rem; padding: 1px 6px; border-radius: var(--radius);
     background: var(--sc-high); border: 1px solid var(--outline-var); color: var(--on); box-shadow: none; }
 
@@ -308,18 +310,18 @@
      统一 150ms 过渡、主行动按钮用 --primary 暖橙单色。
      ══════════════════════════════════════════════════════════════ */
 
-  /* 圆角放大一档（3px → 6px），深色下更柔和；明暗两档通用 */
-  html[data-theme="oc-2"][data-color-scheme] { --radius: 6px; }
+  /* 圆角由 linear.css 提供（--radius: 4px；弹层 --radius-lg: 8px）——此处撤销旧 6px 覆盖 */
 
-  /* 深色档：卡片弱描边 + 轻投影浮起（亮色档保持原样不动） */
+  /* Linear 化：卡片去边框去投影，仅靠表面亮度阶梯分层（.card 用 panel 底色） */
   html[data-color-scheme="dark"] .glass-panel {
-    border-color: var(--border-weaker-base);
-    box-shadow: 0 1px 3px color-mix(in srgb, #000 40%, transparent);
+    border-color: transparent !important;
+    box-shadow: none !important;
   }
-  /* 卡片头横带压平：透明底 + 弱分隔线（原来色块带偏重） */
+  .card { background-color: var(--l-panel) !important; }
+  /* 卡片头：半透明标签式（原色块带压平，见下方标签规则） */
   html[data-color-scheme="dark"] .card > .bg-surface-container-low {
     background-color: transparent !important;
-    border-bottom-color: var(--border-weaker-base) !important;
+    border-bottom-color: transparent !important;
   }
   /* 顶栏底部分隔线弱化 */
   html[data-color-scheme="dark"] header { border-bottom-color: var(--border-weaker-base) !important; }
@@ -381,6 +383,150 @@
   /* 历史列表：行内小卡片 → 扁平行，hover 才出底色（Linear 列表风） */
   .hist-item { background: transparent; }
   .hist-item:hover { background: var(--sc-high); border-color: transparent; }
+
+  /* ══════════════════════════════════════════════════════════════
+      Linear 重塑（2026-08 ui-redesign 分支）
+      ══════════════════════════════════════════════════════════════ */
+
+  /* ── 字阶（6 级 token，见 linear.css；自定义属性优先）── */
+  .text-\[9px\]  { font-size: 0.6875rem !important; }  /* 11px 标签/小徽章 */
+  .text-\[10px\] { font-size: 0.75rem !important; }    /* 12px 次级正文 */
+  .text-\[11px\] { font-size: 0.8125rem !important; }  /* 13px 正文小 */
+  .text-xs { font-size: 0.75rem !important; }
+  .text-sm { font-size: 0.8125rem !important; }
+
+  /* ── 计时显示器：64px 大数字 + 表格数字 + 微收紧 ── */
+  #display {
+    font-size: 4rem !important;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+    font-weight: 600;
+    font-family: var(--font-mono) !important;
+  }
+
+  /* ── 卡片头 → Linear 标签式（弱色大写小字），替代色块标题条 ── */
+  .card > .bg-surface-container-low {
+    padding: 0 0 8px 0 !important;
+  }
+  .card > .bg-surface-container-low > span:first-child,
+  .card > .bg-surface-container-low > div:first-child > span:first-child {
+    font-size: var(--text-label);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--l-text-base);
+  }
+
+  /* ── 按钮三级制：主=紫填充 / 次=中性亮面 / 幽灵=透明 ── */
+  button { border-radius: var(--radius, 4px); }
+  button:active { transform: scale(0.98); }
+  /* 主行动按钮（自动循环）：紫填充，白色文字，hover 亮一阶 */
+  #autoStartBtn {
+    background-color: var(--l-accent) !important;
+    color: #fff !important;
+    border-color: transparent !important;
+    font-family: var(--font-ui) !important;
+    font-weight: 600;
+  }
+  #autoStartBtn:hover { background-color: var(--l-accent-hover) !important; }
+  #autoStartBtn .svg-icon { color: #fff !important; }
+  /* 次级按钮：去边框，表面亮面 + hover 再亮一阶 */
+  button.bg-surface-container-high {
+    border-color: transparent !important;
+    background-color: var(--l-raised) !important;
+  }
+  button.bg-surface-container-high:hover { background-color: var(--l-raised-hover) !important; }
+  /* 幽灵按钮（顶栏/卡片头小控件）：透明底 */
+  header button, .card button:not([id]) {
+    background-color: transparent !important;
+  }
+  header button:hover, .card button:not([id]):hover {
+    background-color: color-mix(in srgb, var(--on) 6%, transparent) !important;
+  }
+
+  /* ── 检查分线：标签选中态回归强调色（语义归位：选中≠成功）── */
+  .text-tertiary { color: var(--primary) !important; }
+  .border-tertiary, .border-tertiary\/40 {
+    border-color: color-mix(in srgb, var(--primary) 55%, transparent) !important;
+  }
+  .bg-tertiary { background-color: var(--primary-c) !important; }
+  .text-on-tertiary { color: var(--l-ink-on-accent) !important; }
+
+  /* ── 状态徽章：低饱和底纹（12% alpha 底 + 语义色文字）── */
+  .tag {
+    background: color-mix(in srgb, var(--l-text-base) 10%, transparent);
+    border-color: transparent !important;
+  }
+  .tag.min { background: color-mix(in srgb, var(--l-success) 12%, transparent); }
+  .tag.abn { background: color-mix(in srgb, var(--l-warning) 12%, transparent); }
+
+  /* ── 隐藏亮色切换（Linear 仅暗色；元素保留，id/JS 契约不动）── */
+  #themeLightBtn { display: none !important; }
+
+  /* ══════════════════════════════════════════════════════════════
+     P2/P3：状态收敛 + 动效补全 + 顶栏弹层 + 统计卡重画
+     ══════════════════════════════════════════════════════════════ */
+
+  /* 状态徽章 → Linear 式：无色底小圆点 + 中性文字（语义色只活在圆点上） */
+  .status {
+    padding: 3px 8px !important;
+    background: transparent !important;
+    border-color: transparent !important;
+    gap: 6px;
+  }
+  .status .dot { width: 6px; height: 6px; }
+  .status.ok { color: var(--l-text-base) !important; background: transparent !important; border-color: transparent !important; }
+  .status.ok .dot { background: var(--l-success); animation: none; }
+  .status.err { color: var(--l-text-base) !important; background: transparent !important; border-color: transparent !important; }
+  .status.err .dot { background: var(--l-danger); }
+
+  /* 统计卡：去彩色侧条、块面统一低一路表面；数字表格化 */
+  #cardStats .border-l-4 { border-left-width: 0 !important; }
+  #cardStats .bg-surface-container { background-color: var(--l-panel-low) !important; }
+  #cardStats .bg-surface-container-high { background-color: transparent !important; }
+  #cardStats .text-2xl, #cardStats #statAvg, #cardStats #statMax, #cardStats #statMin {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  /* 统计空态：引导文案弱化（禁「—s」式坏占位） */
+  #firstFinal, #secondFinal, #statAvg { color: var(--l-text-base); }
+  #statsHint { color: var(--l-text-weak); }
+
+  /* 焦点环（Linear：2px 紫晕）全覆盖交互元素 */
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible,
+  [data-toggle]:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--l-accent) 60%, transparent) !important;
+    outline-offset: 1px;
+  }
+
+  /* 交互元素过渡统一 150ms（补 chips/标签/行 hover 平滑） */
+  .par-dev, .hist-item, .tag, .ui-pref, label, [data-toggle] {
+    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+  }
+
+  /* ── 顶栏设置弹层（P3：主题/等宽/字号/直播收拢，元素 id 不变）── */
+  #settingsBtn { font-size: 15px; line-height: 1; }
+  #settingsPanel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    min-width: 250px;
+    padding: 6px;
+    background: var(--l-raised);
+    border: 1px solid var(--l-hairline);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    z-index: 60;
+  }
+  /* 显式状态机：默认 none（ID 规则压过 .hidden 的 display:none，不得在同一选择器
+     写 display:flex 而让 hidden 失效——2026-08 P3 实拍抓到）；.hidden 移除后启用 flex */
+  #settingsPanel { display: none; flex-direction: column; gap: 2px; }
+  #settingsPanel:not(.hidden) { display: flex; }
+  #settingsPanel .ui-pref {
+    padding: 7px 8px;
+    border-radius: var(--radius);
+  }
+  #settingsPanel .ui-pref:hover { background: var(--l-raised-hover); }
 </style>
 </head>
 <body class="text-on-surface h-screen flex flex-col overflow-hidden">
@@ -407,43 +553,49 @@
     </div>
   </div>
   <div class="flex items-center gap-2 flex-wrap">
-    <div class="ui-pref" title="主题：OpenCode OC-2">
-      <span class="font-mono font-bold text-primary" style="color:var(--primary-brand)">OC-2</span>
-      <button type="button" id="themeDarkBtn" class="active">暗色</button>
-      <button type="button" id="themeLightBtn">亮色</button>
+    <!-- P3：主题/等宽/字号/直播收进设置弹层（元素 id 全保留，仅移动容器） -->
+    <div class="relative">
+      <button id="settingsBtn" type="button" class="p-1.5 text-on-surface-variant hover:text-primary border border-outline-variant rounded" title="设置（主题 / 等宽字体 / 字号 / 直播速率）">⚙</button>
+      <div id="settingsPanel" class="hidden">
+        <div class="ui-pref" title="主题（当前仅暗色，Linear）">
+          <span class="font-mono font-bold" style="color:var(--primary-brand)">Linear</span>
+          <button type="button" id="themeDarkBtn" class="active">暗色</button>
+          <button type="button" id="themeLightBtn">亮色</button>
+        </div>
+        <div class="ui-pref" title="数据/日志等宽字体">
+          <span>等宽</span>
+          <select id="fontFamilySel">
+            <option value="plex">IBM Plex Mono</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="cascadia">Cascadia</option>
+            <option value="consolas">Consolas</option>
+            <option value="yahei">雅黑 + Mono</option>
+          </select>
+        </div>
+        <div class="ui-pref" title="字号">
+          <span>字号</span>
+          <select id="fontScaleSel">
+            <option value="sm">小</option>
+            <option value="md">中</option>
+            <option value="lg" selected>大</option>
+            <option value="xl">特大</option>
+          </select>
+        </div>
+        <div class="ui-pref" title="实时截图轮询（窗口内刷新间隔，越小越吃 adb；scrcpy 镜像不受此影响）">
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input id="liveToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary focus:ring-primary"> 直播
+          </label>
+          <select id="liveGap" title="轮询间隔：越小越快，越占 adb">
+            <option value="150">极速+</option>
+            <option value="300" selected>极速</option>
+            <option value="600">均衡</option>
+            <option value="1200">省电</option>
+            <option value="2500">慢速</option>
+          </select>
+        </div>
+      </div>
     </div>
-    <div class="ui-pref" title="字体">
-      <span>字体</span>
-      <select id="fontFamilySel">
-        <option value="plex">IBM Plex Mono</option>
-        <option value="jetbrains">JetBrains Mono</option>
-        <option value="cascadia">Cascadia</option>
-        <option value="consolas">Consolas</option>
-        <option value="yahei">雅黑 + Mono</option>
-      </select>
-    </div>
-    <div class="ui-pref" title="字号">
-      <span>字号</span>
-      <select id="fontScaleSel">
-        <option value="sm">小</option>
-        <option value="md">中</option>
-        <option value="lg" selected>大</option>
-        <option value="xl">更大</option>
-      </select>
-    </div>
-    <div class="ui-pref" title="画面直播轮询（截图回显到左侧画面；scrcpy 镜像是独立的，不受此开关影响）">
-      <label class="flex items-center gap-1 cursor-pointer">
-        <input id="liveToggle" type="checkbox" checked class="rounded bg-surface-container-high border-outline-variant text-primary focus:ring-primary"> 直播
-      </label>
-      <select id="liveGap" title="画面刷新间隔（越小越快，越占 adb）">
-        <option value="150">极速+</option>
-        <option value="300" selected>极速</option>
-        <option value="600">流畅</option>
-        <option value="1200">省流</option>
-        <option value="2500">节能</option>
-      </select>
-    </div>
-    <div id="statusBadge" class="status"><span class="dot"></span><span id="statusText">检测中...</span></div>
+    <div id="statusBadge" class="status"><span class="dot"></span><span id="statusText">连接中...</span></div>
   </div>
 </header>
 
@@ -934,16 +1086,17 @@ function saveUiPrefs() {
 }
 function applyUiPrefs() {
   // 兼容旧字段 theme → colorScheme；主题色固定 OC-2
-  const rawScheme = uiPrefs.colorScheme || uiPrefs.theme;
-  const colorScheme = rawScheme === 'light' ? 'light' : 'dark';
+  // Linear 重设计：仅暗色（2026-08）。历史遗留的 light 偏好强制回落到 dark，
+  // linear.css 未定义 light 规则，避免 save 过 light 的用户看到无样式页面。
+  const colorScheme = 'dark';
   const scale = ['sm', 'md', 'lg', 'xl'].includes(uiPrefs.fontScale) ? uiPrefs.fontScale : 'lg';
   const font = ['plex', 'jetbrains', 'cascadia', 'consolas', 'yahei'].includes(uiPrefs.fontFamily)
-    ? uiPrefs.fontFamily : 'plex';
+    ? uiPrefs.fontFamily : 'cascadia';
   uiPrefs.colorScheme = colorScheme;
   uiPrefs.theme = colorScheme; // 旧键同步，避免其它脚本读到脏值
   uiPrefs.fontScale = scale;
   uiPrefs.fontFamily = font;
-  document.documentElement.setAttribute('data-theme', 'oc-2');
+  document.documentElement.setAttribute('data-theme', 'linear');
   document.documentElement.setAttribute('data-color-scheme', colorScheme);
   document.documentElement.setAttribute('data-font-scale', scale);
   document.documentElement.setAttribute('data-font', font);
@@ -959,6 +1112,19 @@ $('themeDarkBtn')?.addEventListener('click', () => { uiPrefs.colorScheme = 'dark
 $('themeLightBtn')?.addEventListener('click', () => { uiPrefs.colorScheme = 'light'; saveUiPrefs(); applyUiPrefs(); });
 $('fontScaleSel')?.addEventListener('change', e => { uiPrefs.fontScale = e.target.value; saveUiPrefs(); applyUiPrefs(); });
 $('fontFamilySel')?.addEventListener('change', e => { uiPrefs.fontFamily = e.target.value; saveUiPrefs(); applyUiPrefs(); });
+
+// ── 顶栏设置弹层（P3）：⚙ 开合 + 点外关闭 + Esc ──
+$('settingsBtn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  $('settingsPanel').classList.toggle('hidden');
+});
+document.addEventListener('click', (e) => {
+  const p = $('settingsPanel');
+  if (p && !p.classList.contains('hidden') && !p.contains(e.target)) p.classList.add('hidden');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('settingsPanel')?.classList.add('hidden');
+});
 
 // ── 布局持久化 ──
 function applyLayout() {
@@ -1979,7 +2145,7 @@ function renderStats() {
   $('statCount').textContent = vr.length;
   $('statMax').innerHTML = s.max !== null ? fmt(s.max) + '<span class="unit">s</span>' : '—';
   $('statMin').innerHTML = s.min !== null ? fmt(s.min) + '<span class="unit">s</span>' : '—';
-  $('statAvg').innerHTML = s.avg !== null ? fmt(s.avg) + '<span class="unit">s</span>' : '—<span class="unit">s</span>';
+  $('statAvg').innerHTML = s.avg !== null ? fmt(s.avg) + '<span class="unit">s</span>' : '—';
   $('statsHint').textContent = vr.length === 0 ? '' : vr.length < 3 ? '至少 3 条才去极值' : `去极值 · 中间 ${vr.length-2} 个`;
 
   // 新的分组统计（首次/二次）
@@ -1995,8 +2161,8 @@ function renderStats() {
     if (gs.first.warning) meta += ` · ⚠ ${gs.first.warning}`;
     $('firstMeta').textContent = meta;
   } else {
-    $('firstFinal').innerHTML = '—<span class="unit">s</span>';
-    $('firstMeta').textContent = '暂无数据';
+    $('firstFinal').innerHTML = '—';
+    $('firstMeta').textContent = '等待首次冷启动样本';
   }
   // 二次冷启动栏
   if (gs.second) {
@@ -2005,8 +2171,8 @@ function renderStats() {
     if (gs.second.warning) meta += ` · ⚠ ${gs.second.warning}`;
     $('secondMeta').textContent = meta;
   } else {
-    $('secondFinal').innerHTML = '—<span class="unit">s</span>';
-    $('secondMeta').textContent = '暂无数据';
+    $('secondFinal').innerHTML = '—';
+    $('secondMeta').textContent = '等待二次冷启动样本';
   }
 
   // 下一条提示（帮用户保持"卸装→测→测"节奏）

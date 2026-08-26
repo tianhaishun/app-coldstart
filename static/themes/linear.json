@@ -1,0 +1,31 @@
+{
+  "$schema": "./linear-schema-note.md",
+  "name": "Linear",
+  "id": "linear",
+  "note": "应用侧唯一色源（2026-08 UI 重设计）。取值对标 Linear 暗色界面：近黑微阶梯表面 + 单一紫强调 + 哑状态色。仅暗色；亮色切换已隐藏。改色流程：改本文件 → python static/themes/_bake_linear.py → 硬刷新。",
+  "dark": {
+    "palette": {
+      "bg": "#0e0e11",
+      "panel": "#141417",
+      "panel-low": "#101013",
+      "raised": "#1c1d21",
+      "raised-hover": "#232429",
+      "accent": "#5e6ad2",
+      "accent-hover": "#6e79d6",
+      "success": "#4cb782",
+      "warning": "#f2994a",
+      "danger": "#eb5757",
+      "text-strong": "#f7f8f8",
+      "text-base": "#8a8f98",
+      "text-weak": "#62666d",
+      "text-weaker": "#46494f",
+      "hairline": "rgba(255,255,255,0.08)",
+      "hairline-weak": "rgba(255,255,255,0.05)",
+      "ink-on-accent": "#ffffff"
+    },
+    "overrides": {
+      "radius": "4px",
+      "radius-lg": "8px"
+    }
+  }
+}
