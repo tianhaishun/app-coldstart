@@ -302,9 +302,15 @@ class PythonManager {
       }
     });
 
-    this.process.on('exit', (code, signal) => {
+    // 代际引用（2026-08 审核中10）：exit 回调闭包捕获本次 spawn 的 child。
+    // 重启场景：用户在故障弹窗选「重启」→ start() 把 _stopping 复位为 false 并
+    // spawn 新进程；旧进程的 exit 事件此时才到——若只看 _stopping 会把旧进程的
+    // 迟到退出误判为「意外退出」，再弹一次故障框。只有退出的就是当前进程时才处理。
+    const child = this.process;
+    child.on('exit', (code, signal) => {
       const reason = signal ? `signal=${signal}` : `code=${code}`;
       onLog('info', `后端进程已退出 (${reason})`);
+      if (this.process !== child) return;  // 旧进程迟到的 exit：不清理、不上报
       this.process = null;
       // 非主动停止 → 意外退出，通知主进程（弹窗恢复或退出）
       if (!this._stopping && this.onUnexpectedExit) {
