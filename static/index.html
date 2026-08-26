@@ -2680,6 +2680,13 @@ let skipPickingMode = false;      // 是否处于"添加跳过按钮"模式
 let skipTemplateCount = 0;        // 当前跳过模板数量（可选，不影响开跑）
 let auditLogLines = [];           // 运行审计纯文本行（复制 / 附报告）
 let lastRunAuditLog = [];         // 最近一次 run 的日志快照
+// 日志缓冲上限（2026-08 性能加固）：Chromium 长驻场景下日志行若无上限会持续
+// 推高 DOM 节点与字符串驻留量。只保留最新 N 行，历史行直接丢弃（不影响统计）。
+// 注：1000 行≈满负载 10 轮多设备 run 的日志量级，覆盖正常长跑不触发截断
+const MAX_LOG_LINES = 1000;
+function trimLogLines(arr) {
+  if (arr.length > MAX_LOG_LINES) arr.splice(0, arr.length - MAX_LOG_LINES);
+}
 let lastReportCtx = null;         // 最近一次报告上下文（「⟳ 重算」与 CSV 用，含 runStartIndex）
 let projectDirty = false;         // 相对已保存项目有未保存改动
 let autoGateReady = false;        // 开跑闸门是否全绿
@@ -2914,10 +2921,12 @@ function autoLog(level, phase, msg, serial) {
   if (serial) {
     if (!devLogs[serial]) devLogs[serial] = { lines: [] };
     devLogs[serial].lines.push(plain);
+    trimLogLines(devLogs[serial].lines);
     // 记录出现过的设备标签（renderLogTabs 会设置；此处兜底取 serial）
     if (!logDevLabels[serial]) logDevLabels[serial] = serial;
   } else {
     auditLogLines.push(plain);
+    trimLogLines(auditLogLines);
   }
   // 统一重绘到 #autoProgress（多列 / 单设备全局），内部自动贴底到最新日志
   renderCombinedLog();
