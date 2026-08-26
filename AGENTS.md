@@ -101,13 +101,15 @@
 - 不引入 JS 框架（React/Vue 等），保持原生 JS
 - 所有交互元素的 id 保持稳定（JS 依赖），改样式不破坏 JS 契约
 
-### 3.3.1 设计令牌（OpenCode OC-2，硬规则）
-- **唯一色源**：[`static/themes/oc-2.json`](static/themes/oc-2.json)，锁定上游 `anomalyco/opencode@ec3ae17e`
-- **产物**：[`static/themes/oc-2.css`](static/themes/oc-2.css)（由 `_bake_oc2.py` 从 palette + overrides 生成）
-- 页面：`data-theme="oc-2"` + `data-color-scheme="light|dark"`；禁止再用 `data-theme="dark|light"` 表示明暗
-- **禁止**在 `index.html` 或组件样式里手填业务色 hex；只消费 `var(--…)`（兼容别名 `--bg/--primary/--mint` 等已在 `oc-2.css` 映射到 OC 语义）
-- 改色流程：换/改 `oc-2.json` → 运行 `python static/themes/_bake_oc2.py` → 硬刷新验证
-- 本阶段不移植 OpenCode 全量 OKLCH resolve；不引入 `@opencode-ai/ui`
+### 3.3.1 设计令牌（Linear，硬规则）
+- **唯一色源**：[`static/themes/linear.json`](static/themes/linear.json)（Linear 暗色设计值，2026-08 全面重设计，替代原 OC-2 管线）
+- **产物**：[`static/themes/linear.css`](static/themes/linear.css)（由 `_bake_linear.py` 从 palette + overrides 生成）；禁止手填业务色 hex
+- 页面：`data-theme="linear"` + `data-color-scheme="dark"`（**仅暗色**；亮色切换元素 `#themeLightBtn` 保留但 CSS 隐藏）
+- 兼容别名层（`--bg/--primary/--mint/--outline-var` 等）在 linear.css 内映射到 Linear 语义，页面统一消费这些别名
+- 字体：`--font-ui` = Inter Variable（自托管 `static/fonts/`，OFL，零网络依赖）+ 系统回退；`--font-mono` 只管数据/日志；**UI 控件禁止 mono**
+- 字阶：6 级 token（`--text-display/value/title/body/label/data`），字体内禁止 tokens 之外的裸 px 字号
+- 改色流程：改 `linear.json` → 运行 `python static/themes/_bake_linear.py` → 硬刷新验证
+- 强调色纪律：`--primary`（紫 #5e6ad2）唯一饱和色；状态色只以 ≤12% alpha 底纹 / 圆点出现
 - 允许例外：透明黑白 `#000` / `#fff` 仅用于 `color-mix` / 描边对比
 
 ### 3.4 启动器

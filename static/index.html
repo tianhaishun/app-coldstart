@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/static.css">
 <!-- SheetJS（本地化，离线可用）：自动测速报告 Excel 导出 -->
 <script src="/vendor/xlsx.mini.min.js"></script>
-<!-- OpenCode OC-2：唯一色源（static/themes/oc-2.json → oc-2.css） -->
+<!-- Linear 主题：唯一色源（static/themes/linear.json → linear.css，2026-08 重设计） -->
 <link rel="stylesheet" href="/themes/linear.css">
 <style>
   /* 字号档：拉大 rem，并把绝对 px 的极小字一并抬高 */
@@ -304,10 +304,10 @@
   }
 
   /* ══════════════════════════════════════════════════════════════
-     v2.2 视觉精致化 —— Linear/Raycast 深色极简工具风
-     纯表现层覆盖：不改任何 id / JS 契约；颜色只消费 OC-2 令牌（§3.3.1）。
-     原则：弱化边框、投影浮起、克制强调色（霓虹绿只留成功语义）、
-     统一 150ms 过渡、主行动按钮用 --primary 暖橙单色。
+     v2.2 视觉精致化 —— Linear 深色极简工具风
+     纯表现层覆盖：不改任何 id / JS 契约；颜色只消费 Linear 令牌（§3.3.1）。
+     原则：弱化边框、投影浮起、克制强调色（紫单色）、
+     统一 150ms 过渡、主行动按钮用 --primary 单色。
      ══════════════════════════════════════════════════════════════ */
 
   /* 圆角由 linear.css 提供（--radius: 4px；弹层 --radius-lg: 8px）——此处撤销旧 6px 覆盖 */
@@ -1080,12 +1080,12 @@ function uiConfirm(message, detail, type) {
   return Promise.resolve(confirm(detail ? `${message}\n\n${detail}` : message));
 }
 
-// ── 外观：OC-2 明暗 / 字体 / 字号（色源见 static/themes/oc-2.json）──
+// ── 外观：Linear 暗色 / 字体 / 字号（色源见 static/themes/linear.json）──
 function saveUiPrefs() {
   localStorage.setItem(UI_PREFS_KEY, JSON.stringify(uiPrefs));
 }
 function applyUiPrefs() {
-  // 兼容旧字段 theme → colorScheme；主题色固定 OC-2
+  // 兼容旧字段 theme → colorScheme；主题固定 Linear
   // Linear 重设计：仅暗色（2026-08）。历史遗留的 light 偏好强制回落到 dark，
   // linear.css 未定义 light 规则，避免 save 过 light 的用户看到无样式页面。
   const colorScheme = 'dark';
@@ -2638,7 +2638,7 @@ if (isElectron && window.electronAPI.onBackendStatus) {
     if (!ov) {
       ov = document.createElement('div');
       ov.id = 'backendOfflineOverlay';
-      // fixed 全屏遮罩 + 居中卡片；背景用 OC-2 令牌 var(--bg)，外层透明黑属允许例外
+      // fixed 全屏遮罩 + 居中卡片；背景用 Linear 令牌 var(--bg)，外层透明黑属允许例外
       ov.style.cssText = 'display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;';
       ov.innerHTML = '<div style="background:var(--bg,#1a1a2e);padding:32px 48px;border-radius:12px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);"><div style="font-size:18px;font-weight:600;margin-bottom:8px;">后端已断开</div><div style="font-size:14px;opacity:0.7;">Python 后端意外退出，正在等待恢复…</div></div>';
       document.body.appendChild(ov);
