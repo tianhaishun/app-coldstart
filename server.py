@@ -75,6 +75,9 @@ else:
 # APK 上传目录（每次上传保留原始文件名，不再覆盖式存储）。
 # 复数 _cst_uploads 与老的单数 _cst_upload.apk 区分；启动时整目录清空重建。
 APK_UPLOAD_DIR = Path(tempfile.gettempdir()) / "_cst_uploads"
+# 上传大小上限（审核中6，模块级常量便于测试 monkeypatch）：4GB 留足余量的工程上限，
+# 当前主流 APK/AAB 远小于此。流式累计超限即断、删半成品，防误传/恶意填满磁盘。
+APK_MAX_BYTES = 4 * 1024 * 1024 * 1024
 
 # 启动成功模板图（cv2.matchTemplate 区域比对用）。多设备（v4）起按设备隔离存
 # tempdir/_cst_marker_<safe_serial>.png（见 DeviceSession.marker_path），不再用单文件。
@@ -280,6 +283,12 @@ def _ios_async(coro):
 # userspace tunnel 是进程级单例（PyTCP 栈全局，一个进程只能一个活跃隧道，
 # 实测报错 "a userspace tunnel is already active in this process"）——
 # 全局只维护一个活跃隧道，换设备（serial 不同）时关旧建新。
+# 【2026-08 审核评估】这是 pymobiledevice3 的硬约束而非设计选择：
+# UserspaceTun 文档明文 "PyTCP's stack is a process-global singleton, so one
+# tunnel per process is supported"（remote/userspace_tunnel.py）。因此【不能】
+# 按设备拆多隧道来消除多 iOS 并行抖动；进程内唯一可行解就是本单例 + 切换重建。
+# 将来要真并行 iOS 测速只能子进程隔离（每台设备独立截图子进程），属架构级改动，
+# 收益/风险比不划算，明确不做（防后续 agent 把它当 bug 修出 "already active"）。
 _ios_tunnel_state: dict = {"rsd": None, "tunnel": None, "serial": None}
 _ios_tunnel_lock = threading.Lock()
 
@@ -329,7 +338,31 @@ class IosDevice:
     def __init__(self, udid: str) -> None:
         self.udid = udid
         self._last_size: Optional[tuple[int, int]] = None
-        # 注：tunnel 是进程级单例（_ios_tunnel_state），不再挂在实例上
+        # 型号惰性缓存：None=还没查过，""=查过但取不到（避免反复连设备失败拖慢）
+        self._model: Optional[str] = None
+        # 注意：tunnel 是进程级单例（见 _ios_tunnel_state），不挂到实例上
+
+    @property
+    def model(self) -> str:
+        """设备型号（DeviceName 优先，退 ProductType）。
+
+        device_info 端点消费此属性拼 Word 报告的「测试设备信息」。
+        契约与 docstring 一致：取不到返回空串而不是抛错——型号缺失只影响报告
+        展示，不能让整个端点 500。查询走 lockdown，一次性开销 ~100-300ms 后缓存。
+        """
+        if self._model is None:
+            try:
+                async def _query():
+                    ld = await self._get_lockdown()
+                    name = ld.all_values.get("DeviceName", "") or \
+                           ld.all_values.get("ProductType", "")
+                    return str(name or "")
+
+                self._model = _ios_async(_query())
+            except Exception:
+                # 设备拔出/未信任/lockdown 起不来：按「缺失为空」契约处理
+                self._model = ""
+        return self._model
 
     async def _get_lockdown(self):
         """创建到设备的 lockdown 连接。"""
@@ -635,6 +668,25 @@ class AdbError(RuntimeError):
 # iOS 仍抛 AdbError（非越狱限制），端点 catch 用这个联合
 AdbOpError = (AdbError, AdbHelperError)
 
+# 包名/bundle_id 白名单：Android "com.xxx.yyy"、iOS "com.xxx.Bundle" 均为其子集。
+# 背景（2026-08 审核）：adb 会把 shell 参数按空格拼给设备端 sh 执行，含 ``;`` ``$()``
+# 的包名可在设备上执行任意命令。本地工具属自伤面，但一行白名单即可封堵。
+_PKG_FULLMATCH = re.compile(r"[A-Za-z0-9._]+\Z").fullmatch
+
+
+def _check_pkg(package: str) -> str:
+    """包名/bundle_id 合法性校验（设备侧注入面封堵）。
+
+    抛 AdbError → 走各端点既有的 except AdbOpError → HTTP 400，
+    错误信息直接展示给前端，不引入新的错误通道。返回 strip 后的包名。
+    """
+    pkg = (package or "").strip()
+    if not pkg or not _PKG_FULLMATCH(pkg):
+        raise AdbError(
+            f"非法包名：{package!r}（只允许字母、数字、点、下划线）"
+        )
+    return pkg
+
 
 def _safe_serial(serial: str) -> str:
     """serial 转安全文件名片段（serial 可能含 ``:`` ``.`` 等路径危险字符）。"""
@@ -677,6 +729,10 @@ class DeviceSession:
         self.shot_errors = 0      # 失败次数
         self.shot_last_ms = 0.0   # 上次截图耗时
         self.shot_avg_ms = 0.0    # 滑动平均耗时
+        # 长事务标志（verify_launch 锁内 sleep+dumpsys、sys_baseline 锁内连跑 N 轮）：
+        # 置位期间同设备的直播/测速请求会在锁上排队——前端读 /api/devices 的 busy
+        # 字段显示「忙碌」徽标，解释"为什么画面不动了"。布尔读写 GIL 原子，无需加锁。
+        self.busy = False
         # 启动成功模板（cv2.matchTemplate 用，详见 set_marker_template / check_marker）
         self._marker_template: Optional[Path] = None  # 模板图路径（None=未设）
         self._marker_img = None                        # 内存缓存（BGR ndarray），避免每次 imread
@@ -1546,6 +1602,14 @@ def list_devices() -> dict:
         devices.extend(ios_devs)
     except Exception:
         pass  # pymobiledevice3 不可用或无 iOS 设备，静默跳过
+    # 附加忙碌标志（审核中5：长事务持锁无提示）：只对已有会话的设备补充 additive
+    # 字段 busy；未建会话的设备不可能在跑长事务，不写字段（前端按 undefined 处理）
+    with SESSION._registry_lock:
+        sessions = dict(SESSION._devices)
+    for d in devices:
+        s = sessions.get(d.get("serial"))
+        if s is not None and getattr(s, "busy", False):
+            d["busy"] = True
     result = {"devices": devices}
     if adb_error:
         result["error"] = adb_error
@@ -1591,10 +1655,24 @@ async def upload_apk(file: UploadFile) -> dict:
     APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     saved_name = _safe_apk_filename(file.filename)
     target = APK_UPLOAD_DIR / saved_name
+    # 大小上限：流式累计，超限即断并删半成品（上限常量在模块级 APK_MAX_BYTES）
+    size_bytes = 0
+    first_chunk: Optional[bytes] = None
     with target.open("wb") as f:
         while chunk := await file.read(1024 * 1024):
+            if first_chunk is None:
+                first_chunk = chunk
+            size_bytes += len(chunk)
+            if size_bytes > APK_MAX_BYTES:
+                f.close()
+                target.unlink(missing_ok=True)
+                raise _err(400, f"APK 超过大小上限（>{APK_MAX_BYTES // (1024 * 1024)} MB），已取消保存")
             f.write(chunk)
-    size_bytes = target.stat().st_size
+    # ZIP 魔数校验：APK 本质是 ZIP。改名 .apk 的任意文件在这里被拦下，
+    # 避免装包阶段才报出难懂的 aapt/adb 错误。空 ZIP（PK\x05\x06）也放行不了安装，一并拒。
+    if first_chunk is None or not first_chunk.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        target.unlink(missing_ok=True)
+        raise _err(400, "文件不是有效的 APK（缺少 ZIP 头），请确认没选错文件")
     return {
         "ok": True,
         "path": str(target),
@@ -1630,8 +1708,13 @@ def parse_apk(req: ApkParseReq) -> dict:
             "version_code": info.version_code,
             "label": info.label,
         }
-    except (AdbHelperError, OSError) as exc:
+    except AdbHelperError as exc:
+        # aapt 解析失败的原始信息（含 adb 输出），对排查包体问题有用，保留透传
         raise _err(400, str(exc)) from exc
+    except OSError:
+        # 文件系统错误（不存在/无权限）：不回显 OS 原文——「存在/不存在」可区分
+        # 会变成任意路径探测通道；与 reinstall 的不可用文案保持同一口径
+        raise _err(400, "APK 文件不可用（不存在或无法读取）。请重新选择或上传 APK。") from None
 
 
 @app.get("/api/screenshot")
@@ -1650,8 +1733,8 @@ def screenshot(manual: int = 0, serial: Optional[str] = None) -> Response:
         ds = _target_session(serial)
         data, meta = ds.screenshot_bytes(use_cache=manual == 0)
     except AdbOpError as e:
-        if ds is not None:
-            ds.shot_errors += 1
+        # 失败计数只在 screenshot_bytes 内部记一次（审核低11：此前这里又 +1，
+        # 同一次失败被算成两次，诊断统计翻倍）。这里只负责转 400。
         raise _err(400, str(e))
     headers = {
         "X-Shot-Ms": str(meta["ms"]),
@@ -1697,6 +1780,59 @@ def ocr(serial: Optional[str] = None) -> dict:
         raise _err(400, str(e))
 
 
+def _crop_template_region(img, cx_norm: float, cy_norm: float,
+                          box_w: Optional[float], box_h: Optional[float],
+                          default_w: int, default_h: int, hint: str) -> tuple:
+    """从整屏截图按归一化中心裁出模板区域（set_marker / set_skip 共用）。
+
+    抽取背景（2026-08 审核）：两处曾逐字重复 ~40 行（默认尺寸→越界平移→空模板
+    检查→纯色拒绝），修一处漏一处的典型温床。单点维护后行为必须与原版一致：
+      - box_w/box_h 均在 (0,1] 时按比例取尺寸并夹底 40px，否则用 default_w/h；
+      - 越界时整体平移回屏内，模板尺寸不变（matchTemplate 尺寸必须匹配）；
+      - 空模板抛 AdbError；
+      - 灰度标准差 <15 拒绝（TM_CCOEFF_NORMED 对纯色返回 1.0 满置信度会误命中，
+        教训五，双重设防中的服务端一道）。
+    返回 (template, x1, y1, w_px, h_px)；hint 用于区分两种场景的用户引导文案。
+    """
+    import cv2
+
+    h_px, w_px = img.shape[:2]
+    cx_px = int(cx_norm * w_px)
+    cy_px = int(cy_norm * h_px)
+
+    if box_w and box_h and 0 < box_w <= 1 and 0 < box_h <= 1:
+        tw = max(40, int(box_w * w_px))
+        th = max(40, int(box_h * h_px))
+    else:
+        tw = default_w
+        th = default_h
+
+    x1 = cx_px - tw // 2
+    y1 = cy_px - th // 2
+    x2 = x1 + tw
+    y2 = y1 + th
+    if x1 < 0:
+        x1, x2 = 0, tw
+    elif x2 > w_px:
+        x2, x1 = w_px, w_px - tw
+    if y1 < 0:
+        y1, y2 = 0, th
+    elif y2 > h_px:
+        y2, y1 = h_px, h_px - th
+
+    template = img[y1:y2, x1:x2]
+    if template.size == 0:
+        raise AdbError(f"模板截取为空：img {w_px}x{h_px}, 区域 ({x1},{y1})-({x2},{y2})")
+
+    gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    std = float(gray.std())
+    if std < 15.0:
+        raise AdbError(
+            f"选定区域几乎是纯色（标准差 {std:.1f} < 15），无法可靠匹配。{hint}"
+        )
+    return template, x1, y1, w_px, h_px
+
+
 @app.post("/api/set_marker_template")
 def set_marker_template(req: SetMarkerReq) -> dict:
     """以当前屏幕 (cx, cy) 为中心截小区域，存为启动成功模板。
@@ -1730,46 +1866,12 @@ def set_marker_template(req: SetMarkerReq) -> dict:
             if img is None:
                 raise AdbError("截图失败或 cv2 读图失败")
 
-            h_px, w_px = img.shape[:2]
-            cx_px = int(req.cx * w_px)
-            cy_px = int(req.cy * h_px)
-
-            # 2) 算模板尺寸：优先用传入的 box_w/box_h 换算，否则用默认
-            if req.box_w and req.box_h and 0 < req.box_w <= 1 and 0 < req.box_h <= 1:
-                tw = max(40, int(req.box_w * w_px))
-                th = max(40, int(req.box_h * h_px))
-            else:
-                tw = MARKER_DEFAULT_W
-                th = MARKER_DEFAULT_H
-
-            # 3) 算截取区域（中心对齐 cx/cy，裁剪到画面范围内）
-            x1 = cx_px - tw // 2
-            y1 = cy_px - th // 2
-            x2 = x1 + tw
-            y2 = y1 + th
-            # 越界则整体平移（保持模板尺寸不变，避免 matchTemplate 尺寸不匹配）
-            if x1 < 0:
-                x1, x2 = 0, tw
-            elif x2 > w_px:
-                x2, x1 = w_px, w_px - tw
-            if y1 < 0:
-                y1, y2 = 0, th
-            elif y2 > h_px:
-                y2, y1 = h_px, h_px - th
-
-            template = img[y1:y2, x1:x2]
-            if template.size == 0:
-                raise AdbError(f"模板截取为空：img {w_px}x{h_px}, 区域 ({x1},{y1})-({x2},{y2})")
-
-            # 3.5) 拒绝低方差/纯色模板：TM_CCOEFF_NORMED 对纯色模板会返回 1.0 满置信度
-            # （实测确认），导致启动瞬间立即误命中停表。要求模板有足够纹理（标准差 ≥ 15）。
-            gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-            std = float(gray.std())
-            if std < 15.0:
-                raise AdbError(
-                    f"选定区域几乎是纯色（标准差 {std:.1f} < 15），无法可靠匹配。"
-                    f"请点画面上有文字/图标/边缘的区域。"
-                )
+            # 2-3.5) 尺寸换算 + 越界平移 + 纯色拒绝（与 set_skip_template 共用，单点维护）
+            template, x1, y1, w_px, h_px = _crop_template_region(
+                img, req.cx, req.cy, req.box_w, req.box_h,
+                MARKER_DEFAULT_W, MARKER_DEFAULT_H,
+                hint="请点画面上有文字/图标/边缘的区域。",
+            )
 
             # 4) 存模板（覆盖式，按设备隔离的单文件）
             cv2.imwrite(str(ds.marker_path), template)
@@ -2184,41 +2286,12 @@ def set_skip_template(req: SetMarkerReq) -> dict:
             if img is None:
                 raise AdbError("截图失败或 cv2 读图失败")
 
-            h_px, w_px = img.shape[:2]
-            cx_px = int(req.cx * w_px)
-            cy_px = int(req.cy * h_px)
-
-            if req.box_w and req.box_h and 0 < req.box_w <= 1 and 0 < req.box_h <= 1:
-                tw = max(40, int(req.box_w * w_px))
-                th = max(40, int(req.box_h * h_px))
-            else:
-                tw = SKIP_DEFAULT_W
-                th = SKIP_DEFAULT_H
-
-            x1 = cx_px - tw // 2
-            y1 = cy_px - th // 2
-            x2 = x1 + tw
-            y2 = y1 + th
-            if x1 < 0:
-                x1, x2 = 0, tw
-            elif x2 > w_px:
-                x2, x1 = w_px, w_px - tw
-            if y1 < 0:
-                y1, y2 = 0, th
-            elif y2 > h_px:
-                y2, y1 = h_px, h_px - th
-
-            template = img[y1:y2, x1:x2]
-            if template.size == 0:
-                raise AdbError(f"跳过模板截取为空：区域 ({x1},{y1})-({x2},{y2})")
-
-            gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-            std = float(gray.std())
-            if std < 15.0:
-                raise AdbError(
-                    f"选定区域几乎是纯色（标准差 {std:.1f} < 15），无法可靠匹配。"
-                    f"请点「允许/不允许/跳过」等按钮文字区域。"
-                )
+            # 尺寸换算 + 越界平移 + 纯色拒绝（与 set_marker_template 共用，单点维护）
+            template, x1, y1, w_px, h_px = _crop_template_region(
+                img, req.cx, req.cy, req.box_w, req.box_h,
+                SKIP_DEFAULT_W, SKIP_DEFAULT_H,
+                hint="请点「允许/不允许/跳过」等按钮文字区域。",
+            )
 
             ds.skip_dir.mkdir(parents=True, exist_ok=True)
             # id 用递增：已有 max+1，避免删中间后撞名
@@ -2565,7 +2638,7 @@ def launch_pkg(req: LaunchPkgReq) -> dict:
     try:
         ds = _target_session(req.serial)
         with ds.lock:
-            ds.device.launch_package(req.package)
+            ds.device.launch_package(_check_pkg(req.package))
     except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -2576,7 +2649,7 @@ def force_stop(req: ForceStopReq) -> dict:
     try:
         ds = _target_session(req.serial)
         with ds.lock:
-            ds.device.force_stop(req.package)
+            ds.device.force_stop(_check_pkg(req.package))
     except AdbOpError as e:
         raise _err(400, str(e))
     return {"ok": True}
@@ -2620,25 +2693,28 @@ def _apk_info(path: Path) -> Optional[dict]:
 def reinstall(req: ReinstallReq) -> dict:
     try:
         ds = _target_session(req.serial)
+        # 包名校验放 try 内：非法包名走 {ok:false} 结构，与前端既有错误通道一致
+        package = _check_pkg(req.package)
     except AdbOpError as e:
-        # 前端按 {ok:false} 结构处理（与其它错误路径一致，避免 500）
+        # 前端按 {ok:false} 结构展示，这里不能抛 500。
         return {"ok": False, "error": str(e), "log": [], "apk_info": None}
     # 锁外先查 APK：否则直播截图占着设备锁时，连「文件不存在」都要干等十几秒，
     # 前端只看到「卸装重装」一行日志，像没执行。
     apk = Path(req.apk_path)
     if not apk.is_file():
+        # 错误信息不回显路径：存在/不存在可区分会变成文件系统探测通道（2026-08 审核）
         return {
             "ok": False,
-            "error": f"APK 文件不存在：{req.apk_path}（若刚重启过后端，请重新上传 APK）",
+            "error": "APK 文件不可用（不存在或无法读取）。若刚重启过后端，请重新选择或上传 APK。",
             "log": [],
         }
     # 锁外算 APK 指纹（百 MB 级哈希数百 ms，不占设备锁）
     apk_info = _apk_info(apk)
-    print(f"[reinstall:{ds.serial}] 开始 pkg={req.package} apk={apk.name} size={apk.stat().st_size}", flush=True)
+    print(f"[reinstall:{ds.serial}] 开始 pkg={package} apk={apk.name} size={apk.stat().st_size}", flush=True)
     try:
         with ds.lock:
             print("[reinstall] 已拿到设备锁，执行 uninstall…", flush=True)
-            log = ds.device.reinstall(req.package, req.apk_path)
+            log = ds.device.reinstall(package, req.apk_path)
     except AdbOpError as e:
         print(f"[reinstall] 失败：{e}", flush=True)
         return {"ok": False, "error": str(e), "log": [], "apk_info": apk_info}
@@ -2655,9 +2731,12 @@ def verify_launch(req: VerifyLaunchReq) -> dict:
     iOS：非越狱无等效前台检测，launch 成功即返回并提示看画面确认。
     """
     ds = _target_session(req.serial)
+    # 长事务标志：锁内 sleep(2.5s)+dumpsys，期间同设备直播/测速会排队，前端据此显示忙碌
+    ds.busy = True
     try:
+        package = _check_pkg(req.package)
         with ds.lock:
-            ds.device.launch_package(req.package)
+            ds.device.launch_package(package)
             if ds.platform == "ios":
                 return {
                     "ok": True, "launched": True, "match": None,
@@ -2681,12 +2760,14 @@ def verify_launch(req: VerifyLaunchReq) -> dict:
                 }
             return {
                 "ok": True, "launched": True,
-                "match": fg == req.package,
+                "match": fg == package,
                 "foreground_pkg": fg,
-                "expected": req.package,
+                "expected": package,
             }
     except AdbOpError as e:
         raise _err(400, str(e))
+    finally:
+        ds.busy = False
 
 
 @app.post("/api/marker_threshold")
@@ -2716,18 +2797,21 @@ def sys_baseline(req: SysBaselineReq) -> dict:
     只读打点：不写 records、不影响任何现有统计。全程持目标设备锁（对齐 §2.4）。
     """
     ds = _target_session(req.serial)
+    # 长事务标志：锁内连跑 N 轮（每轮 cooldown+am start），期间同设备一切轮询排队
+    ds.busy = True
     try:
+        package = _check_pkg(req.package)
         with ds.lock:
             # 1) 解析可启动组件（resolve-activity --brief 输出形如 com.pkg/.MainActivity）
             out = ds.device.run(
-                ["shell", "cmd", "package", "resolve-activity", "--brief", req.package],
+                ["shell", "cmd", "package", "resolve-activity", "--brief", package],
                 timeout=10.0,
             )
             lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
             component = lines[-1] if lines else ""
             if not component or "/" not in component:
                 raise AdbError(
-                    f"解析不到可启动 Activity：pkg={req.package}"
+                    f"解析不到可启动 Activity：pkg={package}"
                     + (f"（adb 输出：{out.strip()!r}）" if out.strip() else "（空输出，设备可能离线）")
                 )
 
@@ -2735,7 +2819,7 @@ def sys_baseline(req: SysBaselineReq) -> dict:
             samples: list[dict] = []
             errors: list[str] = []
             for i in range(req.rounds):
-                ds.device.force_stop(req.package)
+                ds.device.force_stop(package)
                 if req.cooldown_s > 0:
                     time.sleep(req.cooldown_s)
                 try:
@@ -2773,7 +2857,7 @@ def sys_baseline(req: SysBaselineReq) -> dict:
 
             return {
                 "ok": True,
-                "package": req.package,
+                "package": package,
                 "component": component,
                 "rounds": req.rounds,
                 "samples": samples,
@@ -2786,6 +2870,8 @@ def sys_baseline(req: SysBaselineReq) -> dict:
             }
     except AdbOpError as e:
         raise _err(400, str(e))
+    finally:
+        ds.busy = False
 
 
 @app.post("/api/cold_start")
@@ -2802,7 +2888,7 @@ def cold_start(req: ColdStartReq) -> dict:
         with ds.lock:
             # 1) 先把上一次的同包进程杀掉，确保冷启动
             if req.package:
-                ds.device.force_stop(req.package)
+                ds.device.force_stop(_check_pkg(req.package))
 
             # 2) 预热 screen_size（如果还没缓存），避免它计入 tap_norm 的执行
             if getattr(ds.device, "_last_size", None) is None:
@@ -2818,13 +2904,16 @@ def cold_start(req: ColdStartReq) -> dict:
             elif req.mode == "pkg":
                 if not req.package:
                     raise _err(400, "pkg 模式需要 package")
-                ds.device.launch_package(req.package)
+                ds.device.launch_package(_check_pkg(req.package))
             else:
                 raise _err(400, f"未知 mode：{req.mode}")
 
-        # 新一次启动观察：清零 streak / 已点跳过；
-        # after_force_stop=True：上面若杀过包（或本就无包可杀），视为已离开成功页，种上升沿
-        ds.reset_marker_watch(after_force_stop=True)
+            # 新一次启动观察：清零 streak / 已点跳过；
+            # after_force_stop=True：上面若杀过包（或本就无包可杀），视为已离开成功页，种上升沿
+            # 必须在锁内做（审核中3）：锁外窗口期并发 check_auto 会读到上一轮遗留的
+            # streak/below 状态，可能把旧轮置信度当成本轮命中（或命中后被清零）。
+            # reset 内部自取 self.lock——RLock 同线程可重入，安全。
+            ds.reset_marker_watch(after_force_stop=True)
 
         return {
             "ok": True,

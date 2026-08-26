@@ -472,7 +472,8 @@ function showAboutDialog() {
     title: '关于 App 冷启测速',
     message: 'App 冷启测速 · Cold Start Profiler',
     detail: [
-      '版本: 2.0.0',
+      // 版本号从 package.json 读（app.getVersion()），消除与版本号的四处双写维护
+      `版本: ${app.getVersion()}`,
       `Electron: ${process.versions.electron}`,
       `Chrome: ${process.versions.chrome}`,
       `Node.js: ${process.versions.node}`,

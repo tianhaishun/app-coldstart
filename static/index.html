@@ -1206,7 +1206,7 @@ function applyProjectForm(j) {
 async function refreshProjectList(selectId) {
   const sel = $('projectSel');
   try {
-    const r = await fetch(API + '/api/projects');
+    const r = await apiFetch(API + '/api/projects');  // 带超时：后端卡死不让下拉静默挂起
     const j = await r.json();
     const items = j.items || [];
     const keep = selectId != null ? selectId : (sel.value || currentProjectId);
@@ -1454,6 +1454,16 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// CSV 单元格转义（2026-08 审核）：
+//  - 含逗号/引号/换行的值整体加引号、内部引号翻倍，防串列串行；
+//  - 以 =+-@ 开头的值前置单引号，防 Excel 打开时公式注入（导出报告会外发）。
+// 安全值输出不变（按需加引号），不破坏既有导出格式。
+function csvCell(v) {
+  let s = String(v ?? '');
+  if (/^[=+\-@\t]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 // 拖拽到路径输入框区域
 const dropZone = $('apkDropZone');
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.background = 'var(--primary-soft)'; });
@@ -1550,7 +1560,10 @@ async function refreshDevices() {
         const icon = d.platform === 'ios' ? '🍎 ' : '🤖 ';
         const label = d.model ? `${icon}${escapeHtml(d.model)}` : `${icon}${escapeHtml(d.serial)}`;
         const ok = d.state === 'device';
-        return `<option value="${escapeHtml(d.serial)}" ${ok?'':'disabled'}>${label}${ok?'':' ['+escapeHtml(d.state)+']'}</option>`;
+        // 忙碌标记（后端 verify_launch/sys_baseline 长事务置位）：下拉里用文本后缀，
+        // 提示"此刻选它做别的操作会排队"
+        const busyTag = d.busy ? ' ⏳忙' : '';
+        return `<option value="${escapeHtml(d.serial)}" ${ok?'':'disabled'}>${label}${busyTag}${ok?'':' ['+escapeHtml(d.state)+']'}</option>`;
       }).join('');
       if (cur && devs.find(d => d.serial === cur)) sel.value = cur;
       else if (config.serial && devs.find(d => d.serial === config.serial)) sel.value = config.serial;
@@ -2169,7 +2182,8 @@ async function forceStop() {
 }
 async function pressKey(code) {
   try {
-    await fetch(API + '/api/key', {
+    // apiFetch：后端卡死时超时抛错，不让按钮静默挂起（2026-08 审核）
+    await apiFetch(API + '/api/key', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code})
     });
     setTimeout(refreshOcr, 300);
@@ -2273,11 +2287,11 @@ $('csvBtn').addEventListener('click', () => {
   const L = [];
   L.push('# 冷启动性能测试报告');
   L.push(`# 测试时间,${new Date().toLocaleString('zh-CN')}`);
-  L.push(`# 设备,${$('deviceSel').selectedOptions[0]?.text || ''}`);
+  L.push(`# 设备,${csvCell($('deviceSel').selectedOptions[0]?.text || '')}`);
   if (ocrResult) L.push(`# 分辨率,${ocrResult.width}×${ocrResult.height}`);
   L.push(`# 平台,${platform}`);
   L.push(`# 启动方式,${$('launchMode').value === 'pkg' ? '包名启动' : '模拟点击'}`);
-  L.push(`# 应用包名,${$('apkPkg').value || ''}`);
+  L.push(`# 应用包名,${csvCell($('apkPkg').value || '')}`);
   L.push('# 数据说明,起点漏 adb input 执行(~150-250ms); 终点含人工反应(偏高~0.3s)');
   L.push('# 可比性,同设备同APK横向对比有效; 差异<~0.3s视为噪声');
   L.push('');
@@ -2344,7 +2358,12 @@ $('csvBtn').addEventListener('click', () => {
 // ── 快捷键（方案1：取消 Space 手动计时）──
 document.addEventListener('keydown', e => {
   if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
-  if (e.key === 'Delete') { e.preventDefault(); removeLast(); }
+  // Delete/R 属不可逆删数据（2026-08 审核）：removeLast 无确认直接 pop 还会翻转
+  // 奇偶分组身份（AGENTS §2.3 依赖序号），必须二次确认；且 confirm 弹窗期间不响应重复按键
+  if (e.key === 'Delete') {
+    e.preventDefault();
+    if (records.length && window.confirm(`删除最后一条样本（#${String(records.length).padStart(2,'0')}，不可恢复）？`)) removeLast();
+  }
   else if (e.key.toLowerCase() === 'q') { e.preventDefault(); reinstall(); }
   else if (e.key.toLowerCase() === 'w') { e.preventDefault(); forceStop(); }
   else if (e.key.toLowerCase() === 'r') { e.preventDefault(); clearAll(); }
@@ -2373,7 +2392,13 @@ if (isElectron && window.electronAPI.onMenuCommand) {
 // 镜像走独立 SDL 窗口（置顶），不抢 adb 命令锁，与截图轮询/模板比对并存。
 async function initScrcpy() {
   if (!isElectron || !window.electronAPI.getScrcpyStatus) return;
-  const status = await window.electronAPI.getScrcpyStatus();
+  let status;
+  try {
+    status = await window.electronAPI.getScrcpyStatus();
+  } catch (e) {
+    console.error('scrcpy 状态查询失败（不影响其他功能）:', e);
+    return;
+  }
   if (!status.available) return;  // scrcpy 二进制不存在，隐藏按钮
   $('scrcpyMirrorBtn').classList.remove('hidden');
   $('scrcpyRecordBtn').classList.remove('hidden');
@@ -2403,26 +2428,36 @@ $('scrcpyMirrorBtn')?.addEventListener('click', async () => {
   if (!deviceReady) { uiAlert('请先连接设备', '', 'warning'); return; }
   const serial = $('deviceSel').value;
   const model = $('deviceSel').selectedOptions[0]?.text || serial;
-  const status = await window.electronAPI.getScrcpyStatus();
-  if (status.mirroring) {
-    await window.electronAPI.stopMirror();
-  } else {
-    const r = await window.electronAPI.startMirror(serial, model);
-    if (!r.ok) uiAlert('镜像启动失败', r.error, 'error');
+  // IPC 调用统一 try/catch（2026-08 审核）：主进程侧异常若不接住会变成
+  // unhandled rejection，按钮状态与实际镜像状态脱节且无任何提示
+  try {
+    const status = await window.electronAPI.getScrcpyStatus();
+    if (status.mirroring) {
+      await window.electronAPI.stopMirror();
+    } else {
+      const r = await window.electronAPI.startMirror(serial, model);
+      if (!r.ok) uiAlert('镜像启动失败', r.error, 'error');
+    }
+  } catch (e) {
+    uiAlert('镜像操作失败', String(e?.message || e), 'error');
   }
 });
 $('scrcpyRecordBtn')?.addEventListener('click', async () => {
   const serial = $('deviceSel').value;
-  const status = await window.electronAPI.getScrcpyStatus();
-  if (status.recording) {
-    const r = await window.electronAPI.stopRecord();
-    if (r.ok && r.recordPath) {
-      // 提示用户录屏文件位置
-      uiAlert('录屏已保存', `文件：${r.recordPath}`, 'info');
+  try {
+    const status = await window.electronAPI.getScrcpyStatus();
+    if (status.recording) {
+      const r = await window.electronAPI.stopRecord();
+      if (r.ok && r.recordPath) {
+        // 提示用户录屏文件位置
+        uiAlert('录屏已保存', `文件：${r.recordPath}`, 'info');
+      }
+    } else {
+      const r = await window.electronAPI.startRecord(serial);
+      if (!r.ok) uiAlert('录屏启动失败', r.error, 'error');
     }
-  } else {
-    const r = await window.electronAPI.startRecord(serial);
-    if (!r.ok) uiAlert('录屏启动失败', r.error, 'error');
+  } catch (e) {
+    uiAlert('录屏操作失败', String(e?.message || e), 'error');
   }
 });
 // 主进程 scrcpy 状态变化 → 更新按钮
@@ -2529,7 +2564,7 @@ function bindMarkerThreshold() {
 
 async function syncMarkerReadyFromServer() {
   try {
-    const r = await fetch(API + '/api/marker_status');
+    const r = await apiFetch(API + '/api/marker_status');
     if (!r.ok) return;
     const j = await r.json();
     if (j.ready) {
@@ -2660,9 +2695,9 @@ function renderCombinedLog() {
     col.style.minWidth = '0';
     col.style.overflowY = 'auto';
     col.style.maxHeight = '100%';
-    if (idx > 0) { col.style.borderLeft = '1px solid var(--outline-variant, #333)'; col.style.paddingLeft = '6px'; }
+    if (idx > 0) { col.style.borderLeft = '1px solid var(--outline-var)'; col.style.paddingLeft = '6px'; }
     const head = document.createElement('div');
-    head.style.cssText = 'position:sticky;top:0;background:var(--surface-container-lowest,#1a1a2e);font-size:0.7rem;font-weight:bold;color:var(--primary);padding:2px 4px;border-bottom:1px dashed var(--outline-variant,#333);z-index:1;';
+    head.style.cssText = 'position:sticky;top:0;background:var(--sc-lowest);font-size:0.7rem;font-weight:bold;color:var(--primary);padding:2px 4px;border-bottom:1px dashed var(--outline-var);z-index:1;';
     head.textContent = `▍${label.slice(0, 14)}`;
     col.appendChild(head);
     for (const line of (bucket ? bucket.lines : [])) appendLogLine(col, line, '');
@@ -3739,7 +3774,9 @@ async function exportDocxReport(ctx) {
   await Promise.all([...devMap.values()].map(async g => {
     if (!g.serial) return;    // 无 serial（__all__ 兜底）无法查询
     try {
-      const r = await fetch(`${API}/api/device_info?serial=${encodeURIComponent(g.serial)}`, { method: 'GET' });
+      // apiFetch + 放宽到 60s：device_info 要拿设备锁跑 adb getprop，若恰逢
+      // sys_baseline 等长事务持锁会排队——默认 15s 会把本可成功的查询掐断（2026-08 审核）
+      const r = await apiFetch(`${API}/api/device_info?serial=${encodeURIComponent(g.serial)}`, { method: 'GET' }, 60000);
       if (!r.ok) return;
       const info = await r.json();
       if (!info || info.ok === false) return;
@@ -3867,7 +3904,7 @@ $('reportCsvBtn').addEventListener('click', () => {
   if (!runRecords.length) { uiAlert('本轮无数据'); return; }
   const rows = [['type', 'round', 'time_ms', 'time_s', 'date']];
   runRecords.forEach(r => rows.push([r.type, r.round, Math.round(r.time), (r.time/1000).toFixed(3), r.date]));
-  const csv = '\uFEFF' + rows.map(row => row.join(',')).join('\n');  // BOM 防 Excel 乱码
+  const csv = '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\n');  // BOM 防 Excel 乱码；逐格转义防串列/公式注入
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -3889,10 +3926,12 @@ async function sysBaseline() {
   out.classList.remove('hidden');
   out.textContent = `正在执行 am start -W × ${rounds}（每轮 force-stop + 2s 冷却，请勿操作设备）…`;
   try {
-    const r = await fetch(API + '/api/sys_baseline', {
+    // apiFetch + 180s：sys_baseline 最长 10 轮 ×（冷却 + am start），远超默认 15s；
+    // 后端全程持设备锁，超时只会掐断一个本来会成功的长事务（2026-08 审核）
+    const r = await apiFetch(API + '/api/sys_baseline', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ package: pkg, rounds, cooldown_s: 2 })
-    });
+    }, 180000);
     const j = await r.json();
     if (!r.ok || !j.ok) {
       out.textContent = '✗ ' + (j.detail || j.error || `HTTP ${r.status}`);
@@ -3983,9 +4022,11 @@ function renderParallelDevices() {
     const on = (parallelDevChecked[d.serial] !== undefined) ? parallelDevChecked[d.serial] : true;
     const icon = d.platform === 'ios' ? '🍎' : '🤖';
     const label = (d.model || d.serial).slice(0, 14);
+    // 忙碌徽标：后端长事务（verify_launch/sys_baseline）持锁期间该设备一切请求排队
+    const busyTag = d.busy ? ' <span class="par-busy" title="设备忙碌中（系统打点/启动校验执行中），此刻的操作会排队等待">⏳</span>' : '';
     // 模板就绪标记占位：异步查回后填充（初始显示中性 ·）
     return `<label class="par-dev flex-1 flex items-center justify-center gap-1 py-1 bg-surface-container-high border rounded text-[10px] font-mono font-bold cursor-pointer select-none transition ${on ? 'border-tertiary text-tertiary' : 'border-outline-variant text-on-surface-variant'}" data-serial="${escapeHtml(d.serial)}" title="勾选后在自动循环中与此设备同时并行测速">
-      <input type="checkbox" data-serial="${escapeHtml(d.serial)}" data-platform="${escapeHtml(d.platform)}" data-label="${escapeHtml(label)}" ${on ? 'checked' : ''} class="hidden">${icon} ${escapeHtml(label)} <span class="par-mark" data-serial="${escapeHtml(d.serial)}">·</span></label>`;
+      <input type="checkbox" data-serial="${escapeHtml(d.serial)}" data-platform="${escapeHtml(d.platform)}" data-label="${escapeHtml(label)}" ${on ? 'checked' : ''} class="hidden">${icon} ${escapeHtml(label)}${busyTag} <span class="par-mark" data-serial="${escapeHtml(d.serial)}">·</span></label>`;
   }).join('');
   box.querySelectorAll('input').forEach(cb => {
     cb.addEventListener('change', () => {
@@ -4008,7 +4049,8 @@ function renderParallelDevices() {
       if (!markEl) return;
       const ok = st && st.ready;
       markEl.textContent = ok ? '✓' : '⚠';
-      markEl.style.color = ok ? '#22c55e' : '#ef4444';
+      // 颜色走主题令牌（--mint=success/--danger=error），明暗主题切换自动跟随（§3.3.1）
+      markEl.style.color = ok ? 'var(--mint)' : 'var(--danger)';
       markEl.title = ok ? `启动模板已设 ${st.w}×${st.h}` : '未设启动模板：请先在设备下拉选中此设备，再点「点画面选定启动元素」设置';
     });
   });
