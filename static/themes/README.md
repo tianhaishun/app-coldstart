@@ -1,20 +1,15 @@
-# OpenCode OC-2 主题（本项目唯一色源）
+# Linear 主题管线（本项目唯一色源，2026-08 UI 重设计）
 
-- **主题**：OC-2（`id: oc-2`）
-- **锁定上游**：`anomalyco/opencode` commit **`ec3ae17e`**
-- **源文件**：`packages/ui/src/theme/themes/oc-2.json` → 本目录 `oc-2.json`
-- **产物**：`oc-2.css`（由 JSON 的 `palette` + `overrides` 展开；含本项目兼容别名）
+- **色源**：`linear.json`（Linear 暗色设计值；仅暗色，亮色切换已隐藏）
+- **生成**：`python static/themes/_bake_linear.py` → 产出 `linear.css`
+- **运行**：`index.html` 以 `data-theme="linear"` + `data-color-scheme="dark"` 消费；页面只要 `var(--…)` 别名（`--bg/--primary/--mint/--outline-var` 等），换肤零感知
 
-## 规则
+## 操作规则
 
-1. **禁止**在 `index.html` / 组件样式里手填业务色 hex。
-2. 改色：更新上游 JSON（换 commit 后覆盖 `oc-2.json`）→ 重新生成 `oc-2.css`。
-3. 本阶段不移植 OpenCode 全量 OKLCH `resolve.ts`；只用 JSON 作者值。
+1. **禁止**在 `index.html` / 组件样式里手填业务色 hex；只消费 `var(--…)`
+2. 改色流程：改 `linear.json` → 运行 `python static/themes/_bake_linear.py` → 硬刷新验证
+3. **强调色纪律**：`--primary`（紫 #5e6ad2）唯一饱和色；状态色只以 ≤12% alpha 底纹 / 圆点出现
+4. **字体**：`--font-ui` = Inter Variable（自托管 `static/fonts/`，OFL）+ 系统回退；`--font-mono` 只管数据/日志；UI 控件禁止 mono
+5. 字阶 6 级 token（`--text-display/value/title/body/label/data`），禁止 tokens 之外的裸 px
 
-## 重新生成 CSS
-
-```bash
-python static/themes/_bake_oc2.py
-```
-
-不要手改 `oc-2.css` 里的 hex。
+> 历史：OC-2 管线（oc-2.json/_bake_oc2.py）已于 2026-08 全面移除，换肤为 Linear。

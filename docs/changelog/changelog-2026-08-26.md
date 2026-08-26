@@ -55,3 +55,39 @@
 
 - 亮色模式未实现（Linear 以暗色为主）；如需后续补 Linear light 值即可扩展 linear.json
 - 8766 后端常驻（合并后已重启）
+
+---
+
+# 追加：iOS 截图轮询丢失事件（同日，整改记录）
+
+## 现象
+
+客户端 iOS 画面全灭；后端返回 `adb.exe: device '00008101-00052830362A001E' not found`（HTTP 400）。
+
+## 根因（git 函数级取证，非"改码改坏"）
+
+- iOS 截图链路（`_dvt_shot`/`_ensure_ios_rsd`/`screenshot_bytes`）自 `9ef3c85`（tunnel 复用）
+  起**零改动**；本次全部提交（9efac1e/883a5a1/80819a0/f7a3c6d 及工作区改动）与截图路径无交集
+  （diff 取证：`_ensure_ios_rsd/screenshot/dvt` 关键字零命中）。
+- 引爆点 = **既有边角 bug（一审 item 12 记载）**：`_target_session(serial)` 建会话不传平台、
+  默认 `android`（依赖"select 先行"）。当日反复"force-kill electron + 重启后端 + 重置 adb server"
+  清空 Session 表 → 前端 serial 直连轮询（直播/check）先于 select 命中 → iOS UDID 被建成
+  `AdbHelper` 会话 → `adb not found` → 400 → 画面灭。
+- 叠加：Pixel 6a 物理断连（USB 枚举消失，与软件无关）加重观感。
+
+## 修复
+
+- `server.py`：新增 `_platform_for_serial(serial)`——建会话前查 iOS 清单（idevice_id -l）判定平台，
+  `_target_session` 改为 `session_for(serial, _platform_for_serial(serial))`；查询失败回退 android（保底）。
+
+## 验证
+
+- 带 serial 截图：3 连发全部 HTTP 200（~690ms/次，tunnel 复用生效）
+- 直播轮询真实路（无 serial，走后端 current）：HTTP 200 / 922KB
+- `device/select` → iOS：ready=True platform=ios
+- 客户端刷新后画面恢复（用户确认）
+
+## 教训（已写入 AGENTS.md §6 教训八）
+
+"默认平台"的会话创建皆是隐患；重启后端清空 Session 后必须验证设备/画面恢复；
+排查改坏先取证（git log -L），不凭印象归因。

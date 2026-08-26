@@ -199,6 +199,21 @@ cv2.matchTemplate 用 TM_CCOEFF_NORMED 时，纯色模板会返回 1.0 满置信
 **结论**：check=False 只用于"失败可接受"的场景（如 force_stop 杀不存在的进程），
 关键操作（uninstall/install）必须验证输出。
 
+**教训八：重启后端清空 Session，会引爆「依赖 select 先行」的时序边角（2026-08，iOS 截屏丢失事件）**
+- **现象**：客户端 iOS 画面全灭，后端报 `adb.exe: device '00008101-xxx' not found`（400）。
+- **取证**：iOS 截图链路（`_dvt_shot`/`_ensure_ios_rsd`/`screenshot_bytes`）自 commit `9ef3c85`
+  （tunnel 复用）后**从未被改动**——不是"改码改坏"，是**既有边角 bug（一审 item 12 早记载）**被环境动作引爆：
+  `_target_session(serial)` 建会话时**不传平台、默认 android**（"依赖 select 先行"）——后端重启
+  清空 Session 表后，一旦 serial 直连请求（多设备直播轮询/check 轮询）先于 select 命中，
+  iOS UDID 被建成 `AdbHelper` 会话 → adb not found → 400 → 直播画面灭。
+  叠加 Pixel 6a 物理断连（USB 枚举消失）加重观感。
+- **修复**：`_platform_for_serial()` 建会话前查 iOS 清单判定平台（serial 直连不再误判）。
+- **结论**：
+  1. `_target_session(serial)` 必须带平台判定——任何"默认平台"的会话创建都是隐患；
+  2. 重启后端清空内存态 Session 是已知副作用——重启后必须验证设备/画面恢复；
+  3. 前端直播轮询不带 serial（走后端 current）——排查画面要先确认 `/api/device/select` 成功；
+  4. 排查"改坏了什么"用 `git log -L` 函数级取证，不凭印象归因（本次差点冤枉在改码上）。
+
 **根因（教训三~七同源）**：
 - 教训三：在错误状态上叠加修复，没有回滚到已知正确状态（违反本文件 §4）
 - 教训四~七：没有用真实数据/边界用例验证就交付（违反本文件 §1.4）

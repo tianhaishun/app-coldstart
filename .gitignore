@@ -15,6 +15,10 @@ CLAUDE.md
 # 临时文件（防御性，正常不会在项目目录）
 _cst_*.png
 _cst_*.apk
+# 调试截图/导出物（历史教训：_shot_*.png 曾误提交进 git）
+_shot_*.png
+*.csv
+*.log
 
 # 用户冷启动项目配置（含模板图，本机私有，不入版本库）
 projects/

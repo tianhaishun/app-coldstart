@@ -124,7 +124,7 @@ iOS 冷启动测试依赖 pymobiledevice3 + libimobiledevice 工具链：
 - 工具**不上传任何数据**
 - 测试记录保存在浏览器 `localStorage`（按项目分桶）
 - Electron 模式后端绑 `127.0.0.1`（仅本机）
-- `Start.bat` 默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，改 `HOST=127.0.0.1`
+- `Start-Web.bat` 默认绑 `0.0.0.0`（允许局域网访问）；如需仅本机访问，改 `HOST=127.0.0.1`
 - 内置 adb + scrcpy + iOS 工具链，不污染系统 PATH
 
 ---
@@ -152,8 +152,8 @@ npm run release
 # 生成发布文档（Word）
 npm run gen-doc
 
-# 重新生成 OC-2 主题 CSS
-.venv\Scripts\python.exe static/themes/_bake_oc2.py
+# 重新生成 Linear 主题 CSS（改色后必须重烘焙）
+.venv\Scripts\python.exe static/themes/_bake_linear.py
 ```
 
 ---
