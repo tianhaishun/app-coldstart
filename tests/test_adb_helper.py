@@ -151,6 +151,63 @@ def test_install_error_cn_translation():
     assert install_error_cn("Success") is None
 
 
+# ── 覆盖安装（2026-08：GP/iOS 同步的 install -r 升级保数据路径）──
+
+
+def test_install_overwrite_single_install_no_uninstall(monkeypatch, tmp_path):
+    """覆盖安装 = 单条 install -r，绝不发 uninstall（清数据）命令。"""
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=b"Success", stderr=b"")
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    log = adb.install_overwrite("com.example", apk)
+    assert len(calls) == 1
+    assert "install" in calls[0] and "-r" in calls[0]
+    assert all("uninstall" not in c for c in calls)
+    assert "Success" in "\n".join(log)
+
+
+def test_install_overwrite_rejects_empty_output(monkeypatch, tmp_path):
+    """教训七同标准：空输出（device offline）必须抛错，失败不可见会污染测速前提。"""
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    with pytest.raises(AdbHelperError, match="空"):
+        adb.install_overwrite("com.example", apk)
+
+
+def test_install_overwrite_rejects_failure_with_cn_hint(monkeypatch, tmp_path):
+    """Failure 输出抛错并附中文翻译（与 reinstall 同款 install_error_cn 兜底）。"""
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=b"Failure [INSTALL_FAILED_OLDER_SDK]", stderr=b"")
+
+    monkeypatch.setattr("adb_helper.subprocess.run", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    with pytest.raises(AdbHelperError, match="OLDER_SDK|系统版本过低"):
+        adb.install_overwrite("com.example", apk)
+
+
+def test_install_overwrite_missing_file(monkeypatch, tmp_path):
+    """文件不存在直接抛错，不碰 adb。"""
+    adb = AdbHelper("SERIAL", adb_path="adb", project_root=tmp_path)
+    with pytest.raises(AdbHelperError, match="不存在"):
+        adb.install_overwrite("com.example", tmp_path / "nope.apk")
+
+
 def test_screen_poller_captures_and_matches_at_fixed_interval():
     cv2 = pytest.importorskip("cv2", reason="OpenCV is required for matcher tests")
     frame = np.zeros((80, 100, 3), dtype=np.uint8)

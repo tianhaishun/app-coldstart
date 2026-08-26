@@ -380,6 +380,27 @@ class AdbHelper:
             raise AdbHelperError(f"安装失败：{out3}" + (f"\n💡 {hint}" if hint else ""))
         return log
 
+    def install_overwrite(self, package: str, apk_path: str | Path) -> list[str]:
+        """覆盖安装（升级保数据）：单条 ``install -r``，不卸载、不清 App 数据。
+
+        GP 与 iOS 同步的安装模式（2026-08）：adb 原生 ``install -r`` 对已装同包名
+        即为升级覆盖。严格校验与 reinstall 同标准（教训七）：空输出（device offline）
+        抛 AdbHelperError；无 Success 抛错并附中文错误码翻译；失败可接受场景不适用
+        本方法——覆盖是用户显式选择，失败必须可见。
+        """
+        path = Path(apk_path)
+        if not path.is_file():
+            raise AdbHelperError(f"APK 文件不存在：{path}")
+        log: list[str] = []
+        out = self.run(["install", "-r", str(path)], check=False, timeout=180.0)
+        log.append(f"install -r(覆盖安装): {out}")
+        if not out:
+            raise AdbHelperError("覆盖安装失败：adb 返回空（设备离线或 adb 异常）")
+        if "Success" not in out:
+            hint = install_error_cn(out)
+            raise AdbHelperError(f"覆盖安装失败：{out}" + (f"\n💡 {hint}" if hint else ""))
+        return log
+
     def parse_apk(self, apk_path: str | Path) -> ApkInfo:
         """Parse package/version metadata using aapt or aapt2 on either OS."""
 

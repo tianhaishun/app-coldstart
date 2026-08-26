@@ -527,6 +527,42 @@
     border-radius: var(--radius);
   }
   #settingsPanel .ui-pref:hover { background: var(--l-raised-hover); }
+
+  /* ── 包名下拉开面板（自绘，2026-08）──
+     用 id 规则而非 Tailwind arbitrary 类：后者不在编译产物 static.css，
+     曾致面板无定位/透明 → 与表单文字重叠（实拍修复）。 */
+  #pkgDropdown {
+    position: absolute;
+    left: 0;
+    right: 86px;
+    top: calc(100% + 4px);
+    max-height: 220px;
+    overflow-y: auto;
+    z-index: 60;
+    background: var(--l-raised);
+    border: 1px solid var(--l-hairline);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+  #pkgDropdown .pkg-opt {
+    padding: 6px 8px;
+    font-size: 0.8125rem;
+    font-family: var(--font-mono);
+    color: var(--l-text-strong);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #pkgDropdown .pkg-opt:hover { background: var(--l-raised-hover); }
+
+  /* ── 自动测速内容区可滚动（2026-08）：跳过模板两组新增后内容超卡高，
+       被 .card 的 overflow-hidden 裁剪导致下方配置/按钮不可见 —— 卡片内滚动，
+       折叠态无影响（隐藏时无内容溢出）；滚动条用项目自定义窄条生态。 */
+  #autoLoopCard > .card-body {
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
 </style>
 </head>
 <body class="text-on-surface h-screen flex flex-col overflow-hidden">
@@ -714,6 +750,20 @@
       </div>
     </div>
 
+    <!-- ══════════════════════════════════════════════════════════════
+         安装方式单选（2026-08 闭环）：GP 与 iOS 同步显示。
+         重新安装 = 卸载重装清数据（默认，吻合测速工作流「卸装→测首次→测二次」节奏，
+         防测温启动污染样本）；覆盖安装 = 升级保数据（install -r / upgrade）。
+         默认「重新安装」（方案 A·安全取向）；覆盖安装为显式选择。
+         ══════════════════════════════════════════════════════════════ -->
+    <div id="installModeRow" class="px-2 py-1 flex items-center justify-between gap-2" data-mode-row>
+      <span class="text-[10px] font-mono font-bold text-on-surface-variant shrink-0">安装方式</span>
+      <div class="flex items-center gap-2 text-[10px] font-mono text-on-surface-variant">
+        <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="installMode" value="clean" checked class="text-primary"> 重新安装</label>
+        <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="installMode" value="overwrite" class="text-primary"> 覆盖安装</label>
+      </div>
+    </div>
+
     <!-- 下一条提示（手动交替采集用，自动模式下隐藏） -->
     <div id="nextHint" class="hidden"></div>
 
@@ -723,7 +773,7 @@
         <span class="font-mono text-[11px] font-bold tracking-wider text-on-surface-variant">🤖 自动测速 <span class="toggle-arrow text-[9px]">▼</span></span>
         <span id="autoModeBadge" class="text-[10px] text-on-surface-variant">准备</span>
       </div>
-      <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
+      <div class="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-hidden custom-scrollbar">
         <!-- 准备区：跑测时折叠，把空间让给审计日志 -->
         <div id="autoSetupBlock" class="flex flex-col gap-2 shrink-0">
           <div>
@@ -741,14 +791,28 @@
             </div>
           </div>
 
-          <details class="border-t border-outline-variant/60 pt-1.5">
-            <summary class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1 cursor-pointer hover:text-primary select-none">跳过弹窗模板（可选 · 最多 3 个）▶</summary>
-            <div class="flex gap-1.5 mb-1.5 mt-1.5">
-              <button id="addSkipBtn" class="flex-1 py-1.5 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">➕ 添加跳过按钮</button>
-              <button id="clearSkipBtn" class="px-2 py-1.5 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono font-bold transition active:scale-95">清除</button>
+          <details class="border-t border-outline-variant/60 pt-1.5" open>
+            <summary class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1 cursor-pointer hover:text-primary select-none">跳过界面模板（GM/实验选择/通知权限等，首次/二次可分别设置；iOS 识别自动、点击手动）</summary>
+            <!-- 2026-08：首次/二次分开识别（GM 界面两次可能不同）。
+                 每组模板只在其阶段匹配（backend phase 过滤：first/second/any）。 -->
+            <div class="grid grid-cols-2 gap-1.5 mt-1.5">
+              <div class="flex flex-col gap-1 bg-surface-container-lowest border border-outline-variant rounded p-1.5">
+                <div class="text-[9px] font-mono font-bold text-primary">【首次】冷启动：GM/实验界面</div>
+                <button id="addSkipBtn1" class="py-1 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">＋ 添加（点画面上的确定/开始）</button>
+                <div id="skipList1" class="flex flex-col gap-1"></div>
+                <div id="skipStatus1" class="text-[9px] font-mono text-on-surface-variant">未添加：首次弹出才识别</div>
+              </div>
+              <div class="flex flex-col gap-1 bg-surface-container-lowest border border-outline-variant rounded p-1.5">
+                <div class="text-[9px] font-mono font-bold text-primary">【二次】冷启动：GM/实验界面</div>
+                <button id="addSkipBtn2" class="py-1 bg-surface-container-high border border-warning/20 text-on-surface hover:bg-warning/10 rounded text-xs font-mono font-bold transition active:scale-95">＋ 添加（点画面上的确定/开始）</button>
+                <div id="skipList2" class="flex flex-col gap-1"></div>
+                <div id="skipStatus2" class="text-[9px] font-mono text-on-surface-variant">未添加：二次弹出才识别</div>
+              </div>
             </div>
-            <div id="skipList" class="flex flex-wrap gap-1.5 mb-1"></div>
-            <div id="skipStatus" class="text-[10px] font-mono text-on-surface-variant">未设 · 首次安装弹出「通知权限」时，点添加后点「不允许/允许」按钮</div>
+            <div id="skipClearRow" class="mt-1.5 flex items-center justify-between">
+              <span id="skipStatus" class="text-[9px] font-mono text-on-surface-variant"></span>
+              <button id="clearSkipBtn" class="px-2 py-1 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono transition">清除全部</button>
+            </div>
           </details>
         </div>
 
@@ -857,23 +921,31 @@
       </div>
       <div class="card-body p-2.5 flex flex-col gap-2.5">
         <div>
-          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK 包名</label>
-          <div class="flex gap-1.5">
-            <input id="apkPkg" type="text" list="pkgList" placeholder="输入或选择已装应用" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
-            <datalist id="pkgList"></datalist>
-            <button id="verifyLaunchBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary whitespace-nowrap" title="启动 App 并校验前台包名与期望一致（Android 自动比对；iOS 请确认画面）">▶ 启动测试</button>
-            <button id="refreshAppsBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="刷新设备上的应用列表">↻</button>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">安装包名</label>
+          <div class="relative flex gap-1.5">
+            <!-- 自绘可滚动下拉（2026-08）：datalist 原生弹层太短且滚不动，iOS bundle id 长、
+                设备应用多时尤其难用。保留手输：focus/输入时显示过滤建议，选不中可继续手填。 -->
+            <input id="apkPkg" type="text" placeholder="输入或选择已安装应用" autocomplete="off" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <!-- 样式走内联 <style> 的 #pkgDropdown 规则（id 选择器可靠）；
+                 Tailwind arbitrary 类（top-[calc...] 等）不在编译产物 static.css 里，
+                 曾导致面板失去定位/边框/背景 → 文字与表单重叠（2026-08 实拍修复）。 -->
+            <div id="pkgDropdown" class="hidden custom-scrollbar">
+              <!-- ↓ 填充：refreshAppList 渲染 .pkg-opt 项 -->
+            </div>
+            <button id="verifyLaunchBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary whitespace-nowrap" title="启动 App 并校验前台包名（Android 自动比对，iOS 确认画面）">启动校验</button>
+            <button id="refreshAppsBtn" class="px-2 bg-surface-container-high border border-outline-variant rounded text-xs hover:text-primary" title="刷新设备上的应用列表">刷新</button>
           </div>
         </div>
+        </div>
         <div>
-          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK 文件（每次测试自行上传，项目不存 APK）</label>
+          <label class="block text-[10px] font-mono font-bold text-on-surface-variant mb-1">APK/IPA 文件（每次测试自行上传，项目不存安装包）</label>
           <div id="apkDropZone" class="flex gap-1.5 relative">
-            <input id="apkPath" type="text" placeholder="拖拽 .apk 或点击浏览上传" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
+            <input id="apkPath" type="text" placeholder="拖拽 .apk / .ipa 或点击浏览上传" class="flex-1 bg-surface-container-high border border-outline-variant rounded text-xs font-mono py-1.5 px-2 focus:ring-primary focus:border-primary">
             <button id="browseApkBtn" class="px-2.5 bg-surface-container-high border border-outline-variant rounded text-xs hover:bg-surface-container-highest">浏览</button>
-            <input id="apkFileInput" type="file" accept=".apk" class="hidden">
+            <input id="apkFileInput" type="file" accept=".apk,.ipa" class="hidden">
           </div>
           <!-- 未上传时提醒；上传成功后显示原始名/大小 -->
-          <div id="apkInfo" class="mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed">⚠ 首次冷启动测试前请上传 APK（项目只记文件名提示，不复制安装包）</div>
+          <div id="apkInfo" class="mt-1 text-[10px] font-mono text-on-surface-variant leading-relaxed">⚠ 首次冷启动测试前请上传 APK / IPA（项目只记文件名提示，不复制安装包）</div>
         </div>
         <div id="installLog" class="mt-1 p-2 bg-surface-container-lowest border-l-2 border-primary rounded font-mono text-xs whitespace-pre-wrap max-h-[220px] overflow-y-auto hidden"></div>
       </div>
@@ -1557,32 +1629,95 @@ async function initProjects() {
   }
 }
 
-// ── 已装应用列表（包名下拉）──
-async function refreshAppList() {
+// ── 已装应用列表（包名下拉·自绘可滚动版）──
+// datalist 原生弹层（2026-08 弃用）：太短滚不动、iOS bundle id 长时不实用。
+// 新实现：#pkgDropdown 绝对定位列表，支持过滤、选择、点外关闭；输入框保留自由手输
+// （选不中建议时按用户手填内容执行，行为与旧 datalist 手输一致）。
+let pkgSug = [];   // 最近一次拉取的应用列表（原始顺序）
+let pkgFilt = '';  // 当前过滤词（下拉显示时）
+
+function renderPkgDropdown() {
+  const dd = $('pkgDropdown');
+  if (!dd) return;
+  const kw = pkgFilt.trim().toLowerCase();
+  const items = pkgSug.filter(p => !kw || String(p).toLowerCase().includes(kw));
+  if (!items.length) {
+    dd.innerHTML = '<div class="p-2 text-center text-[10px] text-on-surface-variant">无匹配应用（可直接手动输入）</div>';
+    return;
+  }
+  dd.innerHTML = items.map(p =>
+    `<div class="pkg-opt" data-pkg="${escapeHtml(p)}" title="${escapeHtml(p)}">${escapeHtml(p)}</div>`
+  ).join('');
+}
+
+function openPkgDropdown() {
+  const dd = $('pkgDropdown');
+  if (!dd) return;
+  renderPkgDropdown();
+  dd.classList.remove('hidden');
+}
+
+function closePkgDropdown() {
+  const dd = $('pkgDropdown');
+  if (dd) dd.classList.add('hidden');
+}
+
+async function refreshAppList(autoOpen = false) {
   if (!deviceReady) return;
   const btn = $('refreshAppsBtn');
   btn.textContent = '...';
   try {
     const r = await fetch(API + '/api/apps');
     const j = await r.json();
-    const pkgs = j.apps || [];
-    $('pkgList').innerHTML = pkgs.map(p => `<option value="${escapeHtml(p)}">`).join('');
+    const pkgs = (j.apps || []).slice().sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    pkgSug = pkgs;
     btn.textContent = '↻';
-    btn.title = `${pkgs.length} 个第三方应用`;
+    btn.title = `${pkgs.length} 个应用`;
+    // 用户点「刷新」= 明确想看列表 → 自动展开；初始化/选设备 = 只填充不展开
+    // （上一轮误把后者也关了，导致"下拉无法出现"——2026-08 审核修正）
+    if (autoOpen && pkgs.length) openPkgDropdown();
   } catch(e) {
     btn.textContent = '↻';
     btn.title = '加载失败：' + e.message;
   }
 }
-$('refreshAppsBtn').addEventListener('click', refreshAppList);
+$('refreshAppsBtn').addEventListener('click', () => refreshAppList(true));
 
-// ── APK 拖拽上传 ──
+// 下拉交互：focus/输入 → 显示；mousedown 先于 blur（选择不丢失）；Esc/点外 → 关闭
+const pkgInput = $('apkPkg');
+if (pkgInput) {
+  pkgInput.addEventListener('focus', () => { pkgFilt = ''; openPkgDropdown(); });
+  pkgInput.addEventListener('input', () => { pkgFilt = pkgInput.value; openPkgDropdown(); });
+  pkgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closePkgDropdown();
+    else if (e.key === 'Enter') closePkgDropdown();
+  });
+}
+$('pkgDropdown')?.addEventListener('mousedown', (e) => {
+  const opt = e.target.closest('.pkg-opt');
+  if (!opt) return;
+  e.preventDefault();  // 阻止 input blur 先关下拉
+  pkgInput.value = opt.dataset.pkg;
+  pkgFilt = '';
+  closePkgDropdown();
+  saveConfig();
+  refreshAutoChecklist();
+});
+document.addEventListener('click', (e) => {
+  const dd = $('pkgDropdown');
+  if (dd && !dd.classList.contains('hidden') && !dd.contains(e.target) && e.target !== pkgInput) {
+    closePkgDropdown();
+  }
+});
+
+// ── APK / IPA 拖拽上传 ──
 // 浏览器在 http:// 下拿不到本地完整路径（安全限制），所以走上传方案：
 // 拖拽/选择文件 → 上传到后端 _cst_uploads/（保留原始文件名）→ 返回路径 → 填入 apkPath
 // 同时把 APK 信息（原始名/大小）显示在 apkInfo 行，让用户确认传对了文件。
+// 2026-08：扩展 .ipa（iOS 覆盖安装闭环；IPA 同为 ZIP 魔数，上传链路与 APK 一致）。
 async function uploadApkFile(file) {
-  if (!file.name.toLowerCase().endsWith('.apk')) {
-    uiAlert('请选择 .apk 文件', '', 'warning');
+  if (!/\.(apk|ipa)$/i.test(file.name)) {
+    uiAlert('请选择 .apk / .ipa 文件', '', 'warning');
     return;
   }
   $('apkPath').value = '上传中...';
@@ -1600,6 +1735,22 @@ async function uploadApkFile(file) {
       const sizeMb = j.size_mb != null ? j.size_mb : (file.size / 1048576).toFixed(1);
       showApkUploaded(orig, sizeMb);
       refreshAutoChecklist();
+      // IPA：解析 bundle id 自动回填包名（iOS 无 aapt；APK 语义不变，走既有的
+      // 手填/应用列表下拉）。解析失败不阻断上传成功路径（用户可手填/下拉）。
+      if (/\.ipa$/i.test(j.path || '')) {
+        try {
+          const pr = await apiFetch(API + '/api/parse_apk', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ apk_path: j.path })
+          });
+          const pj = await pr.json();
+          if (pj.ok && pj.package) {
+            $('apkPkg').value = pj.package;
+            saveConfig();
+            refreshAutoChecklist();
+          }
+        } catch (_) { /* 忽略：解析失败不影响上传完成的结论 */ }
+      }
     } else {
       uiAlert('上传失败', j.detail || '未知错误', 'error');
       $('apkPath').value = '';
@@ -1645,9 +1796,10 @@ dropZone.addEventListener('drop', e => {
 $('browseApkBtn').addEventListener('click', async () => {
   if (isElectron && window.electronAPI.openFileDialog) {
     const result = await window.electronAPI.openFileDialog({
-      title: '选择 APK 安装包',
+      title: '选择安装包',
       filters: [
         { name: 'Android 安装包', extensions: ['apk'] },
+        { name: 'iOS 安装包 (IPA)', extensions: ['ipa'] },
         { name: '所有文件', extensions: ['*'] },
       ],
     });
@@ -1759,6 +1911,8 @@ async function selectDevice(serial) {
     await fetchShotOnce(true);
     refreshOcr();
     refreshAppList();  // 拉一次已装应用列表（包名下拉用）
+    // 按钮语义跟随平台：iOS=安装方式单选（覆盖/重装）联动；Android=卸载重装
+    syncInstallModeUI();
     // 启动直播链（如果之前没启）
     if ($('liveToggle').checked && !liveTimer) startLive();
     refreshAutoChecklist();
@@ -2305,36 +2459,57 @@ async function clearAll() {
 $('clearBtn').addEventListener('click', clearAll);
 
 // ── 操作 ──
+// 安装方式单选（GP/iOS 同步，2026-08）：
+//   重新安装 = 卸载重装清数据（默认，保冷启动样本干净）
+//   覆盖安装 = 升级保数据（GP: install -r / iOS: upgrade）
+// overwrite 字段 additive，后端两平台同签名 install_overwrite。
+// isIosNow() 仅用于输入引导差异（Bundle ID vs 包名 / IPA vs APK）。
+function isIosNow() { return currentPlatform === 'ios'; }
+// 读安装方式单选：checked 项 value = 'clean'(默认) | 'overwrite'
+function installModeValue() {
+  const r = document.querySelector('input[name="installMode"]:checked');
+  return r ? r.value : 'clean';
+}
+function reinstallBtnLabel() {
+  return installModeValue() === 'overwrite' ? '覆盖安装' : '重新安装';
+}
+// 平台切换/初始化时同步按钮文案（单选行两端常显，无需显隐切换）
+function syncInstallModeUI() {
+  $('reinstallBtn').textContent = reinstallBtnLabel();
+}
+
 async function reinstall() {
   const pkg = $('apkPkg').value.trim();
   const apkPath = $('apkPath').value.trim();
   const log = $('installLog');
   if (!pkg || !apkPath) {
     log.className = 'install-log show err';
-    log.textContent = '⚠ 请先填 APK 包名，并上传 APK（首次冷启动前必须上传；项目不保存安装包）';
+    log.textContent = `⚠ 请先填 ${isIosNow() ? 'Bundle ID' : '包名'}，并上传 ${isIosNow() ? 'IPA' : 'APK'}（首次冷启动前必须上传；项目不保存安装包）`;
     return;
   }
-  if (!await uiConfirm('确认卸载并重装？', `包名：${pkg}\nAPK：${apkPath}`, 'question')) return;
+  const overwrite = installModeValue() === 'overwrite';
+  const actionText = overwrite ? '覆盖安装' : '重新安装';
+  if (!await uiConfirm(`确认${actionText}？`, `${isIosNow() ? 'Bundle' : '包名'}：${pkg}\n${isIosNow() ? 'IPA' : 'APK'}：${apkPath}${overwrite ? '\n（不卸载，保留 App 数据）' : '\n（卸载后全新安装，清空 App 数据）'}`, 'question')) return;
   const btn = $('reinstallBtn');
   btn.disabled = true; btn.textContent = '处理中...';
-  log.className = 'install-log show'; log.textContent = '正在卸载旧版本...';
+  log.className = 'install-log show'; log.textContent = overwrite ? '正在覆盖安装（升级，保数据）...' : '正在卸载旧版本并重新安装...';
   try {
     const r = await apiFetch(API + '/api/reinstall', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({package: pkg, apk_path: apkPath})
+      body: JSON.stringify({package: pkg, apk_path: apkPath, overwrite})
     });
     const j = await r.json();
     if (j.ok) {
       log.className = 'install-log show ok';
-      log.textContent = '✓ 卸载重装成功\n\n' + (j.log || []).join('\n');
-      setState('ok', '重装成功 · 可以开始测试首启动');
+      log.textContent = `✓ ${actionText}成功\n\n` + (j.log || []).join('\n');
+      setState('ok', `${actionText}成功 · 可以开始测试${overwrite ? '' : '首启动'}`);
     } else {
       log.className = 'install-log show err';
       log.textContent = '✗ ' + (j.error || '失败') + '\n\n' + (j.log || []).join('\n');
     }
   } catch(e) {
     log.className = 'install-log show err'; log.textContent = '✗ ' + e.message;
-  } finally { btn.disabled = false; btn.textContent = '卸载重装'; }
+  } finally { btn.disabled = false; btn.textContent = reinstallBtnLabel(); }
 }
 async function forceStop() {
   const pkg = $('apkPkg').value.trim();
@@ -2356,6 +2531,9 @@ async function pressKey(code) {
   } catch(e) {}
 }
 $('reinstallBtn').addEventListener('click', reinstall);
+// iOS 安装方式单选切换 → 刷新按钮文案（覆盖安装/重新安装）
+document.querySelectorAll('input[name="installMode"]').forEach(r =>
+  r.addEventListener('change', () => $('reinstallBtn').textContent = reinstallBtnLabel()));
 $('forceStopBtn').addEventListener('click', forceStop);
 $('backHomeBtn').addEventListener('click', () => pressKey(3));
 
@@ -3118,7 +3296,7 @@ function refreshAutoChecklist() {
   const tapOk = mode !== 'tap' || (!!x && !!y);
   const items = [
     { ok: !!deviceReady, label: '设备已连接', req: true },
-    { ok: !!pkg, label: '已填 APK 包名', req: true },
+    { ok: !!pkg, label: '已填安装包名', req: true },
     // iOS 模式用已装 App/IPA，不要求上传 APK（iOS 真机验证发现误拦）
     { ok: currentPlatform === 'ios' || !!apkPath, label: currentPlatform === 'ios' ? 'iOS 模式：无需 APK（用已装 App）' : '本会话已上传 APK（项目不存安装包）', req: currentPlatform !== 'ios' },
     { ok: !!markerTemplateReady, label: '已设启动成功模板', req: true },
@@ -3220,17 +3398,19 @@ $('autoCheckFoldBtn')?.addEventListener('click', e => {
 // 首次有跳过模板时先处理弹窗；没有跳过模板时直接识别启动模板；二次始终不扫跳过。
 // §2.1 单一 performance.now() 时钟；后端连续 N 帧确认 + 上升沿；跳过命中不停表
 // weirdMs：异常阈值（默认 35s）——只标记，不中止；等模板命中或用户停止
-async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer) {
+async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer, phase) {
   // serial：API 请求目标设备；logSer：日志路由（单设备模式传 null 走全局日志，
   // 否则日志会进 devLogs 桶而单设备渲染分支只看全局桶 → 不可见，实测踩坑）
+  // phase（2026-08）：'first'/'second' —— 跳过模板按阶段匹配（首次/二次 GM 界面可不同）
   let lastLogAt = 0;
+  let lastSkipHintAt = 0;      // iOS 半自动跳过提示节流（10s 一次）
   let warnedWeird = false;
   let warnedResMismatch = false;  // 审核 F-P1-4：分辨率变化只警告一次
   let pollCount = 0;
   // 只有明确传 true 才匹配跳过模板；false/undefined 均直接走启动模板。
   const doSkips = checkSkips === true;
   autoLog('INFO', 'WAIT', doSkips
-    ? '开始轮询识别：先匹配「跳过弹窗」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
+    ? '开始轮询识别：先匹配「跳过界面」模板；未命中再匹配「启动成功」模板；命中启动模板且连续确认后停表'
     : '开始轮询识别：直接匹配「启动成功」模板；命中且连续确认后停表', logSer);
   while (true) {
     if (autoAbortFlag) throw new Error('用户中断');
@@ -3240,7 +3420,9 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, lo
       autoLog('WARN', 'WAIT', `已跑超过异常阈值 ${(weirdMs / 1000).toFixed(0)}s，仍继续等启动模板（不会中止）；停表后按记录时间（扣截图耗时）判定是否标「异常」`, logSer);
     }
     try {
-      const qs = (doSkips ? '?' : '?check_skips=false&') + (serial ? 'serial=' + encodeURIComponent(serial) : '');
+      const qs = (doSkips ? '?' : '?check_skips=false&')
+        + (phase ? 'phase=' + encodeURIComponent(phase) + '&' : '')
+        + (serial ? 'serial=' + encodeURIComponent(serial) : '');
       const r = await apiFetch(API + '/api/check_auto' + qs);
       if (r.ok) {
         const j = await r.json();
@@ -3250,6 +3432,16 @@ async function waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, lo
         const via = j.shot_via ? `/${j.shot_via}` : '';
         const timing = `截图${shotMs}${via} 匹配${matchMs}`;
         if (j.skipped) {
+          // iOS 半自动跳过（2026-08）：识别自动、点击手动（非越狱无 tap API）。
+          // 提示节流 10s；不回滚 — 继续等界面消失后走启动成功模板。
+          if (j.skip_manual_pending) {
+            if (performance.now() - lastSkipHintAt > 10000) {
+              lastSkipHintAt = performance.now();
+              autoLog('WARN', 'SKIP', `检测到 GM/弹窗界面 #${j.skip_id}（iOS 非越狱不能自动点击）→ 请在手机上手动点掉它 · 识别自动、点击手动 · 不停表 · ${timing}`, logSer);
+            }
+            if (gapMs > 0) await sleep(Math.max(gapMs, 200));
+            continue;
+          }
           const cx = j.skip_cx != null ? Number(j.skip_cx).toFixed(3) : '—';
           const cy = j.skip_cy != null ? Number(j.skip_cy).toFixed(3) : '—';
           autoLog('WARN', 'SKIP', `命中跳过弹窗模板 #${j.skip_id}（置信度 ${((j.skip_confidence || 0) * 100).toFixed(0)}%）→ 自动点击坐标 (${cx},${cy}) · 本轮该跳过模板不再重复点 · 不停表 · ${timing}`, logSer);
@@ -3645,8 +3837,10 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   if (serial) body.serial = serial;
   if (launchMode === 'tap') { body.x = x; body.y = y; }
   const isFirst = label === '首次';
-  // 没有配置跳过弹窗模板时，直接匹配启动成功模板，不走跳过弹窗分支。
-  const checkSkips = isFirst && skipTemplateCount > 0;  // 仅首次且确有模板时扫描跳过弹窗；二次不扫
+  // 首/二次都可能弹 GM/实验界面（2026-08）：只要有跳过模板就扫，phase 交给后端
+  // 按「首次组/二次组/通用」filter 各自匹配（对应组没模板时后端匹配不到，无害）
+  const checkSkips = skipTemplateCount > 0;
+  const skipPhase = isFirst ? 'first' : 'second';
   const phase = `R${round}-${isFirst ? '1st' : '2nd'}`;
   autoLog('STEP', phase, `调用 cold_start 启动 App（mode=${launchMode}` + (launchMode === 'pkg' ? ' · monkey 包名启动' : ` · 点击图标 ${x},${y}`) + '）…', logSer);
   const r = await apiFetch(API + '/api/cold_start', {
@@ -3667,7 +3861,7 @@ async function measureOnce(pkg, launchMode, x, y, weirdMs, gapMs, label, round, 
   const rising = j.marker_rising_edge !== false;
   const risingSeeded = j.marker_rising_seeded === true;
   autoLog('OK', phase, `App 已发出启动命令 · 计时开始 · 停表条件：启动成功模板连续 ${confNeed} 帧≥阈值` + (rising ? (risingSeeded ? ' + 上升沿已预置（刚 force_stop）' : ' + 须先见过低于阈值（上升沿）') : '') + ` · 异常阈值 ${weirdMs / 1000}s` + (checkSkips ? ' · 本趟会扫跳过弹窗' : ' · 直接识别启动模板'), logSer);
-  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer);
+  return await waitForLaunchDone(startTs, weirdMs, gapMs, checkSkips, serial, logSer, skipPhase);
 }
 
 // ── 报告生成（数据供导出，不在页面展示）──
@@ -4093,7 +4287,7 @@ $('reportCsvBtn').addEventListener('click', () => {
 // 展示系统打点均值/中位数，与工具记录均值并排；纯展示，不写 records。
 async function sysBaseline() {
   const pkg = $('apkPkg').value.trim();
-  if (!pkg) { uiAlert('请先填 APK 包名', '系统对照需要 package 参数', 'warning'); return; }
+  if (!pkg) { uiAlert('请先填安装包名', '系统对照需要 package 参数', 'warning'); return; }
   const rounds = Math.min(10, Math.max(1, parseInt($('sysBaseRounds').value) || 5));
   const btn = $('sysBaseBtn');
   const out = $('sysBaseOut');
@@ -4140,7 +4334,7 @@ $('sysBaseBtn').addEventListener('click', sysBaseline);
 // ── 启动测试：启动 App 并校验前台包名与期望一致 ──
 $('verifyLaunchBtn').addEventListener('click', async () => {
   const pkg = $('apkPkg').value.trim();
-  if (!pkg) { uiAlert('请先填 APK 包名', '', 'warning'); return; }
+  if (!pkg) { uiAlert('请先填安装包名', '', 'warning'); return; }
   const btn = $('verifyLaunchBtn');
   btn.disabled = true;
   btn.textContent = '⏳ 校验中…';
@@ -4256,7 +4450,6 @@ $('setMarkerBtn').addEventListener('click', () => {
   markerPickingMode = true;
   $('setMarkerBtn').textContent = '◉ 在画面点启动元素（设备：' + devName + '）...';
   $('setMarkerBtn').classList.add('animate-pulse');
-  $('addSkipBtn').classList.remove('animate-pulse');
   setState('running', '请在左侧画面上点一下"启动成功"元素的位置（按钮/文字/图标都行）—— 此模板将保存到「' + devName + '」');
 });
 
@@ -4312,19 +4505,22 @@ async function setMarkerFromPoint(cx, cy) {
   }
 }
 
-// ── 跳过弹窗模板：添加 / 清除 / 列表刷新 ──
-function renderSkipList(items) {
-  const box = $('skipList');
-  skipTemplateCount = (items && items.length) || 0;
-  if (!skipTemplateCount) {
+// ── 跳过界面模板（2026-08 首次/二次分组）：添加 / 清除 / 列表刷新 ──
+// 每组各自识别：phase='first'（首次冷启动 GM/实验界面）、'second'（二次冷启动界面）、
+// 后端还兼容 'any'（通用，两组都匹配——旧模板无 phase 视为 any）。
+let skipPickingPhase = null;   // 'first' | 'second'：当前正在框选的组
+
+function renderSkipBox(boxId, statusId, items, emptyText) {
+  const box = $(boxId);
+  if (!box) return;
+  if (!items.length) {
     box.innerHTML = '';
-    $('skipStatus').textContent = '未设 · 首次安装弹出「通知权限」时，点添加后点「不允许/允许」按钮';
-    refreshAutoChecklist();
+    $(statusId).textContent = emptyText;
     return;
   }
   box.innerHTML = items.map(it =>
     `<div class="flex items-center gap-1 bg-surface-container-lowest border border-outline-variant rounded px-1 py-0.5" title="#${it.id}">` +
-    `<img src="data:${it.preview_mime || 'image/jpeg'};base64,${it.preview_base64}" style="width:48px;height:28px;object-fit:contain" alt="#${it.id}">` +
+    `<img src="data:${it.preview_mime || 'image/jpeg'};base64,${it.preview_base64}" style="width:44px;height:26px;object-fit:contain" alt="#${it.id}">` +
     `<span class="text-[9px] font-mono text-on-surface-variant">#${it.id}</span>` +
     `<button type="button" data-skip-del="${it.id}" class="text-[10px] text-danger px-1 hover:underline">×</button></div>`
   ).join('');
@@ -4345,7 +4541,18 @@ function renderSkipList(items) {
       }
     });
   });
-  $('skipStatus').textContent = `已设 ${skipTemplateCount} 个 · 仅首次冷启动会匹配并点击（二次不扫）`;
+}
+
+function renderSkipList(items) {
+  const all = items || [];
+  skipTemplateCount = all.length;
+  const first = all.filter(t => t.phase === 'first' || t.phase === 'any');
+  const second = all.filter(t => t.phase === 'second' || t.phase === 'any');
+  renderSkipBox('skipList1', 'skipStatus1', first,
+    '未添加 · 首次冷启动弹出 GM/实验界面时，点「＋ 添加」后点画面上的确定/开始按钮');
+  renderSkipBox('skipList2', 'skipStatus2', second,
+    '未添加 · 二次冷启动弹出 GM/实验界面时，点「＋ 添加」后点画面上的确定/开始按钮');
+  $('skipStatus').textContent = `共 ${skipTemplateCount} 个 · 首次/二次各自识别（any=通用）`;
   refreshAutoChecklist();
 }
 
@@ -4359,21 +4566,22 @@ async function refreshSkipList() {
   }
 }
 
-$('addSkipBtn').addEventListener('click', () => {
+function enterSkipPicking(phase) {
   if (!deviceReady) { uiAlert('请先连接设备并让画面显示出来', '', 'warning'); return; }
-  if (skipTemplateCount >= 3) { uiAlert('跳过模板最多 3 个', '请先清除再添加', 'warning'); return; }
+  skipPickingPhase = phase;
   markerPickingMode = false;
   skipPickingMode = true;
   $('setMarkerBtn').classList.remove('animate-pulse');
   $('setMarkerBtn').textContent = '📍 点画面选定启动元素';
-  $('addSkipBtn').textContent = '◉ 请点弹窗上的按钮...';
-  $('addSkipBtn').classList.add('animate-pulse');
-  setState('running', '请在左侧画面上点「不允许 / 允许 / 跳过」等按钮（点你想自动点的那个）');
-});
+  const t = phase === 'first' ? '首次' : '二次';
+  setState('running', `请在左侧画面上点「${t}」GM/实验界面的确定/开始按钮位置（自动跳过、不停表）`);
+}
+$('addSkipBtn1').addEventListener('click', () => enterSkipPicking('first'));
+$('addSkipBtn2').addEventListener('click', () => enterSkipPicking('second'));
 
 $('clearSkipBtn').addEventListener('click', async () => {
   if (!skipTemplateCount) return;
-  if (!await uiConfirm('清除全部跳过弹窗模板？', '', 'question')) return;
+  if (!await uiConfirm('清除全部跳过模板（首次/二次/通用）？', '', 'question')) return;
   try {
     const r = await fetch(API + '/api/clear_skip_templates', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -4390,14 +4598,17 @@ $('clearSkipBtn').addEventListener('click', async () => {
 });
 
 async function setSkipFromPoint(cx, cy) {
-  $('addSkipBtn').disabled = true;
-  $('addSkipBtn').textContent = '截图中...';
-  $('addSkipBtn').classList.remove('animate-pulse');
-  $('skipStatus').textContent = '正在截图并截取跳过按钮模板...';
+  const phase = skipPickingPhase || 'any';
+  const btn = phase === 'first' ? $('addSkipBtn1') : $('addSkipBtn2');
+  const statusEl = phase === 'first' ? $('skipStatus1') : $('skipStatus2');
+  btn.disabled = true;
+  btn.textContent = '截图中...';
+  btn.classList.remove('animate-pulse');
+  statusEl.textContent = '正在截图并截取跳过按钮模板...';
   try {
     const r = await fetch(API + '/api/set_skip_template', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ cx, cy })
+      body: JSON.stringify({ cx, cy, phase })
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
@@ -4408,18 +4619,19 @@ async function setSkipFromPoint(cx, cy) {
       throw new Error(msg);
     }
     skipPickingMode = false;
-    $('addSkipBtn').textContent = '➕ 添加跳过按钮';
+    skipPickingPhase = null;
+    btn.textContent = phase === 'first' ? '＋ 添加（点画面上的确定/开始）' : '＋ 添加（点画面上的确定/开始）';
     await refreshSkipList();
     markProjectDirty();
-    setState('ok', `跳过模板 #${j.id} 已添加（${j.width}×${j.height}）· 共 ${j.count} 个`);
+    setState('ok', `跳过模板 #${j.id}（${phase === 'first' ? '首次' : phase === 'second' ? '二次' : '通用'}）已添加 · ${j.width}×${j.height}`);
   } catch (e) {
     skipPickingMode = true;
-    $('skipStatus').innerHTML = `<span class="text-danger">✗ ${escapeHtml(e.message)} · 请再点按钮文字区域</span>`;
-    $('addSkipBtn').textContent = '◉ 请点弹窗上的按钮...';
-    $('addSkipBtn').classList.add('animate-pulse');
+    statusEl.innerHTML = `<span class="text-danger">✗ ${escapeHtml(e.message)} · 请再点按钮文字区域</span>`;
+    btn.textContent = '◉ 请点弹窗上的按钮...';
+    btn.classList.add('animate-pulse');
     setState('err', '添加跳过模板失败：' + e.message);
   } finally {
-    $('addSkipBtn').disabled = false;
+    btn.disabled = false;
   }
 }
 

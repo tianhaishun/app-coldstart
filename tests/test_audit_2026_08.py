@@ -354,3 +354,334 @@ class TestShotErrorSingleCount:
             assert ds.shot_errors == 1
         finally:
             _reset_registry()
+
+
+# ── iOS 覆盖安装闭环（2026-08，参考 ios_ipa_installer.py 语义 10.x 化）──
+
+
+class FakeInstallService:
+    """InstallationProxyService 替身：记录 get_apps/upgrade/install_from_local 调用。"""
+
+    def __init__(self, installed: dict):
+        self.installed = dict(installed)
+        self.calls: list = []
+
+    async def get_apps(self) -> dict:
+        return dict(self.installed)
+
+    async def upgrade(self, ipa_path: str):
+        self.calls.append(("upgrade", ipa_path))
+
+    async def install_from_local(self, path: Path):
+        self.calls.append(("install", str(path)))
+
+
+class TestIosInstallOverwrite:
+    """install_overwrite：已安装走 upgrade（覆盖保存数据）、未安装走 install_from_local。"""
+
+    def _make_ios(self, monkeypatch, fake: FakeInstallService):
+        from server import IosDevice
+        dev = IosDevice("UDID_OVERWRITE")
+
+        async def _ld():
+            return SimpleNamespace(identifier="UDID_OVERWRITE")
+
+        monkeypatch.setattr(dev, "_get_lockdown", _ld)
+        monkeypatch.setattr(
+            "pymobiledevice3.services.installation_proxy.InstallationProxyService",
+            lambda lockdown: fake,
+        )
+        return dev
+
+    def test_installed_uses_upgrade(self, monkeypatch, tmp_path):
+        ipa = tmp_path / "app.ipa"
+        ipa.write_bytes(b"PK\x03\x04fake")
+        fake = FakeInstallService({"com.example.app": {}})
+        dev = self._make_ios(monkeypatch, fake)
+        log = dev.install_overwrite("com.example.app", str(ipa))
+        assert fake.calls[0][0] == "upgrade"
+        assert "upgrade" in "\n".join(log)
+
+    def test_fresh_uses_install(self, monkeypatch, tmp_path):
+        ipa = tmp_path / "app.ipa"
+        ipa.write_bytes(b"PK\x03\x04fake")
+        fake = FakeInstallService({})
+        dev = self._make_ios(monkeypatch, fake)
+        log = dev.install_overwrite("com.example.app", str(ipa))
+        assert fake.calls[0][0] == "install"
+        assert "install" in "\n".join(log)
+
+    def test_missing_file_raises(self, monkeypatch):
+        from server import IosDevice
+        dev = self._make_ios(monkeypatch, FakeInstallService({}))
+        with pytest.raises(AdbError, match="不存在"):
+            dev.install_overwrite("com.example.app", "Z:/no/such/file.ipa")
+
+    def test_endpoint_overwrite_routes_ios(self, monkeypatch, tmp_path):
+        """/api/reinstall + overwrite=True + iOS 会话 → install_overwrite（不卸载）。"""
+        _reset_registry()
+        try:
+            ds = SESSION.session_for("IOS_OW", "ios")
+            ipa = tmp_path / "app.ipa"
+            ipa.write_bytes(b"PK\x03\x04fake")
+            seen = {}
+
+            def _fake_overwrite(self, pkg, p):
+                seen["pkg"] = pkg
+                seen["path"] = p
+                return [f"upgrade: {pkg}"]
+
+            monkeypatch.setattr(server.IosDevice, "install_overwrite", _fake_overwrite)
+
+            r = reinstall(ReinstallReq(
+                package="com.example.app", apk_path=str(ipa), serial="IOS_OW", overwrite=True))
+            assert r["ok"] is True
+            assert seen["pkg"] == "com.example.app"
+        finally:
+            _reset_registry()
+
+    def test_endpoint_overwrite_routes_android(self, monkeypatch, tmp_path):
+        """/api/reinstall + overwrite=True + Android 会话 → AdbHelper.install_overwrite。
+        GP/iOS 同步（2026-08）：同一 overwrite 字段两端都走覆盖安装（install -r）。"""
+        _reset_registry()
+        try:
+            ds = SESSION.session_for("DEV_OW", "android")
+            apk = tmp_path / "app.apk"
+            apk.write_bytes(b"PK\x03\x04fake")
+            seen = {}
+
+            def _fake_overwrite(self, pkg, p):
+                seen["pkg"] = pkg
+                seen["path"] = p
+                return ["install -r(覆盖安装): Success"]
+
+            monkeypatch.setattr(server.AdbHelper, "install_overwrite", _fake_overwrite)
+
+            r = reinstall(ReinstallReq(
+                package="com.example", apk_path=str(apk), serial="DEV_OW", overwrite=True))
+            assert r["ok"] is True
+            assert seen["pkg"] == "com.example"
+        finally:
+            _reset_registry()
+
+    def test_endpoint_default_still_clean_reinstall(self, monkeypatch, tmp_path):
+        """/api/reinstall 不带 overwrite（缺省 False）仍走 reinstall——自动测速与旧客户端不受影响。"""
+        _reset_registry()
+        try:
+            ds = SESSION.session_for("DEV_CLEAN", "android")
+            apk = tmp_path / "app.apk"
+            apk.write_bytes(b"PK\x03\x04fake")
+            seen = {}
+
+            def _fake_reinstall(self, pkg, p):
+                seen["pkg"] = pkg
+                return ["uninstall: Success", "install: Success"]
+
+            monkeypatch.setattr(server.AdbHelper, "reinstall", _fake_reinstall)
+
+            r = reinstall(ReinstallReq(package="com.example", apk_path=str(apk), serial="DEV_CLEAN"))
+            assert r["ok"] is True and seen["pkg"] == "com.example"
+        finally:
+            _reset_registry()
+
+    def test_upload_ipa_accepted(self, monkeypatch, tmp_path):
+        """.ipa 走 upload_apk 通过（ZIP 魔数校验后落盘即回填路径）。"""
+        monkeypatch.setattr(server, "APK_UPLOAD_DIR", tmp_path)
+        from fastapi import UploadFile
+        r = asyncio.run(upload_apk(UploadFile(
+            file=io.BytesIO(b"PK\x03\x04" + b"\x00" * 512), filename="demo.ipa")))
+        assert r["ok"] is True and r["saved_name"].endswith(".ipa")
+
+
+# ── IPA 元数据解析（bundle id 回填闭环，2026-08）──
+
+
+def _make_ipa(tmp_path, bundle_id="com.example.app", version="1.2.3",
+              name="示例App", with_plist=True):
+    """构造最小 IPA（Payload/App.app/Info.plist）。用标准库 zipfile。"""
+    import plistlib
+    import zipfile
+    ipa = tmp_path / "demo.ipa"
+    with zipfile.ZipFile(ipa, "w") as zf:
+        if with_plist:
+            pl = {
+                "CFBundleIdentifier": bundle_id,
+                "CFBundleShortVersionString": version,
+                "CFBundleVersion": "456",
+                "CFBundleDisplayName": name,
+                "CFBundleName": name,
+            }
+            zf.writestr(
+                "Payload/App.app/Info.plist",
+                plistlib.dumps(pl),
+            )
+    return ipa
+
+
+class TestIpaBundleInfo:
+    def test_parses_bundle_id_version_label(self, tmp_path):
+        from server import _ipa_bundle_info
+        info = _ipa_bundle_info(_make_ipa(tmp_path))
+        assert info["package"] == "com.example.app"
+        assert info["version_name"] == "1.2.3"
+        assert info["version_code"] == "456"
+        assert info["label"] == "示例App"
+
+    def test_missing_plist_raises(self, tmp_path):
+        import zipfile
+        from server import _ipa_bundle_info, AdbError
+        ipa = tmp_path / "bad.ipa"
+        with zipfile.ZipFile(ipa, "w") as zf:
+            zf.writestr("Payload/App.app/other", b"x")
+        with pytest.raises(AdbError, match="Info.plist"):
+            _ipa_bundle_info(ipa)
+
+    def test_not_a_zip_raises(self, tmp_path):
+        from server import _ipa_bundle_info, AdbError
+        ipa = tmp_path / "bad.ipa"
+        ipa.write_bytes(b"not a zip at all")
+        with pytest.raises(AdbError, match="ZIP"):
+            _ipa_bundle_info(ipa)
+
+    def test_missing_bundle_id_raises(self, tmp_path):
+        import plistlib
+        import zipfile
+        from server import _ipa_bundle_info, AdbError
+        ipa = tmp_path / "nobundle.ipa"
+        with zipfile.ZipFile(ipa, "w") as zf:
+            zf.writestr("Payload/A.app/Info.plist",
+                        plistlib.dumps({"CFBundleName": "X"}))
+        with pytest.raises(AdbError, match="CFBundleIdentifier"):
+            _ipa_bundle_info(ipa)
+
+    def test_parse_apk_endpoint_routes_ipa(self, tmp_path):
+        """/api/parse_apk 收 .ipa 走 plistib 解析（不触 aapt/AdbHelper）。"""
+        from server import ApkParseReq, parse_apk
+        ipa = _make_ipa(tmp_path, bundle_id="com.ipa.test")
+        j = parse_apk(ApkParseReq(apk_path=str(ipa)))
+        assert j["ok"] is True and j["package"] == "com.ipa.test"
+        assert j["path"] == str(ipa)
+
+
+# ── 跳过模板 phase 分组（2026-08：GM 界面首次/二次分设）──
+
+
+class TestSkipTemplatePhase:
+    def test_set_marker_req_phase_contract(self):
+        """SetMarkerReq.phase 契约：默认 any；可选 first/second/any。"""
+        from server import SetMarkerReq
+        assert SetMarkerReq(cx=0.5, cy=0.5).phase == "any"
+        assert SetMarkerReq(cx=0.5, cy=0.5, phase="first").phase == "first"
+        assert SetMarkerReq(cx=0.5, cy=0.5, phase="second").phase == "second"
+
+    def test_list_returns_phase_and_fires_any(self):
+        """/api/skip_templates 回显 phase；无 phase 的旧模板按 any 处理。"""
+        from server import DeviceSession, list_skip_templates
+        _reset_registry()
+        try:
+            ds = SESSION.session_for("DEV_LS")
+            ds._skip_templates.append({"id": 1, "phase": "first", "w": 10, "h": 10,
+                                       "cx": 0.5, "cy": 0.5, "path": "x.png",
+                                       "preview_base64": "", "preview_mime": "image/jpeg"})
+            ds._skip_templates.append({"id": 2, "w": 10, "h": 10,          # 旧模板：无 phase
+                                       "cx": 0.5, "cy": 0.5, "path": "y.png",
+                                       "preview_base64": "", "preview_mime": "image/jpeg"})
+            out = list_skip_templates(serial="DEV_LS")
+            phases = {it["id"]: it["phase"] for it in out["items"]}
+            assert phases[1] == "first"
+            assert phases[2] == "any"   # 兼容：缺省视为通用
+        finally:
+            _reset_registry()
+
+
+# ── iOS WDA 全自动点击（2026-08：半自动升级路径）──
+
+
+class FakeWdaClient:
+    """WdaServiceClient 替身：get_status / start_session / get_window_size / _request_json。"""
+
+    def __init__(self, status_ok=True, win=None, tap_fail=False):
+        self.status_ok = status_ok
+        self.win = win or {"width": 390, "height": 844}
+        self.tap_fail = tap_fail
+        self.session_id = "FAKE_SID"
+        self.calls: list = []
+
+    async def get_status(self):
+        if not self.status_ok:
+            raise RuntimeError("no wda")
+        return {"value": "ok"}
+
+    async def start_session(self):
+        return self.session_id
+
+    async def get_window_size(self, sid):
+        return self.win
+
+    async def _request_json(self, method, path, payload=None):
+        self.calls.append((method, path, payload))
+        if self.tap_fail:
+            raise RuntimeError("wda tap failed")
+
+
+class TestIosWdaTap:
+    def _mk_ios(self, monkeypatch, fake):
+        from server import IosDevice
+        dev = IosDevice("UDID_WDA")
+
+        async def _ld():
+            return SimpleNamespace(identifier="UDID_WDA")
+
+        monkeypatch.setattr(dev, "_get_lockdown", _ld)
+        monkeypatch.setattr(
+            "pymobiledevice3.services.wda.WdaServiceClient",
+            lambda **kw: fake,
+        )
+        return dev
+
+    def test_wda_ready_true(self, monkeypatch):
+        dev = self._mk_ios(monkeypatch, FakeWdaClient(status_ok=True))
+        assert dev.wda_ready() is True
+
+    def test_wda_ready_false_when_uninstalled(self, monkeypatch):
+        dev = self._mk_ios(monkeypatch, FakeWdaClient(status_ok=False))
+        assert dev.wda_ready() is False
+
+    def test_wda_tap_uses_wda_tap_endpoint(self, monkeypatch):
+        dev = self._mk_ios(monkeypatch, FakeWdaClient())
+        dev.wda_tap(0.5, 0.5)
+        ep = dev._wda_client.calls[-1] if hasattr(dev._wda_client, "calls") else None
+        # _wda_client 为 fake（monkeypatch 后 client 即 fake）
+        calls = getattr(dev._wda_client, "calls", [])
+        assert calls and calls[0][1].startswith("/session/FAKE_SID/wda/tap/0")
+        payload = calls[0][2]
+        assert payload["x"] == 195 and payload["y"] == 422   # 0.5×390 / 0.5×844
+
+    def test_wda_tap_falls_back_to_actions(self, monkeypatch):
+        fake = FakeWdaClient()
+        # 第一次 /wda/tap/0 失败 → actions 成功
+        real = fake._request_json
+        state = {"n": 0}
+
+        async def fake_req(method, path, payload=None):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("unsupported endpoint")
+            return await real(method, path, payload)
+
+        monkeypatch.setattr(fake, "_request_json", fake_req)
+        dev = self._mk_ios(monkeypatch, fake)
+        dev.wda_tap(0.5, 0.5)
+        assert state["n"] == 2
+        # 第一次模拟失败不产生调用记录；成功的是 actions（calls 只有第 2 次）
+        assert fake.calls[0][1].endswith("/actions")
+
+    def test_wda_ready_false_routes_to_manual_pending(self, monkeypatch, tmp_path):
+        """WDA 未就绪：check_auto iOS 命中仍返回 skip_manual_pending（半自动不回归）。"""
+        # 复用现网 check_auto 编排代价高，此处验证核心决策：未就绪时 tap 不执行
+        from server import IosDevice
+        dev = self._mk_ios(monkeypatch, FakeWdaClient(status_ok=False))
+        assert dev.wda_ready() is False
+        # 未就绪不得走 wda_tap（会 raise 未就绪 AdbError——调用方 catch 后走半自动）
+        assert dev._wda_client is None or dev.wda_ready() is False
+

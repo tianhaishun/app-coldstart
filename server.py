@@ -134,9 +134,9 @@ def _safe_apk_filename(original: str) -> str:
     name = os.path.basename((original or "").replace("\\", "/")).strip()
     if not name:
         name = "apk_upload.apk"
-    # 强制 .apk 后缀（无论原名后缀是什么）
+    # 后缀白名单 .apk/.ipa（iOS 覆盖安装闭环：IPA 与 APK 同为 ZIP 魔数，同上传链路）
     stem = name
-    if stem.lower().endswith(".apk"):
+    if stem.lower().endswith((".apk", ".ipa")):
         stem = stem[:-4]
     # 非 ASCII 字母数字/下划线/连字符/点 → 下划线
     safe_stem = re.sub(r"[^A-Za-z0-9_\-.]", "_", stem)
@@ -145,11 +145,12 @@ def _safe_apk_filename(original: str) -> str:
     # 空或全是下划线 → 兜底名
     if not safe_stem or set(safe_stem) == {"_"}:
         safe_stem = "apk_upload"
-    candidate = f"{safe_stem}.apk"
-    # 同名冲突 → 追加 6 位短 hash
+    is_ipa = name.lower().endswith(".ipa")
+    candidate = f"{safe_stem}{'.ipa' if is_ipa else '.apk'}"
+    # 同名冲突 → 追加 6 位短 hash（保留原后缀 .apk/.ipa）
     if (APK_UPLOAD_DIR / candidate).exists():
         short = hashlib.md5(f"{candidate}{time.time()}".encode()).hexdigest()[:6]
-        candidate = f"{safe_stem}_{short}.apk"
+        candidate = f"{safe_stem}_{short}{'.ipa' if is_ipa else '.apk'}"
     return candidate
 
 
@@ -340,6 +341,12 @@ class IosDevice:
         self._last_size: Optional[tuple[int, int]] = None
         # 型号惰性缓存：None=还没查过，""=查过但取不到（避免反复连设备失败拖慢）
         self._model: Optional[str] = None
+        # WDA（WebDriverAgent）全自动点击状态（2026-08）：客户端/会话懒加载，
+        # 全部访问经 self._wda_lock 串行（WDA HTTP 每请求新建连接，无需会话持久）
+        self._wda_client = None          # WdaServiceClient（无可延迟构建）
+        self._wda_session_id: Optional[str] = None
+        self._wda_lock = threading.Lock()
+        self._wda_known_ok = False       # wda_ready 最近一次探测结果（未安装/未签名=False）
         # 注意：tunnel 是进程级单例（见 _ios_tunnel_state），不挂到实例上
 
     @property
@@ -629,6 +636,121 @@ class IosDevice:
             return _ios_async(_list())
         except Exception:
             return []
+
+    # ── WDA（WebDriverAgent）全自动点击（2026-08）──
+    # 路径：设备安装并签名后运行 WDA（Apple 开发者账号或免费签名 7 天；
+    # 详见 GitHub Appium/WebDriverAgent + pymobiledevice3 services/wda.py 说明）。
+    # 客户端直接经 lockdown create_service_connection(8100) 直连设备端口，
+    # 无需本地转发（WdaServiceClient）。命中判定与灰度：check_auto 里 iOS 命中
+    # 跳过模板 → wda_ready() 就绪则 wda_tap（全自动）；未就绪回落到"识别自动、
+    # 点击手动"的半自动提示（AdbError 给出安装指引）。
+
+    def wda_ready(self) -> bool:
+        """WDA 是否可用（探测一次 WDA HTTP /status；异常返回 False）。
+
+        每次命中时探测（命中频率低、单次 ~几十 ms），避免"装/没装"缓存过期。
+        """
+        async def _probe():
+            from pymobiledevice3.services.wda import WdaServiceClient
+            ld = await self._get_lockdown()
+            client = WdaServiceClient(service_provider=ld)
+            st = await client.get_status()   # WdaError/连接异常均落 except
+            return bool(st)
+        try:
+            ok = _ios_async(_probe())
+            self._wda_known_ok = bool(ok)
+            return self._wda_known_ok
+        except Exception:
+            self._wda_known_ok = False
+            return False
+
+    async def _wda_ensure_session(self):
+        """取 WdaServiceClient + 保证 session；会话失效时重建一次。"""
+        from pymobiledevice3.services.wda import WdaServiceClient
+        with self._wda_lock:
+            if self._wda_client is None:
+                ld = await self._get_lockdown()
+                self._wda_client = WdaServiceClient(service_provider=ld)
+            if self._wda_session_id is None:
+                self._wda_session_id = await self._wda_client.start_session()
+            return self._wda_client, self._wda_session_id
+
+    def wda_tap(self, cx: float, cy: float) -> None:
+        """WDA 坐标点击（归一化 cx/cy → WDA 窗口point）。未就绪抛中文指引 AdbError。
+
+        坐标 tap 端点：优先 Appium WDA 扩展 ``/wda/tap/0``，其不可用时回退 W3C
+        ``/actions`` 标准 actions（老/新 WDA 版本差异）。底层复用库内
+        ``_request_json``（HTTP 原语；若 pymobiledevice3 换版需核对 wda.py 签名）。
+        """
+        async def _tap():
+            try:
+                client, sid = await self._wda_ensure_session()
+            except Exception as e:
+                raise AdbError(
+                    f"iOS WDA 未就绪（{e}）。需在设备上签名并运行 WebDriverAgent："
+                    f"参考 Appium/WebDriverAgent 或爱思助手开发者自动化；"
+                    f"免费 Apple ID 可签 7 天。未就绪时将自动退回「手动点击」半自动模式。"
+                ) from e
+            try:
+                win = await client.get_window_size(sid)   # 逻辑 point（适配截图像素归一）
+                x = int(cx * float(win["width"]))
+                y = int(cy * float(win["height"]))
+                try:
+                    await client._request_json(
+                        "POST", f"/session/{sid}/wda/tap/0", {"x": x, "y": y})
+                except Exception:
+                    await client._request_json(
+                        "POST", f"/session/{sid}/actions",
+                        {"actions": [{
+                            "type": "pointer", "id": "finger1",
+                            "parameters": {"pointerType": "touch"},
+                            "actions": [
+                                {"type": "pointerMove", "duration": 0, "x": x, "y": y},
+                                {"type": "pointerDown", "button": 0},
+                                {"type": "pause", "duration": 50},
+                                {"type": "pointerUp", "button": 0},
+                            ],
+                        }]})
+                print(f"[wda] tap ({x},{y}) point · sid={sid[:8]}", flush=True)
+            except Exception as e:
+                # 会话失效等：清 session 下次重建
+                self._wda_session_id = None
+                raise AdbError(f"iOS WDA 点击失败：{e}") from e
+
+        _ios_async(_tap())
+
+    def install_overwrite(self, pkg: str, ipa_path: str) -> list[str]:
+        """iOS 覆盖安装（升级，保数据）：应用已存在 → upgrade，未装 → 全新安装。
+
+        参考脚本（2026-08 用户提供 ios_ipa_installer.py）语义的 10.x 化：
+          - 脚本用 ``pymobiledevice3.ipa.IPA`` 提取 bundle id — 10.x 无该模块，
+            改为用前端已知的 ``pkg``（bundle id）+ ``get_apps()`` 判定，效果等价；
+          - 脚本用 ``ip.upgrade()/ip.install()`` — 10.x ``install`` 已移除，改用
+            ``upgrade(ipa_path: str)`` + ``install_from_local(Path)`` 双路径。
+        与前身 reinstall(卸载+安装) 的区别：**不卸载**，保留本地数据，用于
+        「覆盖安装升级」场景；冷启动采样前需要干净安装时仍走 reinstall。
+        """
+        if not Path(ipa_path).exists():
+            raise AdbError(f"IPA 文件不存在：{ipa_path}")
+        log: list[str] = []
+
+        async def _do_install():
+            ld = await self._get_lockdown()
+            from pymobiledevice3.services.installation_proxy import InstallationProxyService
+            ip = InstallationProxyService(lockdown=ld)
+            apps = await ip.get_apps()  # dict keyed by bundle id
+            if pkg in apps:
+                await ip.upgrade(ipa_path)
+                log.append(f"upgrade(覆盖安装): {pkg} ← {ipa_path}")
+            else:
+                await ip.install_from_local(Path(ipa_path))
+                log.append(f"install(全新安装): {pkg} ← {ipa_path}")
+
+        try:
+            _ios_async(_do_install())
+            return log
+        except Exception as e:
+            raise AdbError(f"iOS 覆盖安装失败：{e}") from e
 
     def reinstall(self, pkg: str, ipa_path: str) -> list[str]:
         """卸载重装 IPA（通过 ideviceinstaller 或 pymobiledevice3）。"""
@@ -1200,17 +1322,20 @@ class DeviceSelectReq(BaseModel):
 
 
 class SetMarkerReq(BaseModel):
-    """设定启动成功模板：以当前屏 (cx, cy) 为中心截小区域存为模板。
+    """设定启动成功模板：以当前 (cx, cy) 为中心的小区域作为模板。
 
-    cx/cy 是归一化坐标（0~1），来自前端点画面或点 OCR 框。
-    box_w/box_h 可选：若来自 OCR 框就用框的归一化尺寸换算像素；否则用默认。
-    serial 可选：指定设备（默认当前选中），多设备各设各的模板。
+    cx/cy 是归一化坐标（0~1），来自前端点画面或 OCR 框。
+    box_w/box_h 可选，仅 OCR 候选框每帧的归一化尺寸换算使用；否则走默认。
+    serial 可选，指定设备（默认当前选中）——多设备各自独立模板。
+    phase：跳过模板专用（2026-08）。首次/二次冷启动的 GM 界面可能不同，
+    各自设模板按阶段生效：'first' / 'second' / 'any'（any=通用，两阶段都匹配）。
     """
     cx: float = Field(ge=0.0, le=1.0)
     cy: float = Field(ge=0.0, le=1.0)
     box_w: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化宽（0~1）
     box_h: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # 归一化高（0~1）
     serial: Optional[str] = None
+    phase: Literal["first", "second", "any"] = "any"
 
 
 class ClearSkipReq(BaseModel):
@@ -1434,6 +1559,9 @@ class ReinstallReq(BaseModel):
     package: str
     apk_path: str
     serial: Optional[str] = None
+    # additive 契约（2026-08 iOS 覆盖安装闭环）：True 时 iOS 走 install_overwrite
+    # （覆盖升级、保数据）；False/缺省 = 原有卸载重装。Android 忽略该字段。
+    overwrite: bool = False
 
 
 class ApkParseReq(BaseModel):
@@ -1487,14 +1615,29 @@ def _err(status: int, msg: str) -> HTTPException:
     return HTTPException(status_code=status, detail=msg)
 
 
-def _target_session(serial: Optional[str]) -> DeviceSession:
-    """带 serial 的请求路由到对应设备会话；未传 serial 用当前选中。
+def _platform_for_serial(serial: str) -> str:
+    """判定 serial 的平台：iOS UDID 集合命中 → 'ios'，否则 'android'。
 
-    多设备并行：不调用 SESSION.select()（那会抢全局选中，并行时互相干扰），
-    直接按 serial 从注册表取/建会话。已有会话优先（保留其平台类型，如 iOS）。
+    根因修复（2026-08）：此前 _target_session 带 serial 直接 session_for(serial)
+    默认建 Android 会话——后端重启后若前端未先 select，iOS UDID 会被建为
+    AdbHelper，截图/列表全部报 "adb: device not found"（真机踩坑，客户端
+    画面丢失）。判定顺序：先查 iOS（usbmuxd，UDID 特征强），再认 Android；
+    查询失败回退 android（与旧行为兼容，保底不至于崩）。
+    """
+    ios_known = IosDevice.devices()  # idevice_id -l，几十 ms
+    if any(d.get("serial") == serial for d in ios_known):
+        return "ios"
+    return "android"
+
+
+def _target_session(serial: Optional[str]) -> DeviceSession:
+    """按 serial 创建/路由到对应设备会话；未给 serial 用当前选中。
+
+    多设备场景下：不依赖 SESSION.select()（那是全局选中，会有时序竞争），
+    直接按 serial 注册表取/建会话，建会话时带平台判定（iOS/Android）。
     """
     if serial:
-        return SESSION.session_for(serial)
+        return SESSION.session_for(serial, _platform_for_serial(serial))
     ds = SESSION.current_session
     if ds is None:
         raise AdbError("未选择设备，请先在左上角连接设备")
@@ -1650,8 +1793,8 @@ async def upload_apk(file: UploadFile) -> dict:
       - saved_name：实际存盘文件名（已过滤）
       - size_bytes：精确字节数
     """
-    if not file.filename or not file.filename.lower().endswith(".apk"):
-        raise _err(400, "请上传 .apk 文件")
+    if not file.filename or not file.filename.lower().endswith((".apk", ".ipa")):
+        raise _err(400, "请上传 .apk / .ipa 文件")
     APK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     saved_name = _safe_apk_filename(file.filename)
     target = APK_UPLOAD_DIR / saved_name
@@ -1689,25 +1832,74 @@ def current_device() -> dict:
     return SESSION.current()
 
 
+def _ipa_bundle_info(path: str | Path) -> dict:
+    """IPA（ZIP）解析 bundle id / 版本 / 显示名——标准库 zipfile + plistlib，零新依赖。
+
+    背景（2026-08 闭环）：10.x 无 pymobiledevice3.ipa 模块（用户参考脚本的
+    ``from pymobiledevice3.ipa import IPA`` 会 ImportError），改用 IPA 本身即可
+    读取的 Info.plist：``Payload/<App>.app/Info.plist`` 的
+    CFBundleIdentifier / CFBundleShortVersionString / CFBundleVersion / 显示名。
+    只读目标条目，不整包解压（IPA 常 >100MB）。返回与 parse_apk(APK) 同构字段。
+    """
+    import plistlib
+    import zipfile
+
+    p = Path(path)
+    try:
+        with zipfile.ZipFile(p) as zf:
+            plist_name = next(
+                (n for n in zf.namelist()
+                 if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", n)),
+                None,
+            )
+            if plist_name is None:
+                raise AdbError("IPA 缺少 Payload/*.app/Info.plist，不是有效的 iOS 安装包")
+            data = zf.read(plist_name)
+    except AdbError:
+        raise
+    except zipfile.BadZipFile as e:
+        raise AdbError(f"IPA 无法解析（不是有效 ZIP）：{e}") from e
+    except Exception as e:  # 文件不可读/加密/plist 损坏等
+        raise AdbError(f"IPA 解析失败：{e}") from e
+    try:
+        info = plistlib.loads(data)
+    except Exception as e:
+        raise AdbError(f"IPA 的 Info.plist 解析失败：{e}") from e
+    bundle = info.get("CFBundleIdentifier") or ""
+    if not bundle:
+        raise AdbError("IPA 的 Info.plist 缺少 CFBundleIdentifier（包名）")
+    return {
+        "package": str(bundle),
+        "version_name": str(info.get("CFBundleShortVersionString", "") or ""),
+        "version_code": str(info.get("CFBundleVersion", "") or ""),
+        "label": str(info.get("CFBundleDisplayName", "") or info.get("CFBundleName", "") or ""),
+    }
+
+
 @app.post("/api/parse_apk")
 def parse_apk(req: ApkParseReq) -> dict:
-    """解析 APK 的 package/version 元数据，不执行安装。"""
-    if AdbHelper is None:
-        raise _err(500, "ADB helper 未加载")
+    """解析安装包元数据（不执行安装）。.apk → aapt；.ipa → Info.plist（闭环 2026-08）。"""
     try:
-        info = AdbHelper(
-            SESSION._serial,
-            adb_path=ADB_EXE,
-            project_root=ROOT,
-        ).parse_apk(req.apk_path)
-        return {
-            "ok": True,
-            "path": info.path,
-            "package": info.package,
-            "version_name": info.version_name,
-            "version_code": info.version_code,
-            "label": info.label,
-        }
+        if str(req.apk_path).lower().endswith(".ipa"):
+            pkg_meta = _ipa_bundle_info(req.apk_path)  # 抛 AdbError → 走统一 400
+        else:
+            if AdbHelper is None:
+                raise AdbError("ADB helper 未加载")
+            info = AdbHelper(
+                SESSION._serial,
+                adb_path=ADB_EXE,
+                project_root=ROOT,
+            ).parse_apk(req.apk_path)
+            pkg_meta = {
+                "package": info.package,
+                "version_name": info.version_name,
+                "version_code": info.version_code,
+                "label": info.label,
+            }
+        return {"ok": True, "path": req.apk_path, **pkg_meta}
+    except AdbError as exc:
+        # 与 reinstall 同一口径的不可用文案（不回显路径，防文件系统探测）
+        raise _err(400, str(exc)) from exc
     except AdbHelperError as exc:
         # aapt 解析失败的原始信息（含 adb 输出），对排查包体问题有用，保留透传
         raise _err(400, str(exc)) from exc
@@ -2271,8 +2463,15 @@ def set_skip_template(req: SetMarkerReq) -> dict:
 
         ds = _target_session(req.serial)
         with ds.lock:
-            if len(ds._skip_templates) >= SKIP_TEMPLATE_MAX:
-                raise AdbError(f"跳过模板已满（最多 {SKIP_TEMPLATE_MAX} 个），请先清除再添加")
+            # 按 phase 分组上限（2026-08）：首次/二次各自最多 SKIP_TEMPLATE_MAX 个，
+            # total 放宽到 2x+（GM 场景首次/二次界面都设模板时不被总额挤掉）
+            phase_count = sum(1 for t in ds._skip_templates if t.get("phase", "any") == req.phase)
+            total = len(ds._skip_templates)
+            if phase_count >= SKIP_TEMPLATE_MAX or total >= SKIP_TEMPLATE_MAX * 2:
+                raise AdbError(
+                    f"该阶段跳过模板已满（{phase_count}/{SKIP_TEMPLATE_MAX}），"
+                    f"请先清除「{'首次' if req.phase == 'first' else '二次' if req.phase == 'second' else '通用'}」分组模板"
+                )
 
             shot = Path(tempfile.gettempdir()) / f"_cst_skip_src_{os.getpid()}_{_safe_serial(ds.serial)}.png"
             try:
@@ -2307,6 +2506,7 @@ def set_skip_template(req: SetMarkerReq) -> dict:
 
             entry = {
                 "id": next_id,
+                "phase": req.phase,       # 阶段归属：first / second / any
                 "path": path,
                 "cx": cx_n,
                 "cy": cy_n,
@@ -2319,11 +2519,12 @@ def set_skip_template(req: SetMarkerReq) -> dict:
                 "preview_mime": "image/jpeg",
             }
             ds._skip_templates.append(entry)
-            print(f"[skip:{ds.serial}] 添加模板 #{next_id} {actual_w}x{actual_h} @({cx_n:.3f},{cy_n:.3f})", flush=True)
+            print(f"[skip:{ds.serial}] 添加模板 #{next_id} phase={req.phase} {actual_w}x{actual_h} @({cx_n:.3f},{cy_n:.3f})", flush=True)
 
             return {
                 "ok": True,
                 "id": next_id,
+                "phase": req.phase,
                 "width": actual_w,
                 "height": actual_h,
                 "center_x": round(cx_n, 5),
@@ -2344,6 +2545,7 @@ def list_skip_templates(serial: Optional[str] = None) -> dict:
     for t in ds._skip_templates:
         items.append({
             "id": t["id"],
+            "phase": t.get("phase", "any"),
             "width": t["w"],
             "height": t["h"],
             "center_x": round(t["cx"], 5),
@@ -2391,11 +2593,16 @@ def clear_skip_templates(req: ClearSkipReq) -> dict:
 def check_auto(
     check_skips: bool = Query(
         True,
-        description="是否匹配跳过弹窗模板。二次冷启动应传 false（首次装后不会再弹允许类弹窗）",
+        description="是否匹配并跳过弹窗模板。二次冷启动应传 false（首次装后不会再次弹通知权限弹窗）。",
     ),
     serial: Optional[str] = Query(
         None,
-        description="目标设备 serial；不传用当前选中。多设备并行时各自带 serial 轮询",
+        description="目标设备 serial；默认当前选中。多设备并行时用此 serial 查询",
+    ),
+    phase: Optional[str] = Query(
+        None,
+        description="跳过模板阶段（2026-08）：'first'/'second' 只匹配对应阶段与 any 模板；"
+        "缺省不过滤（全部模板都尝试，兼容旧调用）。GM 实验界面首/二次不同应传 phase。",
     ),
 ) -> dict:
     """自动测速轮询（一次截图）：可选先跳过弹窗，再判定启动成功。
@@ -2452,6 +2659,10 @@ def check_auto(
             #    本轮已点过的 skip id 跳过，避免反复 return skipped 堵死启动模板识别
             if check_skips:
                 for t in ds._skip_templates:
+                    # 阶段过滤（2026-08）：phase 指定时只匹配该阶段 + any 模板；
+                    # 缺省（None）不过滤——兼容旧调用（全部尝试）
+                    if phase in ("first", "second") and t.get("phase", "any") not in ("any", phase):
+                        continue
                     if t["id"] in ds._skip_fired_ids:
                         continue
                     matcher = t.get("matcher")
@@ -2475,6 +2686,58 @@ def check_auto(
                         continue
                     if now - float(t.get("last_tap_at") or 0) < SKIP_TAP_COOLDOWN_S:
                         continue
+                    if ds.platform == "ios":
+                        # iOS：WDA 就绪 → 全自动点击；未就绪 → 半自动（识别自动、点击手动）
+                        # 提示（2026-08 升级：pymobiledevice3 WdaServiceClient 直连，
+                        # 免本地转发；前提是设备已签名运行 WebDriverAgent）
+                        if ds.device.wda_ready():
+                            ds.device.wda_tap(t["cx"], t["cy"])
+                            t["last_tap_at"] = now
+                            ds._skip_fired_ids.add(t["id"])
+                            ds._marker_hit_streak = 0
+                            ds._marker_seen_below = True
+                            match_ms = (time.perf_counter() - t_match0) * 1000
+                            elapsed_ms = (time.perf_counter() - t0) * 1000
+                            print(
+                                f"[skip] iOS WDA 自动点击 #{t['id']} conf={conf:.3f} @({t['cx']:.3f},{t['cy']:.3f})",
+                                flush=True,
+                            )
+                            return {
+                                "skipped": True,
+                                "skip_id": t["id"],
+                                "skip_confidence": round(conf, 4),
+                                "skip_cx": round(float(t["cx"]), 5),
+                                "skip_cy": round(float(t["cy"]), 5),
+                                "check_skips": True,
+                                "hit": False,
+                                "confidence": 0.0,
+                                "ms": round(elapsed_ms, 1),
+                                "shot_ms": round(shot_ms, 1),
+                                "match_ms": round(match_ms, 1),
+                                "shot_via": shot_via,
+                            }
+                        # 半自动：识别自动、点击手动（详见 iOS 分支注释）
+                        t["last_tap_at"] = now      # 复用为提示节流（1.5s 一次）
+                        ds._marker_hit_streak = 0
+                        ds._marker_seen_below = True
+                        match_ms = (time.perf_counter() - t_match0) * 1000
+                        elapsed_ms = (time.perf_counter() - t0) * 1000
+                        print(
+                            f"[skip] iOS 检测到界面 #{t['id']} conf={conf:.3f} —— WDA 未就绪，提示用户手动点（半自动）",
+                            flush=True,
+                        )
+                        return {
+                            "skipped": True,
+                            "skip_id": t["id"],
+                            "skip_manual_pending": True,   # additive：前端据此提示手动点击
+                            "check_skips": True,
+                            "hit": False,
+                            "confidence": 0.0,
+                            "ms": round(elapsed_ms, 1),
+                            "shot_ms": round(shot_ms, 1),
+                            "match_ms": round(match_ms, 1),
+                            "shot_via": shot_via,
+                        }
                     ds.device.tap_norm(t["cx"], t["cy"])
                     t["last_tap_at"] = now
                     ds._skip_fired_ids.add(t["id"])
@@ -2713,8 +2976,15 @@ def reinstall(req: ReinstallReq) -> dict:
     print(f"[reinstall:{ds.serial}] 开始 pkg={package} apk={apk.name} size={apk.stat().st_size}", flush=True)
     try:
         with ds.lock:
-            print("[reinstall] 已拿到设备锁，执行 uninstall…", flush=True)
-            log = ds.device.reinstall(package, req.apk_path)
+            if req.overwrite:
+                # 覆盖安装（升级保数据）：两端同签名（AdbHelper.install_overwrite /
+                # IosDevice.install_overwrite）。iOS 内部按 get_apps 判定 upgrade /
+                # install_from_local；GP 走单条 adb install -r（2026-08 闭环同步）
+                print("[reinstall] 覆盖安装模式（不卸载，保数据）…", flush=True)
+                log = ds.device.install_overwrite(package, req.apk_path)
+            else:
+                print("[reinstall] 已拿到设备锁，执行 uninstall…", flush=True)
+                log = ds.device.reinstall(package, req.apk_path)
     except AdbOpError as e:
         print(f"[reinstall] 失败：{e}", flush=True)
         return {"ok": False, "error": str(e), "log": [], "apk_info": apk_info}
