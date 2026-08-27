@@ -1615,6 +1615,12 @@ def _err(status: int, msg: str) -> HTTPException:
     return HTTPException(status_code=status, detail=msg)
 
 
+# 平台判定缓存：serial -> (platform, monotonic 时间戳)。module 顶层字典 +
+# GIL 原子读写，无锁足够（最坏情况重复判定一次，无害）。
+_platform_cache: dict[str, tuple[str, float]] = {}
+_PLATFORM_TTL_S = 60.0
+
+
 def _platform_for_serial(serial: str) -> str:
     """判定 serial 的平台：iOS UDID 集合命中 → 'ios'，否则 'android'。
 
@@ -1623,11 +1629,23 @@ def _platform_for_serial(serial: str) -> str:
     AdbHelper，截图/列表全部报 "adb: device not found"（真机踩坑，客户端
     画面丢失）。判定顺序：先查 iOS（usbmuxd，UDID 特征强），再认 Android；
     查询失败回退 android（与旧行为兼容，保底不至于崩）。
+
+    性能（2026-08 复审补丁）：判定实测 iOS ~1.2s / Android ~70ms（idevice_id -l
+    子进程），而本函数位于所有带 serial 请求的热路径上（并行轮询数百 ms 一次）
+    ——必须缓存。TTL 60s：同一 serial 中途换平台在物理上不存在（UDID 不复用），
+    缓存绝对安全；重新插拔/换线不影响（serial 不变）。
     """
-    ios_known = IosDevice.devices()  # idevice_id -l，几十 ms
-    if any(d.get("serial") == serial for d in ios_known):
-        return "ios"
-    return "android"
+    now = time.monotonic()
+    cached = _platform_cache.get(serial)
+    if cached is not None and (now - cached[1]) < _PLATFORM_TTL_S:
+        return cached[0]
+    try:
+        ios_known = IosDevice.devices()  # idevice_id -l（缓存命中时不执行）
+    except Exception:
+        ios_known = []
+    platform = "ios" if any(d.get("serial") == serial for d in ios_known) else "android"
+    _platform_cache[serial] = (platform, now)
+    return platform
 
 
 def _target_session(serial: Optional[str]) -> DeviceSession:
@@ -1637,6 +1655,7 @@ def _target_session(serial: Optional[str]) -> DeviceSession:
     直接按 serial 注册表取/建会话，建会话时带平台判定（iOS/Android）。
     """
     if serial:
+        # 平台判定有 TTL 缓存（60s）：热路径上避免每请求跑一次 idevice_id -l
         return SESSION.session_for(serial, _platform_for_serial(serial))
     ds = SESSION.current_session
     if ds is None:
