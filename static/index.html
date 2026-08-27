@@ -811,7 +811,10 @@
             </div>
             <div id="skipClearRow" class="mt-1.5 flex items-center justify-between">
               <span id="skipStatus" class="text-[9px] font-mono text-on-surface-variant"></span>
-              <button id="clearSkipBtn" class="px-2 py-1 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono transition">清除全部</button>
+              <div class="flex items-center gap-1.5">
+                <button id="wdaLaunchBtn" class="px-2 py-1 bg-surface-container-high border border-primary/30 text-on-surface hover:text-primary rounded text-xs font-mono transition" title="iOS 全自动点击前置：在设备上启动已签名安装的 WebDriverAgent（一次点击，常驻）。未安装时提示安装引导。Android 忽略。">▶ 启动 WDA</button>
+                <button id="clearSkipBtn" class="px-2 py-1 bg-surface-container-high border border-outline-variant text-on-surface-variant hover:bg-danger/10 hover:text-danger rounded text-xs font-mono transition">清除全部</button>
+              </div>
             </div>
           </details>
         </div>
@@ -4594,6 +4597,27 @@ $('clearSkipBtn').addEventListener('click', async () => {
     setState('ok', '已清除全部跳过模板');
   } catch (e) {
     uiAlert('清除失败', e.message, 'error');
+  }
+});
+
+// ── iOS WDA 启动（全自动点击前置）──
+// 未装 Runner → 400 弹出安装指引；已在跑/成功拉起 → 日志确认。
+// Android 下点它后端返回 n/a（无害），按钮仅在 iOS 会看到实际效果。
+$('wdaLaunchBtn')?.addEventListener('click', async () => {
+  const btn = $('wdaLaunchBtn');
+  btn.disabled = true; btn.textContent = '启动中...';
+  try {
+    const serial = $('deviceSel').value || undefined;
+    const qs = serial ? '?serial=' + encodeURIComponent(serial) : '';
+    const r = await apiFetch(API + '/api/wda_launch' + qs, { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) { uiAlert('WDA 启动失败', j.detail || '未知错误', 'error'); return; }
+    setState('ok', `WDA：${j.status} · 之后命中跳过模板将自动点击`);
+    autoLog('OK', 'WDA', `WDA 状态：${j.status}`);
+  } catch (e) {
+    uiAlert('WDA 启动失败', e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '▶ 启动 WDA';
   }
 });
 

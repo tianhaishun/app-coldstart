@@ -321,9 +321,28 @@ class IosLoop:
         self._loop.run_forever()
 
     def run(self, coro, timeout: float = 120.0):
-        """把协程提交到常驻 loop 并阻塞等待结果（线程安全）。"""
+        """把协程提交到常驻 loop 并等待完成（线程安全）。"""
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout=timeout)
+
+    def run_background(self, coro):
+        """把协程提交到常驻 loop 但**不等待**——用于长期驻留服务（如 WDA runner）。
+
+        返回 concurrent.futures.Future（.done()/.cancel() 可查状态）；异常不抛给
+        调用方，通过 done 回调落日志。
+        """
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+        def _log_exc(f):
+            try:
+                exc = f.exception()
+                if exc is not None:
+                    print(f"[ios-loop] 后台协程异常退出：{exc}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+
+        fut.add_done_callback(_log_exc)
+        return fut
 
 
 class IosDevice:
@@ -347,6 +366,9 @@ class IosDevice:
         self._wda_session_id: Optional[str] = None
         self._wda_lock = threading.Lock()
         self._wda_known_ok = False       # wda_ready 最近一次探测结果（未安装/未签名=False）
+        # XCUITest 启动器后台任务（拉起设备上的 WebDriverAgentRunner 常驻进程，
+        # 等价 tidevice xctest / Mac Xcode 的角色——Windows 无 Mac 也能启动 WDA）
+        self._wda_xctest_task: Optional[asyncio.Task] = None
         # 注意：tunnel 是进程级单例（见 _ios_tunnel_state），不挂到实例上
 
     @property
@@ -648,7 +670,9 @@ class IosDevice:
     def wda_ready(self) -> bool:
         """WDA 是否可用（探测一次 WDA HTTP /status；异常返回 False）。
 
-        每次命中时探测（命中频率低、单次 ~几十 ms），避免"装/没装"缓存过期。
+        命中频率低、单次 ~几十 ms。未就绪时若设备装了签名 Runner 且尚未被
+        本进程启动过，会尝试经 XCUITestService 自动拉起（等价 tidevice xctest，
+        Windows 无 Mac 也可用），再探测一次。
         """
         async def _probe():
             from pymobiledevice3.services.wda import WdaServiceClient
@@ -658,11 +682,97 @@ class IosDevice:
             return bool(st)
         try:
             ok = _ios_async(_probe())
-            self._wda_known_ok = bool(ok)
-            return self._wda_known_ok
+            if ok:
+                self._wda_known_ok = True
+                return True
+        except Exception:
+            pass
+        # 未就绪：尝试自动拉起设备上的 WDA Runner（每次 miss 只试一次，防风暴）
+        launched = False
+        try:
+            launched = bool(self.wda_launch())
+        except Exception as e:
+            print(f"[wda] 启动 WebDriverAgent 失败：{e}", file=sys.stderr, flush=True)
+        if not launched:
+            self._wda_known_ok = False
+            return False
+        # 拉起后给 WDA 起服务的时间，再探测一次
+        time.sleep(3.0)
+        try:
+            ok2 = bool(_ios_async(_probe()))
+            self._wda_known_ok = ok2
+            return ok2
         except Exception:
             self._wda_known_ok = False
             return False
+
+    WDA_RUNNER_BUNDLE_ID = "com.facebook.WebDriverAgentRunner.xctrunner"
+
+    def wda_launch(self, runner_bundle_id: Optional[str] = None,
+                   target_bundle_id: Optional[str] = None) -> bool:
+        """在设备上经 XCUITestService 启动已签名的 WebDriverAgentRunner（常驻）。
+
+        等价 tidevice xctest / Mac Xcode 的"启动 WDA"步骤（Windows 可用）：
+          1) 前提：Runner 已签名并安装到 iPhone（一次性；爱思助手/Appium WDA 构建）
+          2) TestConfig.create_for 校验安装并组装配置（target 可选=纯驱动模式，
+             只做点击驱动时不需要绑定被测 App）
+          3) XCUITestService.run() 阻塞至测试计划结束——WDA runner 设计为长期
+             运行，所以整个协程（含它新建的 lockdown 连接）**整体提交到 IosLoop
+             常驻 loop 后台执行**：asyncio 对象绑定创建它的 loop，跨 loop 使用
+             套接字会失败（同 tunnel 教训）。
+
+        返回 True=已在运行或成功拉起。重复调用幂等（已有后台任务则直接 True）。
+        未安装 Runner 抛 AdbError（AppNotInstalledError → 中文指引）。
+        """
+        rid = runner_bundle_id or self.WDA_RUNNER_BUNDLE_ID
+
+        async def _launch_and_serve():
+            """在 IosLoop 上执行：建 lockdown → 组配置 → run() 长驻。"""
+            from pymobiledevice3.lockdown import create_using_usbmux
+            from pymobiledevice3.services.dvt.testmanaged.xcuitest import (
+                TestConfig,
+                XCUITestService,
+            )
+            ld = await create_using_usbmux(serial=self.udid)
+            try:
+                cfg = await TestConfig.create_for(ld, runner_bundle_id=rid,
+                                                  target_bundle_id=target_bundle_id)
+                svc = XCUITestService(ld)
+                # WDA runner 常驻：不设完成超时；断开/被杀 → 异常落 run_background 日志
+                await svc.run(cfg, timeout=None)
+            except AdbError:
+                raise
+            except Exception as e:
+                raise AdbError(f"WDA 启动失败：{e}") from e
+
+        with self._wda_lock:
+            if self._wda_xctest_task is not None and not self._wda_xctest_task.done():
+                return True   # 已在跑（幂等）
+        # AppNotInstalledError 发生在 IosLoop 后台——无法同步捕获。先用一次同步
+        # 的安装校验（InstallationProxy get_apps）把「未装」挡在前台报错：
+        try:
+            def _check_installed():
+                async def _q():
+                    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+                    ld = await self._get_lockdown()
+                    async with InstallationProxyService(lockdown=ld) as ip:
+                        apps = await ip.get_apps(bundle_identifiers=[rid])
+                    return rid in apps
+                return _ios_async(_q())
+            if not _check_installed():
+                raise AdbError(
+                    f"设备上未找到 WebDriverAgent（{rid}）。"
+                    f"请先构建并签名安装：github.com/appium/WebDriverAgent 或爱思助手"
+                    f"「开发者自动化」（免费 Apple ID 可签 7 天）。安装后无需重启本工具，"
+                    f"直接重新点「启动 WDA」即可。"
+                )
+        except AdbError:
+            raise
+        except Exception as e:
+            raise AdbError(f"WDA 启动前校验失败：{e}") from e
+
+        self._wda_xctest_task = IosLoop().run_background(_launch_and_serve())
+        return True
 
     async def _wda_ensure_session(self):
         """取 WdaServiceClient + 保证 session；会话失效时重建一次。"""
@@ -1661,6 +1771,32 @@ def _target_session(serial: Optional[str]) -> DeviceSession:
     if ds is None:
         raise AdbError("未选择设备，请先在左上角连接设备")
     return ds
+
+
+@app.post("/api/wda_launch")
+def wda_launch_endpoint(serial: Optional[str] = None) -> dict:
+    """iOS：经 XCUITestService 启动设备上的 WebDriverAgent（常驻）。
+
+    未装 Runner → 400 + 中文安装指引；已在跑/成功拉起 → {ok, status}。
+    Android 忽略（返回 ok=True, n/a）。
+    """
+    try:
+        ds = _target_session(serial)
+        if ds.platform != "ios":
+            return {"ok": True, "status": "n/a (android)"}
+        try:
+            if ds.device.wda_ready():
+                return {"ok": True, "status": "already-running"}
+            ds.device.wda_launch()
+            # 拉起后给 runner 起服务时间，复测一次
+            time.sleep(3.0)
+            ok = ds.device.wda_ready()
+            return {"ok": True,
+                    "status": "running" if ok else "launched-not-ready-yet"}
+        except AdbError as e:
+            raise _err(400, str(e))
+    except AdbOpError as e:
+        raise _err(400, str(e))
 
 
 @app.get("/api/health")
